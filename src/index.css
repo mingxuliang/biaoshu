@@ -1,0 +1,338 @@
+@import url('https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700;900&family=Orbitron:wght@400;500;600;700;800;900&family=Rajdhani:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* StyleSystem palette — 专业企业级SaaS灰白底+标准蓝 */
+  --background-50: 0.97 0.005 255;
+  --background-100: 0.99 0 0;
+  --background-200: 0.94 0.005 255;
+  --background-300: 0.88 0.008 255;
+  --background-400: 0.80 0.01 255;
+  --background-500: 0.70 0.012 255;
+  --background-600: 0.60 0.015 255;
+  --background-700: 0.50 0.018 255;
+  --background-800: 0.40 0.02 255;
+  --background-900: 0.30 0.022 255;
+  --background-950: 0.22 0.025 255;
+
+  /* Primary: 标准企业蓝 #165DFF */
+  --primary-50: 0.96 0.025 255;
+  --primary-100: 0.92 0.05 255;
+  --primary-200: 0.86 0.085 255;
+  --primary-300: 0.76 0.12 255;
+  --primary-400: 0.65 0.16 255;
+  --primary-500: 0.56 0.195 255;
+  --primary-600: 0.50 0.18 255;
+  --primary-700: 0.44 0.16 255;
+  --primary-800: 0.38 0.14 255;
+  --primary-900: 0.32 0.12 255;
+  --primary-950: 0.26 0.10 255;
+
+  /* Accent: 浅蓝辅助 */
+  --accent-50: 0.97 0.02 240;
+  --accent-100: 0.94 0.04 240;
+  --accent-200: 0.88 0.06 240;
+  --accent-300: 0.80 0.08 240;
+  --accent-400: 0.72 0.10 240;
+  --accent-500: 0.64 0.12 240;
+  --accent-600: 0.58 0.11 240;
+  --accent-700: 0.50 0.10 240;
+  --accent-800: 0.42 0.09 240;
+  --accent-900: 0.35 0.08 240;
+  --accent-950: 0.28 0.07 240;
+
+  /* Secondary: 中性灰 */
+  --secondary-50: 0.97 0 0;
+  --secondary-100: 0.94 0 0;
+  --secondary-200: 0.89 0 0;
+  --secondary-300: 0.82 0 0;
+  --secondary-400: 0.74 0 0;
+  --secondary-500: 0.65 0 0;
+  --secondary-600: 0.56 0 0;
+  --secondary-700: 0.47 0 0;
+  --secondary-800: 0.38 0 0;
+  --secondary-900: 0.30 0 0;
+  --secondary-950: 0.23 0 0;
+
+  /* Foreground: 深灰文字 */
+  --foreground-50: 0.99 0.002 255;
+  --foreground-100: 0.96 0.003 255;
+  --foreground-200: 0.92 0.004 255;
+  --foreground-300: 0.86 0.005 255;
+  --foreground-400: 0.78 0.006 255;
+  --foreground-500: 0.68 0.008 255;
+  --foreground-600: 0.58 0.01 255;
+  --foreground-700: 0.48 0.012 255;
+  --foreground-800: 0.38 0.014 255;
+  --foreground-900: 0.28 0.016 255;
+  --foreground-950: 0.20 0.018 255;
+
+  --font-heading: "Orbitron", "Noto Sans SC", "Inter", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-body: "Inter", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-label: "Rajdhani", "Chakra Petch", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  @apply bg-background-50 text-foreground-950 font-sans antialiased;
+  font-family: var(--font-body);
+  overflow-x: hidden;
+}
+
+::selection {
+  background: oklch(var(--primary-500) / 0.2);
+  color: oklch(var(--foreground-950));
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: oklch(var(--background-200));
+}
+::-webkit-scrollbar-thumb {
+  background: oklch(var(--background-400));
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(var(--background-500));
+}
+
+@layer utilities {
+  .bg-grid {
+    background-image: linear-gradient(
+        to right,
+        oklch(var(--foreground-950) / 0.03) 1px,
+        transparent 1px
+      ),
+      linear-gradient(
+        to bottom,
+        oklch(var(--foreground-950) / 0.03) 1px,
+        transparent 1px
+      );
+    background-size: 48px 48px;
+  }
+
+  .text-gradient {
+    background-image: linear-gradient(
+      110deg,
+      oklch(var(--primary-500)),
+      oklch(var(--primary-400))
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .glass {
+    background: oklch(var(--background-100) / 0.9);
+    border: 1px solid oklch(var(--foreground-950) / 0.06);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  .reveal {
+    opacity: 0;
+    transform: translateY(20px);
+    transition: opacity 0.5s cubic-bezier(0.22, 1, 0.36, 1),
+      transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .reveal.in-view {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes popIn {
+  from {
+    opacity: 0;
+    transform: scale(0.98) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes typingDot {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-2px); }
+}
+
+@keyframes blinkBar {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.2s ease-out both;
+}
+.animate-pop-in {
+  animation: popIn 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.animate-slide-up {
+  animation: slideUp 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.animate-typing-dot {
+  animation: typingDot 1.2s ease-in-out infinite;
+}
+.animate-blink-bar {
+  animation: blinkBar 0.9s step-end infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.animate-shimmer {
+  background: linear-gradient(90deg, oklch(var(--primary-500)), oklch(var(--primary-300)), oklch(var(--primary-500)));
+  background-size: 200% 100%;
+  animation: shimmer 2.5s linear infinite;
+}
+
+/* 表单反垃圾辅助字段 */
+input[name="website_alt"] {
+  position: absolute;
+  left: -9999px;
+  top: auto;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ---------- Word 式编辑器主题 ---------- */
+.lex-editor {
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.85;
+  color: oklch(var(--foreground-800));
+  caret-color: oklch(var(--primary-600));
+  outline: none;
+}
+.lex-editor .editor-paragraph {
+  margin: 0 0 0.55em;
+}
+.lex-editor p[data-lex-block="true"] {
+  margin: 0 0 0.55em;
+}
+.lex-editor .editor-heading-h1 {
+  font-size: 22px;
+  font-weight: 700;
+  color: oklch(var(--foreground-950));
+  font-family: var(--font-heading);
+  margin: 1em 0 0.5em;
+  letter-spacing: 0.01em;
+}
+.lex-editor .editor-heading-h2 {
+  font-size: 18px;
+  font-weight: 700;
+  color: oklch(var(--primary-600));
+  font-family: var(--font-heading);
+  margin: 1em 0 0.45em;
+}
+.lex-editor .editor-heading-h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: oklch(var(--foreground-900));
+  margin: 0.8em 0 0.4em;
+}
+.lex-editor .editor-text-bold { font-weight: 700; }
+.lex-editor .editor-text-italic { font-style: italic; }
+.lex-editor .editor-text-underline { text-decoration: underline; }
+.lex-editor .editor-text-strikethrough { text-decoration: line-through; }
+.lex-editor .editor-text-code {
+  background: oklch(var(--secondary-100));
+  padding: 0 4px;
+  border-radius: 4px;
+  font-family: ui-monospace, monospace;
+  font-size: 0.9em;
+}
+.lex-editor ul { margin: 0.4em 0; padding-left: 1.4em; list-style: disc; }
+.lex-editor ol { margin: 0.4em 0; padding-left: 1.4em; list-style: decimal; }
+.lex-editor .editor-link { color: oklch(var(--primary-600)); text-decoration: underline; }
+.lex-editor table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.6em 0;
+}
+.lex-editor td, .lex-editor th {
+  border: 1px solid oklch(var(--background-300));
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.lex-editor th { background: oklch(var(--background-100)); font-weight: 600; }
+
+/* 问题句高亮底色（按严重级） */
+.mark-fatal {
+  background-color: oklch(0.6 0.16 20 / 0.28);
+  color: oklch(0.45 0.15 20);
+  border-radius: 3px;
+  padding: 0 1px;
+}
+.mark-downgrade {
+  background-color: oklch(0.68 0.16 55 / 0.26);
+  color: oklch(0.52 0.13 55);
+  border-radius: 3px;
+  padding: 0 1px;
+}
+.mark-deduct {
+  background-color: oklch(0.78 0.15 90 / 0.26);
+  color: oklch(0.6 0.12 90);
+  border-radius: 3px;
+  padding: 0 1px;
+}
+.mark-suggest {
+  background-color: oklch(0.66 0.13 250 / 0.22);
+  color: oklch(0.5 0.1 250);
+  border-radius: 3px;
+  padding: 0 1px;
+}
+/* 活动问题句闪烁定位 */
+.issue-flash {
+  animation: issueFlash 1.6s ease-in-out 2;
+}
+@keyframes issueFlash {
+  0%, 100% { outline: 2px solid transparent; }
+  25% { outline: 2px solid oklch(var(--primary-500) / 0.9); }
+  50% { outline: 2px solid transparent; }
+  75% { outline: 2px solid oklch(var(--primary-500) / 0.9); }
+}
+/* 编辑纸张 */
+.word-sheet {
+  background: oklch(var(--background-100));
+  border: 1px solid oklch(var(--background-200));
+  box-shadow: 0 1px 6px oklch(var(--foreground-950) / 0.06);
+  min-height: 620px;
+}
+.word-sheet--columns {
+  column-count: 2;
+  column-gap: 2.5rem;
+}
+.word-sheet--columns > * {
+  break-inside: avoid;
+}
