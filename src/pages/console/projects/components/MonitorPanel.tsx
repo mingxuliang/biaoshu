@@ -10,23 +10,12 @@ import {
   Tooltip,
   Legend,
   ReferenceLine,
-  PieChart,
-  Pie,
-  Cell,
 } from "recharts";
 import type { Project } from "@/mocks/projects";
 
 function cssColor(name: string) {
   return `oklch(${getComputedStyle(document.documentElement).getPropertyValue(name).trim()})`;
 }
-
-const statusColorKey: Record<string, string> = {
-  撰写中: "primary",
-  评标中: "accent",
-  已提交: "secondary",
-  已中标: "primary600",
-  未中标: "secondary400",
-};
 
 const riskMeta: Record<string, { icon: string; cls: string }> = {
   未出分: { icon: "ri-flag-2-line", cls: "bg-accent-50 text-accent-600" },
@@ -40,8 +29,6 @@ export default function MonitorPanel({ projects }: { projects: Project[] }) {
     () => ({
       primary: cssColor("--primary-500"),
       accent: cssColor("--accent-500"),
-      secondary: cssColor("--secondary-500"),
-      primary600: cssColor("--primary-600"),
       secondary400: cssColor("--secondary-400"),
       bg300: cssColor("--background-300"),
       fg500: cssColor("--foreground-500"),
@@ -49,8 +36,6 @@ export default function MonitorPanel({ projects }: { projects: Project[] }) {
     }),
     [],
   );
-
-  const statusColor = (status: string) => colors[statusColorKey[status]] || colors.secondary;
 
   const chartData = useMemo(
     () =>
@@ -61,14 +46,6 @@ export default function MonitorPanel({ projects }: { projects: Project[] }) {
       })),
     [projects],
   );
-
-  const statusDist = useMemo(() => {
-    const map: Record<string, number> = {};
-    projects.forEach((p) => {
-      map[p.status] = (map[p.status] || 0) + 1;
-    });
-    return Object.entries(map).map(([status, count]) => ({ status, count }));
-  }, [projects]);
 
   const risks = useMemo(() => {
     const items: { id: string; label: string; desc: string; key: string }[] = [];
@@ -88,7 +65,7 @@ export default function MonitorPanel({ projects }: { projects: Project[] }) {
     submitting.forEach((p) =>
       items.push({ id: `t-${p.id}`, label: p.name, desc: "已进入评标预演，跟踪排名与风险项", key: "待提交" }),
     );
-    return items.slice(0, 5);
+    return items;
   }, [projects]);
 
   const chartTipStyle = {
@@ -100,9 +77,8 @@ export default function MonitorPanel({ projects }: { projects: Project[] }) {
   };
 
   return (
-    <div className="mb-5 grid grid-cols-1 gap-4 xl:grid-cols-3">
-      {/* 进度 + AI 评分组合图 */}
-      <div className="rounded-lg border border-background-300 bg-background-100 p-5 xl:col-span-2">
+    <div className="mb-5 grid grid-cols-1 items-start gap-4 xl:grid-cols-3">
+      <div className="flex flex-col rounded-lg border border-background-300 bg-background-100 p-5 xl:col-span-2">
         <div className="mb-1 flex items-center justify-between">
           <h3 className="flex items-center gap-1.5 text-sm font-semibold text-foreground-900">
             <i className="ri-line-chart-line text-primary-500 text-sm"></i>
@@ -141,68 +117,27 @@ export default function MonitorPanel({ projects }: { projects: Project[] }) {
         </div>
       </div>
 
-      {/* 状态分布 + 风险 */}
-      <div className="flex flex-col gap-4">
-        <div className="rounded-lg border border-background-300 bg-background-100 p-5">
-          <h3 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-foreground-900">
-            <i className="ri-pie-chart-2-line text-primary-500 text-sm"></i>
-            项目状态分布
-          </h3>
-          <div className="flex items-center gap-2">
-            <div className="h-36 w-36 shrink-0">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={statusDist}
-                    dataKey="count"
-                    nameKey="status"
-                    innerRadius={44}
-                    outerRadius={62}
-                    paddingAngle={3}
-                    strokeWidth={0}
-                  >
-                    {statusDist.map((entry) => (
-                      <Cell key={entry.status} fill={statusColor(entry.status)} />
-                    ))}
-                  </Pie>
-                  <Tooltip contentStyle={chartTipStyle} />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-            <div className="flex-1 space-y-1.5">
-              {statusDist.map((item) => (
-                <div key={item.status} className="flex items-center gap-2 text-xs">
-                  <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: statusColor(item.status) }} />
-                  <span className="flex-1 text-foreground-700">{item.status}</span>
-                  <span className="font-label font-medium text-foreground-900">{item.count}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div className="rounded-lg border border-background-300 bg-background-100 p-5">
-          <h3 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-foreground-900">
-            <i className="ri-notification-3-line text-accent-500 text-sm"></i>
-            进程风险提示
-          </h3>
-          <ul className="space-y-2">
-            {risks.map((risk) => (
-              <li key={risk.id} className="flex items-start gap-2.5 rounded-md bg-background-50 px-2.5 py-2">
-                <span className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${riskMeta[risk.key].cls}`}>
-                  <i className={`${riskMeta[risk.key].icon} text-xs`}></i>
-                </span>
-                <div className="min-w-0">
-                  <div className="truncate text-xs font-medium text-foreground-900">{risk.label}</div>
-                  <div className="text-[11px] text-foreground-500">{risk.desc}</div>
-                </div>
-              </li>
-            ))}
-            {risks.length === 0 && (
-              <li className="text-xs text-foreground-500">暂无风险项，所有项目进程健康。</li>
-            )}
-          </ul>
-        </div>
+      <div className="flex h-auto min-h-0 flex-col rounded-lg border border-background-300 bg-background-100 p-5 xl:h-[22.5rem]">
+        <h3 className="mb-2 flex shrink-0 items-center gap-1.5 text-sm font-semibold text-foreground-900">
+          <i className="ri-notification-3-line text-accent-500 text-sm"></i>
+          进程风险提示
+        </h3>
+        <ul className="min-h-0 flex-1 space-y-2 overflow-y-auto">
+          {risks.map((risk) => (
+            <li key={risk.id} className="flex items-start gap-2.5 rounded-md bg-background-50 px-2.5 py-2">
+              <span className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${riskMeta[risk.key].cls}`}>
+                <i className={`${riskMeta[risk.key].icon} text-xs`}></i>
+              </span>
+              <div className="min-w-0">
+                <div className="truncate text-xs font-medium text-foreground-900">{risk.label}</div>
+                <div className="text-[11px] text-foreground-500">{risk.desc}</div>
+              </div>
+            </li>
+          ))}
+          {risks.length === 0 && (
+            <li className="text-xs text-foreground-500">暂无风险项，所有项目进程健康。</li>
+          )}
+        </ul>
       </div>
     </div>
   );

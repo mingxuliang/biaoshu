@@ -4,14 +4,16 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from ..models import BidDocument, EvaluationChecklist, ReviewFinding, ReviewRun
-from . import e1_veto, e2_business, e3_semantic, e4_duplicate_filler, e5_layout
+from ..models import BidDocument, ReviewFinding, ReviewRun
+from .. import storage
+from . import e1_veto, e2_business, e3_semantic, e4_duplicate_filler, e5_layout, rules_config
 from .docx_extract import extract_full_text, extract_paragraphs
-from .rules_data import DEFAULT_WEIGHTS, DIMENSION_LABELS, SEVERITY_PENALTY
+from .review_context import load_review_context
+from .rules_data import DIMENSION_LABELS, SEVERITY_PENALTY
 
 LEVEL_META = {
-    "L1": {"name": "一票否决扫描", "desc": "星号条款、废标条款、资质证件、暗标残留"},
-    "L2": {"name": "商务客观核验", "desc": "业绩匹配度、人员证书、财务一致性、信用材料"},
+    "L1": {"name": "一票否决扫描", "desc": "星号条款、废标条款、资质证件、负数报价、签字盖章"},
+    "L2": {"name": "商务客观核验", "desc": "业绩四件套、财务指标、报价偏离、属地细则"},
     "L3": {"name": "技术标五维打分", "desc": "完整性/针对性/合规性/可落地性/规范性"},
     "L4": {"name": "虚词与模板查重", "desc": "虚词密度、高危句式、相似度比对"},
     "L5": {"name": "版式终审", "desc": "标题层级、目录页码、图表编号、空白页"},
@@ -34,22 +36,6 @@ def _status(score: float, issue_count: int, has_waste: bool) -> str:
     return "通过"
 
 
-def _load_checklist_params(db: Session, project_id: str) -> dict | None:
-    """加载该项目当前锁定的评标尺子（若有），返回其 engine_params_json 供 E1/E2 消费。
-
-    未解析/未锁定尺子时返回 None，E1/E2 会回退到通用正则/关键词，不影响既有行为。
-    """
-    checklist = (
-        db.query(EvaluationChecklist)
-        .filter(EvaluationChecklist.project_id == project_id, EvaluationChecklist.locked == True)  # noqa: E712
-        .order_by(EvaluationChecklist.version.desc())
-        .first()
-    )
-    if not checklist:
-        return None
-    return checklist.engine_params_json or None
-
-
 def run_prereview(db: Session, run_id: str) -> None:
     run = db.get(ReviewRun, run_id)
     if not run:
@@ -59,17 +45,41 @@ def run_prereview(db: Session, run_id: str) -> None:
     db.commit()
 
     doc = db.get(BidDocument, run.bid_document_id)
-    paragraphs = extract_paragraphs(doc.storage_path)
-    full_text = extract_full_text(doc.storage_path)
+    paragraphs: list[dict] = []
+    full_text = ""
+    checklist_params, must_respond = rules_config.load_locked_checklist(db, run.project_id)
+    weights = rules_config.load_active_weights(db)
+    word_rules = rules_config.load_enabled_filler_words(db)
+    thresholds = rules_config.load_thresholds(db)
+    local_items = rules_config.load_enabled_package_items(db)
 
-    checklist_params = _load_checklist_params(db, run.project_id)
+    def _run_with_path(path: str | None):
+        paras: list[dict] = []
+        text = ""
+        if path:
+            try:
+                paras = extract_paragraphs(path)
+                text = extract_full_text(path)
+            except Exception:
+                paras = []
+                text = ""
+        ctx = load_review_context(db, run.project_id, path)
+        e1 = e1_veto.run(paras, checklist_params, must_respond, thresholds, ctx)
+        e2 = e2_business.run(paras, checklist_params, thresholds, local_items, ctx)
+        e4 = e4_duplicate_filler.run(paras, word_rules, thresholds, ctx)
+        e5 = e5_layout.run(path, paras, ctx) if path else []
+        e3 = e3_semantic.run(text, weights)
+        return paras, text, e1, e2, e4, e5, e3, e3["issues"]
 
-    e1_findings = e1_veto.run(paragraphs, checklist_params)
-    e2_findings = e2_business.run(paragraphs, checklist_params)
-    e4_findings = e4_duplicate_filler.run(paragraphs)
-    e5_findings = e5_layout.run(doc.storage_path, paragraphs)
-    e3_result = e3_semantic.run(full_text)
-    e3_findings = e3_result["issues"]
+    if doc and doc.storage_path and storage.exists(doc.storage_path):
+        with storage.as_local(doc.storage_path) as path:
+            paragraphs, full_text, e1_findings, e2_findings, e4_findings, e5_findings, e3_result, e3_findings = (
+                _run_with_path(path)
+            )
+    else:
+        paragraphs, full_text, e1_findings, e2_findings, e4_findings, e5_findings, e3_result, e3_findings = (
+            _run_with_path(None)
+        )
 
     all_findings = e1_findings + e2_findings + e4_findings + e5_findings + e3_findings
 
@@ -81,7 +91,7 @@ def run_prereview(db: Session, run_id: str) -> None:
     }
 
     dims = e3_result["dimensions"]
-    level_scores["L3"] = round(sum(dims[k]["score"] * DEFAULT_WEIGHTS[k] / 100 for k in DEFAULT_WEIGHTS), 1)
+    level_scores["L3"] = round(sum(dims[k]["score"] * weights[k] / 100 for k in weights), 1)
 
     levels_out = []
     for key, meta in LEVEL_META.items():
@@ -100,8 +110,8 @@ def run_prereview(db: Session, run_id: str) -> None:
         )
 
     dimensions_out = [
-        {"name": DIMENSION_LABELS[k], "weight": DEFAULT_WEIGHTS[k], "score": round(dims[k]["score"], 1)}
-        for k in DEFAULT_WEIGHTS
+        {"name": DIMENSION_LABELS[k], "weight": weights[k], "score": round(dims[k]["score"], 1)}
+        for k in weights
     ]
 
     overall = round(sum(level_scores[k] * w for k, w in OVERALL_WEIGHTS.items()), 1)

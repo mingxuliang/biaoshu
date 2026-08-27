@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { OutlineNode } from "@/lib/api";
+import { displayOutlineTitle, isOriginalFormTitle, renumberOutline } from "@/lib/outlineNum";
 
 interface ChapterTreeProps {
   nodes: OutlineNode[];
@@ -32,10 +33,14 @@ function hasChildren(nodes: OutlineNode[], parentId: string): boolean {
 
 function getVisibleNodes(nodes: OutlineNode[]): OutlineNode[] {
   const result: OutlineNode[] = [];
-  for (const root of getTopLevelNodes(nodes)) {
-    result.push(root);
-    if (root.expanded) result.push(...getChildren(nodes, root.id));
-  }
+  const walk = (parentId: string | null) => {
+    const kids = parentId === null ? getTopLevelNodes(nodes) : getChildren(nodes, parentId);
+    for (const n of kids) {
+      result.push(n);
+      if (n.expanded) walk(n.id);
+    }
+  };
+  walk(null);
   return result;
 }
 
@@ -85,7 +90,7 @@ export default function ChapterTree({
   const editInputRef = useRef<HTMLInputElement>(null);
 
   const visibleNodes = getVisibleNodes(nodes);
-  const doneCount = nodes.filter((n) => n.status === "已完成").length;
+  const doneCount = nodes.filter((n) => n.status === "已完成" || n.status === "用原文").length;
   const percent = Math.round((doneCount / Math.max(nodes.length, 1)) * 100);
 
   useEffect(() => {
@@ -129,7 +134,7 @@ export default function ChapterTree({
       switch (action) {
         case "rename": {
           setEditingId(nodeId);
-          setEditValue(node.title);
+          setEditValue(displayOutlineTitle(node.title, node.num));
           break;
         }
         case "moveUp": {
@@ -142,7 +147,7 @@ export default function ChapterTree({
           const bIdx = flat.findIndex((n) => n.id === prevId);
           if (aIdx >= 0 && bIdx >= 0) {
             [flat[aIdx], flat[bIdx]] = [flat[bIdx], flat[aIdx]];
-            onNodesChange(flat);
+            onNodesChange(renumberOutline(flat));
           }
           break;
         }
@@ -156,7 +161,7 @@ export default function ChapterTree({
           const bIdx = flat.findIndex((n) => n.id === nextId);
           if (aIdx >= 0 && bIdx >= 0) {
             [flat[aIdx], flat[bIdx]] = [flat[bIdx], flat[aIdx]];
-            onNodesChange(flat);
+            onNodesChange(renumberOutline(flat));
           }
           break;
         }
@@ -171,7 +176,7 @@ export default function ChapterTree({
           const flat = [...nodes];
           const insertIdx = flat.findIndex((n) => n.id === nodeId);
           flat.splice(insertIdx + 1, 0, created);
-          onNodesChange(flat);
+          onNodesChange(renumberOutline(flat));
           onSelect(newId);
           break;
         }
@@ -185,7 +190,7 @@ export default function ChapterTree({
           const insertIdx = flat.findIndex((n) => n.id === nodeId);
           const lastChildIdx = flat.reduce((last, n, i) => (n.parentId === nodeId ? i : last), insertIdx);
           flat.splice(lastChildIdx + 1, 0, created);
-          onNodesChange(flat);
+          onNodesChange(renumberOutline(flat));
           onSelect(newId);
           break;
         }
@@ -197,7 +202,7 @@ export default function ChapterTree({
           };
           collect(nodeId);
           const next = nodes.filter((n) => !toDelete.has(n.id));
-          onNodesChange(next);
+          onNodesChange(renumberOutline(next));
           if (activeId === nodeId || toDelete.has(activeId)) {
             const first = next[0];
             if (first) onSelect(first.id);
@@ -259,7 +264,7 @@ export default function ChapterTree({
           return (
             <div
               key={node.id}
-              className={`group relative flex cursor-pointer items-center gap-1 py-1 pr-2 transition-colors ${
+              className={`group relative flex cursor-pointer items-start gap-1 py-1.5 pr-2 transition-colors ${
                 active ? "bg-primary-50" : "hover:bg-background-50"
               }`}
               style={{ paddingLeft: `${level * 16 + 8}px` }}
@@ -276,7 +281,7 @@ export default function ChapterTree({
                     e.stopPropagation();
                     toggleExpand(node.id);
                   }}
-                  className="flex h-4 w-4 shrink-0 cursor-pointer items-center justify-center rounded text-foreground-400 hover:text-foreground-600"
+                  className="mt-0.5 flex h-4 w-4 shrink-0 cursor-pointer items-center justify-center rounded text-foreground-400 hover:text-foreground-600"
                 >
                   <i
                     className={`ri-arrow-right-s-line text-xs transition-transform ${
@@ -285,7 +290,7 @@ export default function ChapterTree({
                   ></i>
                 </button>
               ) : (
-                <span className="h-4 w-4 shrink-0"></span>
+                <span className="mt-0.5 h-4 w-4 shrink-0"></span>
               )}
 
               {/* 状态指示 */}
@@ -296,6 +301,10 @@ export default function ChapterTree({
               ) : node.status === "已完成" ? (
                 <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-primary-400 to-primary-600 text-background-50">
                   <i className="ri-check-line text-[8px]"></i>
+                </span>
+              ) : node.status === "用原文" || isOriginalFormTitle(node.title, node.num) ? (
+                <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-secondary-100 text-secondary-600">
+                  <i className="ri-file-text-line text-[8px]"></i>
                 </span>
               ) : node.status === "生成中" ? (
                 <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-accent-50 text-accent-500">
@@ -309,7 +318,7 @@ export default function ChapterTree({
 
               {/* 章节编号 */}
               <span
-                className={`font-label w-7 shrink-0 text-right text-[11px] ${
+                className={`font-label mt-0.5 min-w-[2.75rem] shrink-0 text-right text-[11px] leading-snug ${
                   active ? "text-primary-600" : "text-foreground-500"
                 }`}
               >
@@ -335,18 +344,18 @@ export default function ChapterTree({
                 />
               ) : (
                 <span
-                  className={`min-w-0 flex-1 truncate text-xs ${
+                  className={`min-w-0 flex-1 whitespace-normal break-words text-xs leading-snug ${
                     active ? "font-medium text-primary-700" : "text-foreground-700"
                   }`}
                 >
-                  {node.title}
+                  {displayOutlineTitle(node.title, node.num)}
                 </span>
               )}
 
               {/* 悬停操作 */}
               {!isEditing && (
                 <div className="hidden items-center gap-0.5 group-hover:flex">
-                  {node.status === "待生成" && (
+                  {node.status === "待生成" && !isOriginalFormTitle(node.title, node.num) && (
                     <button
                       type="button"
                       title="AI 生成本章"
@@ -384,7 +393,7 @@ export default function ChapterTree({
       {/* 底部说明 */}
       <div className="border-t border-background-300 px-3 py-2.5 text-[11px] text-foreground-500">
         <i className="ri-sparkling-2-line mr-1 text-primary-500"></i>
-        大纲由 AI 依据招标文件评分点自动生成
+        功能点逐条对应；其余需求用应标目录覆盖全文，不照搬招标目录
       </div>
 
       {/* 上下文菜单 */}

@@ -54,4 +54,6 @@ def get_current_user(
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(401, "用户不存在，请重新登录")
+    if getattr(user, "disabled", False):
+        raise HTTPException(401, "账号已停用，请联系管理员")
     return user

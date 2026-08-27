@@ -37,6 +37,7 @@ def register(payload: RegisterIn, db: Session = Depends(get_db)) -> AuthOut:
         phone=payload.phone,
         company=payload.company,
         position=payload.position,
+        role="管理员" if db.query(User).count() == 0 else "成员",
     )
     db.add(user)
     db.commit()
@@ -52,6 +53,8 @@ def login(payload: LoginIn, db: Session = Depends(get_db)) -> AuthOut:
     user = db.query(User).filter(User.email == email).first()
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(401, "邮箱或密码不正确")
+    if getattr(user, "disabled", False):
+        raise HTTPException(401, "账号已停用，请联系管理员")
 
     token = create_access_token(user.id)
     return AuthOut(token=token, user=_to_user_out(user))

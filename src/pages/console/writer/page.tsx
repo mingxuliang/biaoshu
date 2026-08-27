@@ -11,6 +11,7 @@ import BidInterpret from "./components/BidInterpret";
 import OutlineStep from "./components/OutlineStep";
 import ContentStep from "./components/ContentStep";
 import { getOrCreateWriterDraft, updateWriterDraft, type OutlineNode, type WriterDraft } from "@/lib/api";
+import { compactOutlineTitles } from "@/lib/outlineNum";
 import type { InterpretSource } from "@/mocks/writerSteps";
 
 interface ToastState {
@@ -31,8 +32,9 @@ export default function WriterPage() {
 
   const [step, setStep] = useState<number>(1);
   const [completed, setCompleted] = useState<Record<number, boolean>>({});
-  const [modelId, setModelId] = useState<string>("glm");
+  const [modelId, setModelId] = useState<string>("deepseek-v4-pro");
   const [selectedKnowledge, setSelectedKnowledge] = useState<string[]>([]);
+  const [selectedProductLibraryId, setSelectedProductLibraryId] = useState<string>("");
   const [interpretSource, setInterpretSource] = useState<InterpretSource>("reuse");
   const [outline, setOutline] = useState<OutlineNode[]>([]);
   const [chapterContents, setChapterContents] = useState<Record<string, string>>({});
@@ -57,11 +59,29 @@ export default function WriterPage() {
       .then((d) => {
         if (cancelled) return;
         setDraft(d);
-        setModelId(d.modelId || "glm");
+        setModelId(!d.modelId || d.modelId === "deepseek" ? "deepseek-v4-pro" : d.modelId);
         setSelectedKnowledge(d.selectedKnowledge || []);
+        setSelectedProductLibraryId(d.selectedProductLibraryId || "");
         setInterpretSource(d.interpretSource || "reuse");
-        setOutline(d.outline || []);
-        setChapterContents(d.chapterContents || {});
+        const compacted = compactOutlineTitles(d.outline || []);
+        setOutline(compacted);
+        const raw = d.outline || [];
+        const outlineChanged =
+          compacted.length !== raw.length ||
+          compacted.some((n, i) => n.title !== raw[i]?.title || n.status !== raw[i]?.status);
+        if (outlineChanged && compacted.length > 0) {
+          updateWriterDraft(d.id, { outline: compacted }).catch(() => {
+            /* 标题收短或固定格式件收叶失败不阻塞进入工作台 */
+          });
+        }
+        const nextContents = { ...(d.chapterContents || {}) };
+        for (const n of compacted) {
+          if (n.status === "用原文" && !nextContents[n.id]) {
+            nextContents[n.id] =
+              `## ${n.title}\n\n本章为招标书已给出的固定格式文件，请直接使用招标书原文填写后打印签字，系统不展开目录、不撰写正文。`;
+          }
+        }
+        setChapterContents(nextContents);
         setSettingsPayload((d.settings as Partial<WriterSettingsPayload>) || {});
         const resumeStep = d.step && d.step >= 1 && d.step <= 4 ? d.step : 1;
         setStep(resumeStep);
@@ -121,6 +141,7 @@ export default function WriterPage() {
       updateWriterDraft(draft.id, {
         modelId,
         selectedKnowledge,
+        selectedProductLibraryId: selectedProductLibraryId || null,
         settings: settings as unknown as Record<string, unknown>,
       }).catch(() => {
         showToast("标书设置保存失败，请检查网络后重试", "error");
@@ -280,9 +301,25 @@ export default function WriterPage() {
           <BidSettings
             projectId={currentProject.id}
             modelId={modelId}
-            onModelChange={setModelId}
+            onModelChange={(id) => {
+              setModelId(id);
+              if (draft) {
+                updateWriterDraft(draft.id, { modelId: id }).catch(() => {
+                  /* 模型选择失败不阻塞界面，进入下一步时会再次保存 */
+                });
+              }
+            }}
             selectedKnowledge={selectedKnowledge}
             onKnowledgeChange={setSelectedKnowledge}
+            selectedProductLibraryId={selectedProductLibraryId}
+            onProductLibraryChange={(id) => {
+              setSelectedProductLibraryId(id);
+              if (draft) {
+                updateWriterDraft(draft.id, { selectedProductLibraryId: id || null }).catch(() => {
+                  /* 产品库选择失败不阻塞界面 */
+                });
+              }
+            }}
             initialSettings={settingsPayload}
             onNext={handleSettingsNext}
           />
@@ -305,6 +342,12 @@ export default function WriterPage() {
             outline={outline}
             onOutlineChange={setOutline}
             initialKnowledgeRefs={draft.knowledgeRefs}
+            onOutlineRegenerated={(payload) => {
+              setChapterContents(payload?.chapterContents || {});
+              setDraft((d) =>
+                d ? { ...d, knowledgeRefs: {}, chapterContents: payload?.chapterContents || {} } : d,
+              );
+            }}
             onNext={handleOutlineNext}
             onBack={goBack}
           />

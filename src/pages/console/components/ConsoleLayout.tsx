@@ -3,6 +3,7 @@ import { Outlet, useLocation } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import Topbar from "./Topbar";
 import { ProjectProvider } from "@/context/ProjectContext";
+import { ProductCatalogProvider } from "@/context/ProductCatalogContext";
 
 function getTitle(pathname: string): string {
   if (pathname.startsWith("/console/projects")) {
@@ -12,6 +13,8 @@ function getTitle(pathname: string): string {
   if (pathname.startsWith("/console/parse")) return "招标解析";
   if (pathname.startsWith("/console/qualifications")) return "资质证照库";
   if (pathname.startsWith("/console/knowledge")) return "文档知识库";
+  if (pathname.match(/^\/console\/products\/[^/]+$/)) return "产品库详情";
+  if (pathname.startsWith("/console/products")) return "产品功能库";
   if (pathname.startsWith("/console/audit")) return "AI 预审中心";
   if (pathname.startsWith("/console/review")) return "修改闭环";
   if (pathname.startsWith("/console/export")) return "Word 导出";
@@ -37,7 +40,9 @@ export default function ConsoleLayout() {
         <Topbar title={getTitle(location.pathname)} onMenuOpen={() => setMobileOpen(true)} />
         <main className="min-h-[calc(100vh-3.5rem)] px-5 py-5">
           <ProjectProvider>
-            <Outlet />
+            <ProductCatalogProvider>
+              <Outlet />
+            </ProductCatalogProvider>
           </ProjectProvider>
         </main>
       </div>

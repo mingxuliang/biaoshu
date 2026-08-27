@@ -12,14 +12,33 @@ export interface ModelOption {
 }
 
 export const modelOptions: ModelOption[] = [
-  { id: "bidllm", name: "BidLLM-标书专用", provider: "自研", desc: "专为招投标场景深度训练，懂评分标准、懂暗标规则、懂格式规范", ctx: "512K", speed: "快", tag: "自研" },
-  { id: "deepseek", name: "DeepSeek-V4-Pro", provider: "深度求索", desc: "长文档结构化输出稳定，对标评分点逐项展开能力强，成本均衡", ctx: "256K", speed: "快", tag: "推荐" },
-  { id: "kimi", name: "Kimi 3", provider: "月之暗面", desc: "长上下文理解与行业知识扎实，中文标书写作措辞专业", ctx: "256K", speed: "中" },
-  { id: "qwen", name: "通义千问 Qwen-Max", provider: "阿里云", desc: "工程与规范条文检索能力强，企业文档写作稳健", ctx: "128K", speed: "中" },
-  { id: "glm", name: "智谱 GLM-4-Plus", provider: "智谱AI", desc: "中文标书写作能力突出，行业知识扎实", ctx: "128K", speed: "中" },
-  { id: "doubao", name: "豆包-Doubao-Pro", provider: "字节跳动", desc: "生成速度快，适合批量章节续写", ctx: "256K", speed: "快" },
-  { id: "minimax", name: "MiniMax-M2", provider: "MiniMax", desc: "长文表达流畅，逻辑结构化清晰，性价比高", ctx: "200K", speed: "快" },
-  { id: "siliconflow", name: "硅基流动 SiliconFlow", provider: "硅基流动", desc: "聚合多模型池，稳定 API 与低延迟推理", ctx: "128K", speed: "快" },
+  {
+    id: "deepseek-v4-pro",
+    name: "DeepSeek 4 Pro",
+    provider: "深度求索",
+    desc: "长上下文推理模型，用于目录生成、章节正文与对话改写",
+    ctx: "1M",
+    speed: "中",
+    tag: "推荐",
+  },
+  {
+    id: "deepseek-v4-flash",
+    name: "DeepSeek V4 Flash",
+    provider: "深度求索",
+    desc: "高吞吐撰写模型，适合快速生成目录与章节正文",
+    ctx: "1M",
+    speed: "快",
+    tag: "已接入",
+  },
+  {
+    id: "doubao",
+    name: "豆包",
+    provider: "火山引擎 · 方舟",
+    desc: "豆包大模型，用于目录生成、章节正文与对话改写",
+    ctx: "256K",
+    speed: "快",
+    tag: "已接入",
+  },
 ];
 
 // 第一步：页数设置（滑块刻度）
@@ -63,13 +82,13 @@ export interface ImageConfig {
 }
 
 export const defaultImage: ImageConfig = {
-  normal: "互联网搜图",
-  arch: "图库配图",
+  normal: "AI生图",
+  arch: "AI生成架构图",
   aiStyle: "专业商务风",
 };
 
-export const normalImageOptions = ["互联网搜图", "图库配图", "AI生图"];
-export const archImageOptions = ["图库配图", "AI生成架构图"];
+export const normalImageOptions = ["AI生图", "本机上传"];
+export const archImageOptions = ["AI生成架构图", "本机上传"];
 export const aiImageStyles = ["专业商务风", "简约扁平风", "科技渐变风", "写实摄影风"];
 
 // 第一步：撰写风格配置

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import Toast from "../components/Toast";
@@ -6,9 +6,11 @@ import TypeBadge from "../components/TypeBadge";
 import { useProjects } from "@/context/ProjectContext";
 import {
   createTenderParseJob,
+  downloadChecklistReport,
   getLatestChecklist,
   lockChecklist,
   pollTenderParseJobUntilDone,
+  triggerFileDownload,
   type Checklist,
 } from "@/lib/api";
 import WordViewer from "./components/WordViewer";
@@ -33,6 +35,24 @@ export default function ParsePage() {
   const [checklist, setChecklist] = useState<Checklist | null>(null);
   const [toast, setToast] = useState<ToastState>({ message: "", type: "success", visible: false });
 
+  useEffect(() => {
+    if (!selectedId) {
+      setChecklist(null);
+      return;
+    }
+    let cancelled = false;
+    getLatestChecklist(selectedId)
+      .then((latest) => {
+        if (!cancelled) setChecklist(latest);
+      })
+      .catch(() => {
+        if (!cancelled) setChecklist(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId]);
+
   const showToast = (message: string, type: ToastState["type"] = "success") => {
     setToast({ message, type, visible: true });
     window.setTimeout(() => setToast((t) => ({ ...t, visible: false })), 3000);
@@ -45,18 +65,21 @@ export default function ParsePage() {
   const startParse = async () => {
     if (!currentProject || !docSource?.tenderDocumentId || parsing) return;
     setParsing(true);
-    showToast(`AI 正在解析招标文件「${docSource.name}」：抽取评分规则、必响应条款与评标尺子参数…`, "info");
+    showToast(`AI 正在解析招标文件「${docSource.name}」：按固定一级/二级指标逐项抽取…`, "info");
     try {
       const job = await createTenderParseJob(currentProject.id, docSource.tenderDocumentId);
-      const finalStatus = await pollTenderParseJobUntilDone(job.job_id);
+      const finalStatus = await pollTenderParseJobUntilDone(job.job_id, { timeoutMs: 12 * 60 * 1000 });
       const latest = await getLatestChecklist(currentProject.id);
       setChecklist(latest);
       if (finalStatus.status === "done" && !latest.error) {
-        showToast(
-          `解析完成：已抽取 ${latest.scoreRules.length} 条评分规则、${latest.mustRespond.length} 条必响应条款`,
+        const dims = latest.dimensions ?? [];
+        const filled = dims.reduce(
+          (n, d) => n + d.items.reduce((m, i) => m + i.sections.reduce((s, sec) => s + sec.rows.filter((r) => r.content.trim()).length, 0), 0),
+          0,
         );
+        showToast(`解析完成：已填 ${filled} 项分析字段，未抽到的指标保持空白`);
       } else {
-        showToast(latest.error || "解析未能抽取到有效内容，请人工补录评标尺子", "error");
+        showToast(latest.error || "解析未能抽取到有效内容，指标项仍可核对空白字段", "error");
       }
     } catch (err) {
       showToast(err instanceof Error ? err.message : "解析失败，请重试", "error");
@@ -81,7 +104,6 @@ export default function ParsePage() {
 
   const handleDocContinue = (doc: TenderDocSource) => {
     setDocSource(doc);
-    setChecklist(null);
   };
 
   /* 未选择项目：先选择项目再分析 */
@@ -153,7 +175,7 @@ export default function ParsePage() {
     <div className="flex h-[calc(100vh-6rem)] flex-col">
       <PageHeader
         title="招标文件解析与对标清单"
-        description="左侧浏览招标文件原文，右侧查看AI多维度解析结果。点击维度标签切换不同解析视角。"
+        description="左侧浏览招标文件原文，右侧按固定一级维度与二级分析项目查看抽取结果。未抽到的字段保持空白。"
         actions={
           docSource ? (
             <>
@@ -177,7 +199,6 @@ export default function ParsePage() {
           projectId={currentProject.id}
           projectName={currentProject.name}
           projectCode={currentProject.code}
-          projectTenderDoc={currentProject.tenderDoc}
           onContinue={handleDocContinue}
         />
       ) : (
@@ -198,14 +219,12 @@ export default function ParsePage() {
             </div>
             <div className="flex shrink-0 items-center gap-3">
               <span className="text-[11px] text-foreground-500">
-                {docSource.format}
-                {docSource.pages ? ` · ${docSource.pages} 页` : ""} · {docSource.size}
+                {docSource.format} · {docSource.size}
               </span>
               <button
                 type="button"
                 onClick={() => {
                   setDocSource(null);
-                  setChecklist(null);
                 }}
                 className="flex h-8 cursor-pointer items-center gap-1 whitespace-nowrap rounded-md border border-background-300 bg-background-50 px-2.5 text-xs font-medium text-foreground-600 transition-colors hover:bg-background-200 hover:text-primary-600"
               >
@@ -263,7 +282,12 @@ export default function ParsePage() {
       {/* 左右分栏：左侧Word原文 + 右侧AI解析 */}
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-2">
         <div className="min-h-0">
-          <WordViewer projectName={currentProject.name} projectCode={currentProject.code} />
+          <WordViewer
+            projectName={currentProject.name}
+            projectCode={currentProject.code}
+            tenderDocumentId={docSource.tenderDocumentId}
+            fileName={docSource.name}
+          />
         </div>
         <div className="min-h-0">
           <ParseResults
@@ -271,8 +295,27 @@ export default function ParsePage() {
             parsing={parsing}
             locking={locking}
             onLock={handleLock}
-            onShare={() => showToast("解读结果链接已复制到剪贴板", "success")}
-            onDownload={() => showToast("正在导出解析报告 Word 文档…", "info")}
+            onShare={async () => {
+              try {
+                await navigator.clipboard.writeText(window.location.href);
+                showToast("当前解析页链接已复制到剪贴板");
+              } catch {
+                showToast("无法写入剪贴板，请手动复制浏览器地址栏", "error");
+              }
+            }}
+            onDownload={async () => {
+              if (!checklist || !currentProject) {
+                showToast("请先完成解析再下载报告", "error");
+                return;
+              }
+              try {
+                const blob = await downloadChecklistReport(currentProject.id, checklist.id);
+                triggerFileDownload(blob, `${currentProject.code}-解析报告-v${checklist.version}.docx`);
+                showToast("解析报告已开始下载");
+              } catch (err) {
+                showToast(err instanceof Error ? err.message : "导出解析报告失败", "error");
+              }
+            }}
           />
         </div>
       </div>

@@ -1,11 +1,14 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
-import type { Project, ProjectType, TenderUpload } from "@/mocks/projects";
+import type { Project, ProjectType } from "@/mocks/projects";
 import { useAuth } from "@/context/AuthContext";
 import {
   createProject as apiCreateProject,
   deleteProjectApi,
+  getProjectApi,
   listProjects,
+  setProjectMembers,
   updateProjectApi,
+  uploadTenderDocument,
 } from "@/lib/api";
 
 export interface NewProjectInput {
@@ -15,14 +18,15 @@ export interface NewProjectInput {
   budget?: string;
   deadline?: string;
   owner?: string;
-  tenderDoc?: TenderUpload;
+  tenderFile?: File;
+  memberIds?: string[];
 }
 
 interface ProjectContextValue {
   projects: Project[];
   loading: boolean;
   addProject: (input: NewProjectInput) => Promise<Project>;
-  updateProject: (id: string, patch: Partial<Project>) => Promise<Project | undefined>;
+  updateProject: (id: string, patch: Partial<Project>, extra?: { tenderFile?: File; memberIds?: string[] }) => Promise<Project | undefined>;
   deleteProject: (id: string) => Promise<void>;
   getProject: (id: string | undefined) => Project | undefined;
 }
@@ -60,15 +64,22 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const addProject = useCallback(
     async (input: NewProjectInput): Promise<Project> => {
       if (!token) throw new Error("未登录，无法创建项目");
-      const created = await apiCreateProject(token, {
+      let created = await apiCreateProject(token, {
         name: input.name,
         code: input.code,
         type: input.type,
         budget: input.budget,
         deadline: input.deadline,
         owner: input.owner,
-        tenderDoc: input.tenderDoc,
       });
+      if (input.memberIds && input.memberIds.length > 0) {
+        const team = await setProjectMembers(token, created.id, input.memberIds);
+        created = { ...created, team };
+      }
+      if (input.tenderFile) {
+        await uploadTenderDocument(created.id, input.tenderFile);
+        created = await getProjectApi(token, created.id);
+      }
       setProjects((prev) => [created, ...prev]);
       return created;
     },
@@ -81,9 +92,21 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   );
 
   const updateProject = useCallback(
-    async (id: string, patch: Partial<Project>): Promise<Project | undefined> => {
+    async (
+      id: string,
+      patch: Partial<Project>,
+      extra?: { tenderFile?: File; memberIds?: string[] },
+    ): Promise<Project | undefined> => {
       if (!token) throw new Error("未登录，无法更新项目");
-      const updated = await updateProjectApi(token, id, patch);
+      let updated = await updateProjectApi(token, id, patch);
+      if (extra?.memberIds) {
+        const team = await setProjectMembers(token, id, extra.memberIds);
+        updated = { ...updated, team };
+      }
+      if (extra?.tenderFile) {
+        await uploadTenderDocument(id, extra.tenderFile);
+        updated = await getProjectApi(token, id);
+      }
       setProjects((prev) => prev.map((p) => (p.id === id ? updated : p)));
       return updated;
     },

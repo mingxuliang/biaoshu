@@ -2,6 +2,14 @@
 // 五引擎相关请求全部走这里，页面组件不直接拼 URL。
 
 import type { PreReviewIssue, PreReviewLevel } from "@/mocks/preReview";
+import type {
+  ProductItem,
+  ProductKind,
+  ProductLibrary,
+  ProductLibraryCategory,
+  ProductParseJob,
+  ProductStatus,
+} from "@/mocks/products";
 
 export interface DimensionScore {
   name: string;
@@ -95,6 +103,30 @@ export interface VetoParams {
   anonymity_required: boolean;
 }
 
+export interface ParseRow {
+  label: string;
+  content: string;
+}
+
+export interface ParseSection {
+  id: string;
+  title: string;
+  rows: ParseRow[];
+}
+
+export interface ParseSubItem {
+  id: string;
+  label: string;
+  sections: ParseSection[];
+}
+
+export interface ParseDimension {
+  key: string;
+  label: string;
+  completed: boolean;
+  items: ParseSubItem[];
+}
+
 export interface Checklist {
   id: string;
   project_id: string;
@@ -106,6 +138,7 @@ export interface Checklist {
   mustRespond: MustRespond[];
   qualification: QualificationItem[];
   formatRequirements: FormatItem[];
+  dimensions: ParseDimension[];
   vetoParams: VetoParams;
   error?: string | null;
 }
@@ -120,7 +153,12 @@ class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: Parameters<typeof fetch>[1]): Promise<T> {
-  const res = await fetch(path, init);
+  const headers = new Headers(init?.headers);
+  const token = localStorage.getItem("zhbiao_token");
+  if (token && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  const res = await fetch(path, { ...init, headers });
   if (!res.ok) {
     let message = `请求失败（${res.status}）`;
     try {
@@ -145,6 +183,18 @@ export async function fetchSampleDocument(projectId: string): Promise<UploadedDo
   const form = new FormData();
   form.append("project_id", projectId);
   return request<UploadedDoc>("/api/bid-documents/from-sample", { method: "POST", body: form });
+}
+
+export interface BidDocumentSummary {
+  id: string;
+  filename: string;
+  source: string;
+  sizeBytes: number;
+  uploadedAt: string;
+}
+
+export async function listProjectBidDocuments(projectId: string): Promise<BidDocumentSummary[]> {
+  return request<BidDocumentSummary[]>(`/api/projects/${projectId}/bid-documents`);
 }
 
 export async function createPrereviewJob(projectId: string, bidDocumentId: string): Promise<JobStatus> {
@@ -255,6 +305,17 @@ export interface TenderUploadMeta {
   pages?: number;
 }
 
+export interface TeamMember {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  phone?: string;
+  disabled?: boolean;
+  projectCount?: number;
+  joinedAt?: string;
+}
+
 export interface ProjectDto {
   id: string;
   code: string;
@@ -268,6 +329,7 @@ export interface ProjectDto {
   status: "撰写中" | "评标中" | "已提交" | "已中标" | "未中标";
   createdAt: string;
   tenderDoc?: TenderUploadMeta;
+  team?: TeamMember[];
 }
 
 export interface CreateProjectPayload {
@@ -277,7 +339,6 @@ export interface CreateProjectPayload {
   budget?: string;
   deadline?: string;
   owner?: string;
-  tenderDoc?: TenderUploadMeta;
 }
 
 export type UpdateProjectPayload = Partial<CreateProjectPayload> & {
@@ -332,6 +393,10 @@ export async function listProjects(token: string): Promise<ProjectDto[]> {
   return request<ProjectDto[]>("/api/projects", { headers: authHeaders(token) });
 }
 
+export async function getProjectApi(token: string, id: string): Promise<ProjectDto> {
+  return request<ProjectDto>(`/api/projects/${id}`, { headers: authHeaders(token) });
+}
+
 export async function createProject(token: string, payload: CreateProjectPayload): Promise<ProjectDto> {
   return request<ProjectDto>("/api/projects", {
     method: "POST",
@@ -354,7 +419,7 @@ export async function updateProjectApi(
 
 // AI 撰写工作台真实后端接入相关请求。
 
-export type OutlineNodeStatus = "待生成" | "生成中" | "已完成";
+export type OutlineNodeStatus = "待生成" | "生成中" | "已完成" | "用原文";
 
 export interface OutlineNode {
   id: string;
@@ -370,6 +435,7 @@ export interface OutlineNode {
   status: OutlineNodeStatus;
   words: number;
   aiRounds: number;
+  sourceIndex?: number | null;
 }
 
 export interface KnowledgeRef {
@@ -384,6 +450,7 @@ export interface WriterDraft {
   projectId: string;
   modelId: string;
   selectedKnowledge: string[];
+  selectedProductLibraryId?: string | null;
   knowledgeRefs: Record<string, KnowledgeRef[]>;
   settings: Record<string, unknown>;
   interpretSource: "reuse" | "upload";
@@ -395,6 +462,7 @@ export interface WriterDraft {
 export interface UpdateWriterDraftPayload {
   modelId?: string;
   selectedKnowledge?: string[];
+  selectedProductLibraryId?: string | null;
   knowledgeRefs?: Record<string, KnowledgeRef[]>;
   settings?: Record<string, unknown>;
   interpretSource?: "reuse" | "upload";
@@ -476,6 +544,106 @@ export async function saveChapterContent(
 
 export async function getTenderParagraphs(tenderDocumentId: string): Promise<TenderParagraph[]> {
   return request<TenderParagraph[]>(`/api/tender-documents/${tenderDocumentId}/paragraphs`);
+}
+
+export async function downloadChecklistReport(projectId: string, checklistId: string): Promise<Blob> {
+  return fetchBlob(`/api/projects/${projectId}/checklist/${checklistId}/export`);
+}
+
+export async function exportWriterDraftDocx(draftId: string): Promise<Blob> {
+  const res = await fetch(`/api/writer-drafts/${draftId}/export`);
+  if (!res.ok) {
+    let message = `导出失败（${res.status}）`;
+    try {
+      const body = await res.json();
+      if (body?.detail) message = body.detail;
+    } catch {
+      // ignore
+    }
+    throw new ApiError(message, res.status);
+  }
+  return res.blob();
+}
+
+export type WriterImageMode = "normal" | "flow" | "arch";
+
+export interface WriterImageItem {
+  id: string;
+  projectId: string;
+  source: "generated" | "upload" | "knowledge";
+  mode: WriterImageMode;
+  prompt: string;
+  filename: string;
+  url: string;
+  createdAt: string;
+}
+
+export async function generateWriterImage(
+  token: string,
+  projectId: string,
+  prompt: string,
+  mode: WriterImageMode,
+): Promise<WriterImageItem> {
+  return request<WriterImageItem>(`/api/projects/${projectId}/writer-images/generate`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({ prompt, mode }),
+  });
+}
+
+export async function uploadWriterImage(
+  token: string,
+  projectId: string,
+  file: File,
+): Promise<WriterImageItem> {
+  const form = new FormData();
+  form.append("file", file);
+  return request<WriterImageItem>(`/api/projects/${projectId}/writer-images/upload`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+}
+
+export async function listWriterImages(token: string, projectId: string): Promise<WriterImageItem[]> {
+  return request<WriterImageItem[]>(`/api/projects/${projectId}/writer-images`, {
+    headers: authHeaders(token),
+  });
+}
+
+export async function optimizeWriterImagePrompt(
+  token: string,
+  prompt: string,
+  mode: WriterImageMode,
+): Promise<string> {
+  const out = await request<{ prompt: string }>("/api/writer-images/optimize-prompt", {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({ prompt, mode }),
+  });
+  return out.prompt;
+}
+
+export interface WriterChatResult {
+  reply: string;
+  hasChecklist: boolean;
+}
+
+export async function writerChat(
+  token: string,
+  draftId: string,
+  payload: {
+    message: string;
+    history?: { role: "user" | "assistant"; content: string }[];
+    chapterTitle?: string;
+    chapterExcerpt?: string;
+  },
+): Promise<WriterChatResult> {
+  return request<WriterChatResult>(`/api/writer-drafts/${draftId}/chat`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify(payload),
+  });
 }
 
 // 文档知识库真实后端接入相关请求。
@@ -693,6 +861,595 @@ export async function exportBidRevisionDocx(revisionId: string): Promise<Blob> {
   return res.blob();
 }
 
+// Word 导出中心真实后端接入相关请求。
+
+export interface ExportCheckItem {
+  key: string;
+  label: string;
+  ok: boolean;
+  note: string;
+}
+
+export interface ExportChecks {
+  revisionId: string;
+  versionLabel: string;
+  wordCount: number;
+  updatedAt: string;
+  items: ExportCheckItem[];
+  blocked: boolean;
+  blockReason: string;
+}
+
+export interface ExportRecord {
+  id: string;
+  projectId: string;
+  mode: "明标" | "暗标";
+  operator: string;
+  checkStatus: "通过" | "阻断";
+  checkNote: string;
+  fileSize: number;
+  fileHash: string;
+  filename: string;
+  createdAt: string;
+}
+
+export async function getExportChecks(
+  token: string,
+  projectId: string,
+  mode: "明标" | "暗标" = "明标",
+): Promise<ExportChecks> {
+  return request<ExportChecks>(`/api/projects/${projectId}/export-checks?mode=${encodeURIComponent(mode)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function createExport(
+  token: string,
+  projectId: string,
+  mode: "明标" | "暗标",
+): Promise<ExportRecord> {
+  return request<ExportRecord>(`/api/projects/${projectId}/exports`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({ mode }),
+  });
+}
+
+export async function listExportRecords(token: string, projectId: string): Promise<ExportRecord[]> {
+  return request<ExportRecord[]>(`/api/projects/${projectId}/export-records`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function downloadExportRecord(token: string, recordId: string): Promise<Blob> {
+  const res = await fetch(`/api/export-records/${recordId}/download`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    let message = `下载失败（${res.status}）`;
+    try {
+      const body = await res.json();
+      if (body?.detail) message = body.detail;
+    } catch {
+      // ignore json parse error, use default message
+    }
+    throw new ApiError(message, res.status);
+  }
+  return res.blob();
+}
+
+// 项目中心补全：用户列表 / 成员分配 / 文件归档 / 时间线 / 招标文件。
+
+export interface TenderDocumentSummary {
+  id: string;
+  filename: string;
+  sizeBytes: number;
+  uploadedAt: string;
+}
+
+export interface ProjectDocuments {
+  tenderDocuments: TenderDocumentSummary[];
+  bidDocuments: BidDocumentSummary[];
+}
+
+export interface TimelineStage {
+  id: string;
+  label: string;
+  date: string;
+  status: "已完成" | "进行中" | "待开始";
+  desc: string;
+}
+
+export async function listUsers(token: string): Promise<TeamMember[]> {
+  return request<TeamMember[]>("/api/users", { headers: authHeaders(token) });
+}
+
+export async function inviteUser(
+  token: string,
+  payload: { name: string; email: string; phone?: string; role: string },
+): Promise<TeamMember & { initialPassword: string }> {
+  return request<TeamMember & { initialPassword: string }>("/api/users", {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateUser(
+  token: string,
+  userId: string,
+  payload: { name?: string; phone?: string; role?: string; disabled?: boolean },
+): Promise<TeamMember> {
+  return request<TeamMember>(`/api/users/${userId}`, {
+    method: "PATCH",
+    headers: authHeaders(token),
+    body: JSON.stringify(payload),
+  });
+}
+
+export type QualificationKind =
+  | "cert"
+  | "people"
+  | "achievement"
+  | "equipment"
+  | "credit"
+  | "contract"
+  | "financial";
+
+export interface QualificationImage {
+  id: string;
+  caption: string;
+  url: string;
+}
+
+export interface QualificationAsset {
+  id: string;
+  kind: QualificationKind;
+  name: string;
+  level: string;
+  number: string;
+  validUntil: string;
+  status: "有效" | "将到期" | "已过期";
+  warnDays?: number | null;
+  owner: string;
+  detail: string;
+  filename: string;
+  hasFile: boolean;
+  ocrText?: string;
+  ocrStatus?: string;
+  reviewStatus?: "待审核" | "已入库";
+  mergeStatus?: "新增" | "并入已有" | "疑似重复" | "信息冲突";
+  aliases?: string[];
+  sources?: { docId?: string; filename?: string }[];
+  evidence?: { heading?: string; excerpt?: string }[];
+  fieldConflict?: string[];
+  suspectedIds?: string[];
+  images?: QualificationImage[];
+  updatedAt: string;
+}
+
+export interface QualificationParseJob {
+  id: string;
+  filename: string;
+  status: "解析中" | "已完成" | "抽取失败";
+  extracted: number;
+  merged: number;
+  suspected: number;
+  conflicts: number;
+  sizeLabel: string;
+  uploadedAt: string;
+  note: string;
+  error?: string | null;
+}
+
+export interface QualificationExtractJob {
+  jobId: string;
+  status: "queued" | "running" | "done" | "failed";
+  extracted: number;
+  merged: number;
+  suspected: number;
+  conflicts: number;
+  error?: string | null;
+  note: string;
+}
+
+export async function listQualifications(token: string): Promise<QualificationAsset[]> {
+  return request<QualificationAsset[]>("/api/qualifications", { headers: authHeaders(token) });
+}
+
+export async function createQualification(
+  token: string,
+  payload: {
+    kind: QualificationKind;
+    name: string;
+    level?: string;
+    number?: string;
+    validUntil?: string;
+    owner?: string;
+    detail?: string;
+    file?: File | null;
+  },
+): Promise<QualificationAsset> {
+  const form = new FormData();
+  form.append("kind", payload.kind);
+  form.append("name", payload.name);
+  form.append("level", payload.level || "");
+  form.append("number", payload.number || "");
+  form.append("valid_until", payload.validUntil || "长期");
+  form.append("owner", payload.owner || "");
+  form.append("detail", payload.detail || "");
+  if (payload.file) form.append("file", payload.file);
+  return request<QualificationAsset>("/api/qualifications", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+}
+
+export async function updateQualification(
+  token: string,
+  id: string,
+  payload: { reviewStatus?: "待审核" | "已入库" },
+): Promise<QualificationAsset> {
+  const form = new FormData();
+  if (payload.reviewStatus) form.append("review_status", payload.reviewStatus);
+  return request<QualificationAsset>(`/api/qualifications/${id}`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+}
+
+export async function deleteQualification(token: string, id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/api/qualifications/${id}`, {
+    method: "DELETE",
+    headers: authHeaders(token),
+  });
+}
+
+export async function resolveQualificationPair(
+  token: string,
+  keepId: string,
+  dropId: string,
+  action: "merge" | "keep_both",
+): Promise<QualificationAsset> {
+  return request<QualificationAsset>("/api/qualifications/resolve", {
+    method: "POST",
+    headers: { ...authHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify({ keepId, dropId, action }),
+  });
+}
+
+export async function listQualificationSourceDocs(token: string): Promise<QualificationParseJob[]> {
+  return request<QualificationParseJob[]>("/api/qualification-source-docs", { headers: authHeaders(token) });
+}
+
+export async function uploadQualificationSourceDocs(token: string, files: File[]): Promise<QualificationParseJob[]> {
+  const form = new FormData();
+  files.forEach((file) => form.append("files", file));
+  return request<QualificationParseJob[]>("/api/qualification-source-docs", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+}
+
+export async function getQualificationExtractJob(token: string, jobId: string): Promise<QualificationExtractJob> {
+  return request<QualificationExtractJob>(`/api/qualification-extract-jobs/${jobId}`, {
+    headers: authHeaders(token),
+  });
+}
+
+export async function pollQualificationExtractJobUntilDone(
+  token: string,
+  jobId: string,
+  { intervalMs = 1500, timeoutMs = 10 * 60 * 1000 }: { intervalMs?: number; timeoutMs?: number } = {},
+): Promise<QualificationExtractJob> {
+  const startedAt = Date.now();
+  while (true) {
+    const status = await getQualificationExtractJob(token, jobId);
+    if (status.status === "done" || status.status === "failed") return status;
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new ApiError("抽取任务超时，请稍后在文件解析中查看进度", 408);
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+export async function getProjectMembers(token: string, projectId: string): Promise<TeamMember[]> {
+  return request<TeamMember[]>(`/api/projects/${projectId}/members`, { headers: authHeaders(token) });
+}
+
+export async function setProjectMembers(
+  token: string,
+  projectId: string,
+  userIds: string[],
+): Promise<TeamMember[]> {
+  return request<TeamMember[]>(`/api/projects/${projectId}/members`, {
+    method: "PUT",
+    headers: authHeaders(token),
+    body: JSON.stringify({ user_ids: userIds }),
+  });
+}
+
+export async function getProjectDocuments(token: string, projectId: string): Promise<ProjectDocuments> {
+  return request<ProjectDocuments>(`/api/projects/${projectId}/documents`, { headers: authHeaders(token) });
+}
+
+export async function getProjectTimeline(token: string, projectId: string): Promise<TimelineStage[]> {
+  return request<TimelineStage[]>(`/api/projects/${projectId}/timeline`, { headers: authHeaders(token) });
+}
+
+export async function listProjectTenderDocuments(
+  token: string,
+  projectId: string,
+): Promise<TenderDocumentSummary[]> {
+  return request<TenderDocumentSummary[]>(`/api/projects/${projectId}/tender-documents`, {
+    headers: authHeaders(token),
+  });
+}
+
+async function fetchBlob(path: string): Promise<Blob> {
+  const headers = new Headers();
+  const token = localStorage.getItem("zhbiao_token");
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const res = await fetch(path, { headers });
+  if (!res.ok) {
+    let message = `下载失败（${res.status}）`;
+    try {
+      const body = await res.json();
+      if (body?.detail) message = body.detail;
+    } catch {
+      // ignore json parse error, use default message
+    }
+    throw new ApiError(message, res.status);
+  }
+  return res.blob();
+}
+
+export async function downloadTenderDocument(id: string): Promise<Blob> {
+  return fetchBlob(`/api/tender-documents/${id}/download`);
+}
+
+export async function downloadBidDocumentFile(id: string): Promise<Blob> {
+  return fetchBlob(`/api/bid-documents/${id}/download`);
+}
+
+export async function downloadKnowledgeDocument(id: string): Promise<Blob> {
+  return fetchBlob(`/api/knowledge-documents/${id}/download`);
+}
+
+export function triggerFileDownload(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// 预审规则真实后端接入相关请求。
+
+export interface WeightTemplate {
+  id: string;
+  name: string;
+  completeness: number;
+  relevance: number;
+  compliance: number;
+  feasibility: number;
+  standardization: number;
+  scope: string;
+  active: boolean;
+}
+
+export interface WeightTemplatePayload {
+  name: string;
+  completeness: number;
+  relevance: number;
+  compliance: number;
+  feasibility: number;
+  standardization: number;
+  scope?: string;
+}
+
+export interface FillerWordRule {
+  id: string;
+  category: string;
+  level: "高危" | "中危" | "低危";
+  word: string;
+  rewrite: string;
+  enabled: boolean;
+}
+
+export interface FillerWordRulePayload {
+  category: string;
+  level?: "高危" | "中危" | "低危";
+  word: string;
+  rewrite?: string;
+}
+
+export interface ThresholdRule {
+  id: string;
+  key: string;
+  label: string;
+  value: number;
+  unit: string;
+  description: string;
+}
+
+export interface RulePackage {
+  id: string;
+  name: string;
+  region: string;
+  status: "启用" | "停用";
+  items: string[];
+}
+
+export interface RulePackagePayload {
+  name: string;
+  region?: string;
+  items?: string[];
+}
+
+export interface VetoRule {
+  id: string;
+  key: string;
+  category: string;
+  point: string;
+  items: string[];
+  wired: "接入判定" | "部分接入" | "仅对照";
+  wiredNote: string;
+  engine: string;
+  seq: number;
+}
+
+export type CatalogKind = "business" | "tech" | "dup_check" | "strategy";
+
+export interface CatalogRule extends VetoRule {
+  kind: CatalogKind;
+}
+
+export async function listWeightTemplates(): Promise<WeightTemplate[]> {
+  return request<WeightTemplate[]>("/api/rules/weight-templates");
+}
+
+export async function createWeightTemplate(payload: WeightTemplatePayload): Promise<WeightTemplate> {
+  return request<WeightTemplate>("/api/rules/weight-templates", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateWeightTemplate(
+  id: string,
+  patch: Partial<WeightTemplatePayload>,
+): Promise<WeightTemplate> {
+  return request<WeightTemplate>(`/api/rules/weight-templates/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function activateWeightTemplate(id: string): Promise<WeightTemplate> {
+  return request<WeightTemplate>(`/api/rules/weight-templates/${id}/activate`, { method: "POST" });
+}
+
+export async function listWordRules(): Promise<FillerWordRule[]> {
+  return request<FillerWordRule[]>("/api/rules/word-rules");
+}
+
+export async function createWordRule(payload: FillerWordRulePayload): Promise<FillerWordRule> {
+  return request<FillerWordRule>("/api/rules/word-rules", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateWordRule(
+  id: string,
+  patch: Partial<FillerWordRulePayload & { enabled: boolean }>,
+): Promise<FillerWordRule> {
+  return request<FillerWordRule>(`/api/rules/word-rules/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function listThresholds(): Promise<ThresholdRule[]> {
+  return request<ThresholdRule[]>("/api/rules/thresholds");
+}
+
+export async function updateThreshold(id: string, value: number): Promise<ThresholdRule> {
+  return request<ThresholdRule>(`/api/rules/thresholds/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value }),
+  });
+}
+
+export async function listRulePackages(): Promise<RulePackage[]> {
+  return request<RulePackage[]>("/api/rules/packages");
+}
+
+export async function createRulePackage(payload: RulePackagePayload): Promise<RulePackage> {
+  return request<RulePackage>("/api/rules/packages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateRulePackage(
+  id: string,
+  patch: Partial<RulePackagePayload & { status: "启用" | "停用" }>,
+): Promise<RulePackage> {
+  return request<RulePackage>(`/api/rules/packages/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function listVetoRules(): Promise<VetoRule[]> {
+  return request<VetoRule[]>("/api/rules/veto-points");
+}
+
+export async function listCatalogRules(kind?: CatalogKind): Promise<CatalogRule[]> {
+  const query = kind ? `?kind=${kind}` : "";
+  return request<CatalogRule[]>(`/api/rules/catalog${query}`);
+}
+
+export interface AuditLogItem {
+  id: string;
+  time: string;
+  user: string;
+  action: string;
+  target: string;
+  version: string;
+  detail: string;
+  result: string;
+}
+
+export interface AuditLogList {
+  items: AuditLogItem[];
+  total: number;
+  weekTotal: number;
+  weekExport: number;
+  aiCount: number;
+}
+
+export async function listAuditLogs(
+  token: string,
+  params?: { action?: string; keyword?: string },
+): Promise<AuditLogList> {
+  const q = new URLSearchParams();
+  if (params?.action && params.action !== "全部") q.set("action", params.action);
+  if (params?.keyword) q.set("keyword", params.keyword);
+  const qs = q.toString();
+  return request<AuditLogList>(`/api/audit-logs${qs ? `?${qs}` : ""}`, {
+    headers: authHeaders(token),
+  });
+}
+
+export interface SearchResult {
+  projects: { id: string; name: string; code: string; type: string }[];
+  members: { id: string; name: string; email: string; role: string; position: string }[];
+  documents: { id: string; title: string; kind: string; href: string }[];
+}
+
+export async function globalSearch(token: string, q: string): Promise<SearchResult> {
+  const qs = new URLSearchParams({ q });
+  return request<SearchResult>(`/api/search?${qs.toString()}`, {
+    headers: authHeaders(token),
+  });
+}
+
 export async function deleteProjectApi(token: string, id: string): Promise<void> {
   const res = await fetch(`/api/projects/${id}`, { method: "DELETE", headers: authHeaders(token) });
   if (!res.ok && res.status !== 204) {
@@ -704,6 +1461,165 @@ export async function deleteProjectApi(token: string, id: string): Promise<void>
       // ignore json parse error, use default message
     }
     throw new ApiError(message, res.status);
+  }
+}
+
+export type {
+  ProductItem,
+  ProductKind,
+  ProductLibrary,
+  ProductLibraryCategory,
+  ProductParseJob,
+  ProductStatus,
+};
+
+export interface ProductLibraryIn {
+  name: string;
+  category: ProductLibraryCategory;
+  description: string;
+  owner: string;
+}
+
+export interface ProductFeatureIn {
+  name: string;
+  kind: ProductKind;
+  module: string;
+  params: string;
+  intro: string;
+  bidCopy: string;
+  brand: string;
+  model: string;
+  unit: string;
+  status?: ProductStatus;
+}
+
+export interface ProductExtractJob {
+  jobId: string;
+  status: "queued" | "running" | "done" | "failed";
+  extracted: number;
+  merged: number;
+  suspected: number;
+  conflicts: number;
+  error?: string | null;
+  note: string;
+}
+
+export async function listProductLibraries(): Promise<ProductLibrary[]> {
+  return request<ProductLibrary[]>("/api/product-libraries");
+}
+
+export async function createProductLibrary(payload: ProductLibraryIn): Promise<ProductLibrary> {
+  return request<ProductLibrary>("/api/product-libraries", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateProductLibrary(id: string, payload: ProductLibraryIn): Promise<ProductLibrary> {
+  return request<ProductLibrary>(`/api/product-libraries/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteProductLibrary(id: string): Promise<void> {
+  await request(`/api/product-libraries/${id}`, { method: "DELETE" });
+}
+
+export async function getProductLibrary(id: string): Promise<ProductLibrary> {
+  return request<ProductLibrary>(`/api/product-libraries/${id}`);
+}
+
+export async function listProductFeatures(libraryId: string): Promise<ProductItem[]> {
+  return request<ProductItem[]>(`/api/product-libraries/${libraryId}/features`);
+}
+
+export async function createProductFeature(libraryId: string, payload: ProductFeatureIn): Promise<ProductItem> {
+  return request<ProductItem>(`/api/product-libraries/${libraryId}/features`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function patchProductFeature(featureId: string, payload: Partial<ProductFeatureIn>): Promise<ProductItem> {
+  return request<ProductItem>(`/api/product-features/${featureId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteProductFeature(featureId: string): Promise<void> {
+  await request(`/api/product-features/${featureId}`, { method: "DELETE" });
+}
+
+export async function mergeProductFeatures(keepId: string, otherId: string): Promise<ProductItem> {
+  return request<ProductItem>(`/api/product-features/${keepId}/merge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ otherId }),
+  });
+}
+
+export async function resolveProductPair(
+  libraryId: string,
+  keepId: string,
+  dropId: string,
+  action: "merge" | "keep_both",
+): Promise<ProductItem> {
+  return request<ProductItem>(`/api/product-libraries/${libraryId}/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ keepId, dropId, action }),
+  });
+}
+
+export async function uploadProductFeatureImages(
+  featureId: string,
+  files: File[],
+  captions: string[] = [],
+  kinds: string[] = [],
+): Promise<ProductItem> {
+  const form = new FormData();
+  files.forEach((file) => form.append("files", file));
+  if (captions.length) form.append("captions", captions.join("|"));
+  if (kinds.length) form.append("kinds", kinds.join("|"));
+  return request<ProductItem>(`/api/product-features/${featureId}/images`, { method: "POST", body: form });
+}
+
+export async function deleteProductImage(imageId: string): Promise<void> {
+  await request(`/api/product-images/${imageId}`, { method: "DELETE" });
+}
+
+export async function listProductSourceDocs(libraryId: string): Promise<ProductParseJob[]> {
+  return request<ProductParseJob[]>(`/api/product-libraries/${libraryId}/source-docs`);
+}
+
+export async function uploadProductSourceDocs(libraryId: string, files: File[]): Promise<ProductParseJob[]> {
+  const form = new FormData();
+  files.forEach((file) => form.append("files", file));
+  return request<ProductParseJob[]>(`/api/product-libraries/${libraryId}/source-docs`, { method: "POST", body: form });
+}
+
+export async function getProductExtractJob(jobId: string): Promise<ProductExtractJob> {
+  return request<ProductExtractJob>(`/api/product-extract-jobs/${jobId}`);
+}
+
+export async function pollProductExtractJobUntilDone(
+  jobId: string,
+  { intervalMs = 1500, timeoutMs = 10 * 60 * 1000 }: { intervalMs?: number; timeoutMs?: number } = {},
+): Promise<ProductExtractJob> {
+  const startedAt = Date.now();
+  while (true) {
+    const status = await getProductExtractJob(jobId);
+    if (status.status === "done" || status.status === "failed") return status;
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new ApiError("抽取任务超时，请稍后在文件解析中查看进度", 408);
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
 }
 

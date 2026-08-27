@@ -3,7 +3,14 @@
 全部基于 Word OOXML 文档对象模型直接检查，不调用大模型，确保这一层零幻觉、可复现。
 """
 
-from .docx_extract import extract_paragraphs, get_core_author, has_revision_marks, has_toc_field
+from .docx_extract import (
+    extract_paragraphs,
+    get_core_author,
+    has_blank_page_hint,
+    has_comments,
+    has_revision_marks,
+    has_toc_field,
+)
 
 HEADING_PREFIX = "Heading "
 
@@ -31,7 +38,7 @@ def _outline_from_style(style_name: str) -> int | None:
     return None
 
 
-def run(path: str, paragraphs: list[dict] | None = None) -> list[dict]:
+def run(path: str, paragraphs: list[dict] | None = None, context=None) -> list[dict]:
     findings: list[dict] = []
     paragraphs = paragraphs if paragraphs is not None else extract_paragraphs(path)
 
@@ -72,6 +79,28 @@ def run(path: str, paragraphs: list[dict] | None = None) -> list[dict]:
             )
         )
 
+    if has_comments(path):
+        findings.append(
+            _finding(
+                severity="建议",
+                location="全文 / 批注",
+                excerpt="检测到 Word 批注残留",
+                rule="F06.06 版式终审-批注",
+                suggestion="删除全部批注后再提交，避免评审端看到内部讨论",
+            )
+        )
+
+    if has_blank_page_hint(path):
+        findings.append(
+            _finding(
+                severity="建议",
+                location="全文 / 空白页",
+                excerpt="检测到连续空段落，可能存在空白页",
+                rule="F06.06 版式终审-空白页",
+                suggestion="删除多余空段与空白页，避免被认定为文件形态不合规",
+            )
+        )
+
     author = get_core_author(path)
     if author:
         findings.append(
@@ -80,8 +109,30 @@ def run(path: str, paragraphs: list[dict] | None = None) -> list[dict]:
                 location="文档属性 / 作者信息",
                 excerpt=f"文档属性中检测到作者信息「{author}」",
                 rule="F06.06 版式终审-暗标残留",
-                suggestion="若本项目要求暗标评审，请在 Word「文件→信息→检查文档」中清除作者等个人身份信息",
+                    suggestion="若本项目要求暗标评审，请在 Word「文件→信息→检查文档」中清除作者等个人身份信息",
+                )
             )
-        )
+
+    if context is not None:
+        if getattr(context, "encrypted", False):
+            findings.append(
+                _finding(
+                    severity="废标",
+                    location="全文 / 文件形态",
+                    excerpt="投标文件无法正常打开或已加密",
+                    rule="F06.06 版式终审-文件加密",
+                    suggestion="请提交未加密、可正常打开的 .docx；加密文件无法完成预审抽取",
+                )
+            )
+        if getattr(context, "scanned_pdf", False):
+            findings.append(
+                _finding(
+                    severity="降档",
+                    location="全文 / 扫描件 PDF",
+                    excerpt="检测到纯图片扫描 PDF，几乎无文字层",
+                    rule="F06.06 版式终审-扫描件 PDF",
+                    suggestion="请改用可复制文字的 Word/PDF，避免评审端无法检索",
+                )
+            )
 
     return findings

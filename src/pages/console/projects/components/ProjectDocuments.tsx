@@ -1,24 +1,123 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import Modal from "../../components/Modal";
-import { projectDocGroups, docGroupMeta, type GroupDoc, type DocGroupKey } from "@/mocks/projectDocs";
+import { useAuth } from "@/context/AuthContext";
+import {
+  downloadBidDocumentFile,
+  downloadTenderDocument,
+  getProjectDocuments,
+  triggerFileDownload,
+  type BidDocumentSummary,
+  type TenderDocumentSummary,
+} from "@/lib/api";
 
-const extColor: Record<GroupDoc["ext"], string> = {
-  Word: "text-primary-600 bg-primary-50",
-  PDF: "text-accent-600 bg-accent-50",
-  Excel: "text-secondary-700 bg-secondary-50",
+interface ProjectDocumentsProps {
+  projectId: string;
+}
+
+const SOURCE_LABELS: Record<string, string> = {
+  upload: "手动上传",
+  workbench: "预审示例文档",
+  writer: "撰写工作台导出",
+  revision: "修改闭环保存版本",
+  "export-anon": "导出中心（暗标版）",
 };
 
-const statusColor: Record<string, string> = {
-  已解析: "bg-primary-100 text-primary-600",
-  已完成: "bg-secondary-100 text-secondary-700",
-  修订中: "bg-accent-100 text-accent-600",
+function formatSize(bytes: number): string {
+  if (!bytes) return "—";
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatTime(iso: string): string {
+  if (!iso) return "—";
+  return iso.slice(0, 10);
+}
+
+type PreviewDoc = {
+  id: string;
+  name: string;
+  kind: "tender" | "bid";
+  sourceLabel: string;
+  size: string;
+  updated: string;
 };
 
-export default function ProjectDocuments() {
-  const [preview, setPreview] = useState<{ doc: GroupDoc; groupLabel: string } | null>(null);
+export default function ProjectDocuments({ projectId }: ProjectDocumentsProps) {
+  const { token } = useAuth();
+  const [tenderDocs, setTenderDocs] = useState<TenderDocumentSummary[]>([]);
+  const [bidDocs, setBidDocs] = useState<BidDocumentSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [preview, setPreview] = useState<PreviewDoc | null>(null);
+  const [downloading, setDownloading] = useState(false);
 
-  const totalCount = projectDocGroups.reduce((s, g) => s + g.docs.length, 0);
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    setLoading(true);
+    getProjectDocuments(token, projectId)
+      .then((data) => {
+        if (cancelled) return;
+        setTenderDocs(data.tenderDocuments);
+        setBidDocs(data.bidDocuments);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setTenderDocs([]);
+        setBidDocs([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token, projectId]);
+
+  const totalCount = tenderDocs.length + bidDocs.length;
+
+  const handleDownload = async (doc: PreviewDoc) => {
+    setDownloading(true);
+    try {
+      const blob = doc.kind === "tender" ? await downloadTenderDocument(doc.id) : await downloadBidDocumentFile(doc.id);
+      triggerFileDownload(blob, doc.name);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const groups = [
+    {
+      key: "tender",
+      label: "招标文件",
+      desc: "本项目已上传的招标文件，可供招标解析直接选用",
+      icon: "ri-file-list-3-line",
+      color: "bg-primary-50 text-primary-600",
+      docs: tenderDocs.map((d) => ({
+        id: d.id,
+        name: d.filename,
+        kind: "tender" as const,
+        sourceLabel: "招标文件",
+        size: formatSize(d.sizeBytes),
+        updated: formatTime(d.uploadedAt),
+      })),
+    },
+    {
+      key: "bid",
+      label: "投标文件与工作台产出",
+      desc: "手动上传、撰写工作台导出、修改闭环保存版本等真实文件",
+      icon: "ri-file-word-2-line",
+      color: "bg-accent-50 text-accent-600",
+      docs: bidDocs.map((d) => ({
+        id: d.id,
+        name: d.filename,
+        kind: "bid" as const,
+        sourceLabel: SOURCE_LABELS[d.source] || d.source,
+        size: formatSize(d.sizeBytes),
+        updated: formatTime(d.uploadedAt),
+      })),
+    },
+  ];
 
   return (
     <div>
@@ -29,72 +128,62 @@ export default function ProjectDocuments() {
             全部文档
           </h3>
           <p className="mt-1 text-xs text-foreground-500">
-            共 {totalCount} 份文档，按招标文件、招标解析、技术标、商务标四大类归档，点击可查看内容详情
+            按当前项目聚合真实招标文件与投标文件，点击可查看元数据并下载原文件
           </p>
         </div>
         <span className="rounded-full border border-background-300 bg-background-50 px-2.5 py-1 text-xs text-foreground-500">
-          {totalCount} 份文档
+          {loading ? "加载中" : `${totalCount} 份文档`}
         </span>
       </div>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        {projectDocGroups.map((group) => {
-          const meta = docGroupMeta[group.key as DocGroupKey];
-          return (
-            <div
-              key={group.key}
-              className="group overflow-hidden rounded-lg border border-background-300 bg-background-100 transition-colors hover:border-primary-300/60"
-            >
-              {/* 分组头 */}
-              <div className="relative flex items-center gap-3 border-b border-background-200 px-4 py-3">
-                <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${meta.color}`}>
-                  <i className={`${group.icon} text-base`}></i>
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-foreground-900">{group.label}</span>
-                    <span className="font-label rounded-full bg-background-200 px-1.5 py-0.5 text-[10px] text-foreground-600">
-                      {group.docs.length} 份
-                    </span>
-                  </div>
-                  <p className="mt-0.5 truncate text-[11px] text-foreground-500">{group.desc}</p>
+        {groups.map((group) => (
+          <div
+            key={group.key}
+            className="group overflow-hidden rounded-lg border border-background-300 bg-background-100 transition-colors hover:border-primary-300/60"
+          >
+            <div className="relative flex items-center gap-3 border-b border-background-200 px-4 py-3">
+              <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${group.color}`}>
+                <i className={`${group.icon} text-base`}></i>
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold text-foreground-900">{group.label}</span>
+                  <span className="font-label rounded-full bg-background-200 px-1.5 py-0.5 text-[10px] text-foreground-600">
+                    {group.docs.length} 份
+                  </span>
                 </div>
-                <i className="ri-folder-line text-lg text-foreground-300 transition-colors group-hover:text-primary-400"></i>
+                <p className="mt-0.5 truncate text-[11px] text-foreground-500">{group.desc}</p>
               </div>
-
-              {/* 文档列表 */}
-              <div className="divide-y divide-background-200">
-                {group.docs.map((doc) => (
+            </div>
+            <div className="divide-y divide-background-200">
+              {group.docs.length === 0 ? (
+                <div className="px-4 py-8 text-center text-xs text-foreground-500">该项目暂无此类文件</div>
+              ) : (
+                group.docs.map((doc) => (
                   <button
                     key={doc.id}
                     type="button"
-                    onClick={() => setPreview({ doc, groupLabel: group.label })}
+                    onClick={() => setPreview(doc)}
                     className="flex w-full cursor-pointer items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-background-50"
                   >
-                    <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${extColor[doc.ext]}`}>
-                      <i className={doc.ext === "Word" ? "ri-file-word-2-line text-base" : doc.ext === "PDF" ? "ri-file-pdf-2-line text-base" : "ri-file-excel-2-line text-base"}></i>
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary-50 text-primary-600">
+                      <i className="ri-file-word-2-line text-base"></i>
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-medium text-foreground-900">
-                        {doc.name}
-                      </span>
+                      <span className="block truncate text-sm font-medium text-foreground-900">{doc.name}</span>
                       <span className="block text-[11px] text-foreground-500">
-                        {doc.ext} · {doc.size}
-                        {doc.pages ? ` · ${doc.pages} 页` : ""} · 更新于 {doc.updated}
+                        DOCX · {doc.size} · {doc.sourceLabel} · {doc.updated}
                       </span>
                     </span>
-                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${statusColor[doc.status] ?? "bg-background-200 text-foreground-600"}`}>
-                      {doc.status}
-                    </span>
-                    <i className="ri-eye-line shrink-0 text-sm text-foreground-400 transition-colors hover:text-primary-500"></i>
+                    <i className="ri-download-2-line shrink-0 text-sm text-foreground-400"></i>
                   </button>
-                ))}
-              </div>
+                ))
+              )}
             </div>
-          );
-        })}
+          </div>
+        ))}
 
-        {/* 操作卡片 */}
         <div className="flex flex-col items-start justify-center gap-3 rounded-lg border border-dashed border-background-300 bg-background-100/60 p-5">
           <div className="text-sm font-medium text-foreground-800">需要继续推进这个项目？</div>
           <p className="text-xs text-foreground-500">
@@ -102,21 +191,21 @@ export default function ProjectDocuments() {
           </p>
           <div className="mt-1 flex flex-wrap gap-2">
             <Link
-              to="/console/parse"
+              to={`/console/parse?project=${projectId}`}
               className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-background-300 bg-background-50 px-3.5 text-xs font-medium text-foreground-700 transition-colors hover:bg-background-200"
             >
               <i className="ri-file-settings-line text-sm"></i>
               招标解析
             </Link>
             <Link
-              to="/console/writer"
+              to={`/console/writer?project=${projectId}`}
               className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-3.5 text-xs font-medium text-background-50 transition-colors hover:bg-primary-600"
             >
               <i className="ri-edit-2-line text-sm"></i>
               进入撰写工作台
             </Link>
             <Link
-              to="/console/audit"
+              to={`/console/audit?project=${projectId}`}
               className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-accent-200 bg-accent-50 px-3.5 text-xs font-medium text-accent-600 transition-colors hover:bg-accent-100"
             >
               <i className="ri-shield-check-line text-sm"></i>
@@ -126,45 +215,33 @@ export default function ProjectDocuments() {
         </div>
       </div>
 
-      {/* 文档详情预览弹窗 */}
       <Modal
         open={!!preview}
         onClose={() => setPreview(null)}
-        title={preview?.doc.name ?? ""}
-        subtitle={preview ? `${preview.groupLabel} · ${preview.doc.ext} · ${preview.doc.size} · ${preview.doc.pages ?? "—"} 页 · 更新于 ${preview.doc.updated}` : ""}
+        title={preview?.name ?? ""}
+        subtitle={preview ? `${preview.sourceLabel} · DOCX · ${preview.size} · ${preview.updated}` : ""}
       >
         {preview && (
           <div className="space-y-4">
-            <div>
-              <div className="font-label mb-1.5 text-xs text-foreground-500">文件说明</div>
-              <p className="rounded-md bg-background-50 px-3 py-2.5 text-sm leading-relaxed text-foreground-800">
-                {preview.doc.desc}
-              </p>
-            </div>
-            <div>
-              <div className="font-label mb-1.5 text-xs text-foreground-500">内容要点</div>
-              <ul className="space-y-2">
-                {preview.doc.content.map((item, i) => (
-                  <li key={i} className="flex items-start gap-2.5 rounded-md bg-background-50 px-3 py-2 text-sm leading-relaxed text-foreground-700">
-                    <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-primary-50 text-[10px] font-bold text-primary-500">
-                      {i + 1}
-                    </span>
-                    <span>{item}</span>
-                  </li>
-                ))}
-              </ul>
+            <div className="rounded-md bg-background-50 px-3 py-2.5 text-sm text-foreground-700">
+              真实文件已落库，可直接下载原始 .docx，系统不生成内容摘要。
             </div>
             <div className="flex items-center justify-end gap-2 border-t border-background-200 pt-3">
-              <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${statusColor[preview.doc.status] ?? "bg-background-200 text-foreground-600"}`}>
-                {preview.doc.status}
-              </span>
               <button
                 type="button"
                 onClick={() => setPreview(null)}
-                className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-4 text-xs font-medium text-background-50 transition-colors hover:bg-primary-600"
+                className="h-8 cursor-pointer rounded-md border border-background-300 px-3 text-xs text-foreground-600"
               >
-                <i className="ri-download-2-line text-sm"></i>
-                下载文件
+                关闭
+              </button>
+              <button
+                type="button"
+                disabled={downloading}
+                onClick={() => handleDownload(preview)}
+                className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-4 text-xs font-medium text-background-50 transition-colors hover:bg-primary-600 disabled:opacity-60"
+              >
+                <i className={`${downloading ? "ri-loader-4-line animate-spin" : "ri-download-2-line"} text-sm`}></i>
+                {downloading ? "下载中…" : "下载文件"}
               </button>
             </div>
           </div>

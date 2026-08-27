@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import PageHeader from "../components/PageHeader";
-import { auditLogs } from "@/mocks/auditLog";
+import { useAuth } from "@/context/AuthContext";
+import { listAuditLogs, type AuditLogItem } from "@/lib/api";
 
 const actionIcon: Record<string, string> = {
   导出: "ri-download-2-line",
@@ -25,17 +26,48 @@ const actionColor: Record<string, string> = {
 const actionFilters = ["全部", "解析", "确认对标", "引用知识", "发起预审", "AI 改写", "改写接受", "导出"];
 
 export default function AuditLogPage() {
+  const { token } = useAuth();
   const [action, setAction] = useState("全部");
   const [keyword, setKeyword] = useState("");
+  const [items, setItems] = useState<AuditLogItem[]>([]);
+  const [weekTotal, setWeekTotal] = useState(0);
+  const [weekExport, setWeekExport] = useState(0);
+  const [aiCount, setAiCount] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
-  const filtered = useMemo(() => {
-    let list = auditLogs;
-    if (action !== "全部") list = list.filter((l) => l.action === action);
-    if (keyword.trim()) {
-      list = list.filter((l) => l.target.includes(keyword.trim()) || l.user.includes(keyword.trim()));
+  useEffect(() => {
+    if (!token) {
+      setItems([]);
+      setLoading(false);
+      return;
     }
-    return list;
-  }, [action, keyword]);
+    let cancelled = false;
+    const handle = window.setTimeout(() => {
+      setLoading(true);
+      setError("");
+      listAuditLogs(token, { action, keyword })
+        .then((data) => {
+          if (cancelled) return;
+          setItems(data.items);
+          setWeekTotal(data.weekTotal);
+          setWeekExport(data.weekExport);
+          setAiCount(data.aiCount);
+        })
+        .catch((err: unknown) => {
+          if (cancelled) return;
+          setItems([]);
+          setError(err instanceof Error ? err.message : "加载审计日志失败");
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    }, keyword ? 280 : 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, [token, action, keyword]);
 
   const inputCls =
     "h-9 w-full rounded-md border border-background-300 bg-background-50 px-3 text-sm text-foreground-900 outline-none transition-all focus:border-primary-400 focus:ring-1 focus:ring-primary-400/20 placeholder:text-foreground-500";
@@ -47,7 +79,6 @@ export default function AuditLogPage() {
         description="解析、引用知识、预审、改写接受、导出全程留痕（操作者、对象、版本），满足内部审计与数据最小化要求。"
       />
 
-      {/* 统计 */}
       <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
         <div className="flex items-center gap-3 rounded-lg border border-background-300 bg-background-100 p-3.5">
           <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary-400 to-primary-600 text-background-50">
@@ -55,7 +86,7 @@ export default function AuditLogPage() {
           </span>
           <div>
             <div className="font-label text-[11px] text-foreground-500">本周操作记录</div>
-            <div className="font-heading text-gradient text-lg font-bold">{auditLogs.length + 132}</div>
+            <div className="font-heading text-gradient text-lg font-bold">{weekTotal}</div>
           </div>
         </div>
         <div className="flex items-center gap-3 rounded-lg border border-background-300 bg-background-100 p-3.5">
@@ -64,7 +95,7 @@ export default function AuditLogPage() {
           </span>
           <div>
             <div className="font-label text-[11px] text-foreground-500">本周导出次数</div>
-            <div className="font-heading text-gradient text-lg font-bold">18</div>
+            <div className="font-heading text-gradient text-lg font-bold">{weekExport}</div>
           </div>
         </div>
         <div className="flex items-center gap-3 rounded-lg border border-background-300 bg-background-100 p-3.5">
@@ -73,12 +104,11 @@ export default function AuditLogPage() {
           </span>
           <div>
             <div className="font-label text-[11px] text-foreground-500">AI 改写 / 引用次数</div>
-            <div className="font-heading text-gradient text-lg font-bold">96</div>
+            <div className="font-heading text-gradient text-lg font-bold">{aiCount}</div>
           </div>
         </div>
       </div>
 
-      {/* 筛选 */}
       <div className="mb-4 flex flex-col gap-3 rounded-lg border border-background-300 bg-background-100 p-3.5 lg:flex-row lg:items-center">
         <div className="flex flex-wrap items-center gap-1.5">
           {actionFilters.map((a) => (
@@ -108,44 +138,56 @@ export default function AuditLogPage() {
         </div>
       </div>
 
-      {/* 时间线 */}
       <div className="rounded-lg border border-background-300 bg-background-100 p-5">
-        <ul className="relative space-y-0">
-          {filtered.map((log) => (
-            <li key={log.id} className="relative flex gap-4 pb-5 last:pb-0">
-              {/* 时间线竖线 */}
-              <span className="absolute left-[15px] top-8 bottom-0 w-px bg-background-300" />
-              <span className={`relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br ${actionColor[log.action] || "from-secondary-400 to-secondary-500"} text-background-50`}>
-                <i className={`${actionIcon[log.action] || "ri-history-line"} text-sm`}></i>
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-medium text-foreground-900">{log.action}</span>
-                    <span className="whitespace-nowrap text-xs text-foreground-500">{log.target}</span>
-                    <span className="inline-flex items-center whitespace-nowrap rounded bg-secondary-100 px-1.5 py-0.5 font-label text-[10px] text-secondary-700">
-                      版本 {log.version}
-                    </span>
+        {error && <p className="mb-4 text-sm text-red-600">{error}</p>}
+        {loading && items.length === 0 ? (
+          <div className="py-16 text-center text-sm text-foreground-500">加载中…</div>
+        ) : (
+          <ul className="relative space-y-0">
+            {items.map((log) => (
+              <li key={log.id} className="relative flex gap-4 pb-5 last:pb-0">
+                <span className="absolute left-[15px] top-8 bottom-0 w-px bg-background-300" />
+                <span
+                  className={`relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br ${actionColor[log.action] || "from-secondary-400 to-secondary-500"} text-background-50`}
+                >
+                  <i className={`${actionIcon[log.action] || "ri-history-line"} text-sm`}></i>
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium text-foreground-900">{log.action}</span>
+                      <span className="whitespace-nowrap text-xs text-foreground-500">{log.target}</span>
+                      <span className="inline-flex items-center whitespace-nowrap rounded bg-secondary-100 px-1.5 py-0.5 font-label text-[10px] text-secondary-700">
+                        版本 {log.version}
+                      </span>
+                      {log.result === "阻断" && (
+                        <span className="inline-flex items-center whitespace-nowrap rounded bg-red-50 px-1.5 py-0.5 font-label text-[10px] text-red-600">
+                          已阻断
+                        </span>
+                      )}
+                    </div>
+                    <span className="font-label whitespace-nowrap text-xs text-foreground-500">{log.time}</span>
                   </div>
-                  <span className="font-label whitespace-nowrap text-xs text-foreground-500">{log.time}</span>
+                  <p className="mt-1 text-xs text-foreground-600">{log.detail}</p>
+                  <div className="mt-1 flex items-center gap-1.5 text-[11px] text-foreground-500">
+                    <span className="flex h-4 w-4 items-center justify-center rounded-full bg-secondary-100 text-[9px] font-medium text-secondary-700">
+                      {log.user.charAt(0)}
+                    </span>
+                    {log.user}
+                  </div>
                 </div>
-                <p className="mt-1 text-xs text-foreground-600">{log.detail}</p>
-                <div className="mt-1 flex items-center gap-1.5 text-[11px] text-foreground-500">
-                  <span className="flex h-4 w-4 items-center justify-center rounded-full bg-secondary-100 text-[9px] font-medium text-secondary-700">
-                    {log.user.charAt(0)}
-                  </span>
-                  {log.user}
-                </div>
-              </div>
-            </li>
-          ))}
-          {filtered.length === 0 && (
-            <li className="py-16 text-center">
-              <i className="ri-inbox-line text-3xl text-foreground-400"></i>
-              <p className="mt-3 text-sm text-foreground-500">没有匹配的审计记录</p>
-            </li>
-          )}
-        </ul>
+              </li>
+            ))}
+            {items.length === 0 && !loading && (
+              <li className="py-16 text-center">
+                <i className="ri-inbox-line text-3xl text-foreground-400"></i>
+                <p className="mt-3 text-sm text-foreground-500">
+                  {keyword || action !== "全部" ? "没有匹配的审计记录" : "暂无审计记录，完成解析、预审、导出等操作后会显示在这里"}
+                </p>
+              </li>
+            )}
+          </ul>
+        )}
       </div>
     </div>
   );

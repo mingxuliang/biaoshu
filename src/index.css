@@ -227,17 +227,14 @@ input[name="website_alt"] {
 
 /* ---------- Word 式编辑器主题 ---------- */
 .lex-editor {
-  font-family: var(--font-body);
-  font-size: 14px;
+  font-family: "宋体", SimSun, serif;
+  font-size: 12pt;
   line-height: 1.85;
   color: oklch(var(--foreground-800));
   caret-color: oklch(var(--primary-600));
   outline: none;
 }
 .lex-editor .editor-paragraph {
-  margin: 0 0 0.55em;
-}
-.lex-editor p[data-lex-block="true"] {
   margin: 0 0 0.55em;
 }
 .lex-editor .editor-heading-h1 {
@@ -260,6 +257,12 @@ input[name="website_alt"] {
   font-weight: 600;
   color: oklch(var(--foreground-900));
   margin: 0.8em 0 0.4em;
+}
+.lex-editor .editor-heading-h4 {
+  font-size: 14px;
+  font-weight: 600;
+  color: oklch(var(--foreground-800));
+  margin: 0.7em 0 0.35em;
 }
 .lex-editor .editor-text-bold { font-weight: 700; }
 .lex-editor .editor-text-italic { font-style: italic; }
@@ -285,7 +288,16 @@ input[name="website_alt"] {
   padding: 6px 10px;
   font-size: 13px;
 }
-.lex-editor th { background: oklch(var(--background-100)); font-weight: 600; }
+.lex-editor .editor-image-wrap {
+  display: block;
+  margin: 0.8em 0;
+  text-align: center;
+}
+.lex-editor .editor-image-wrap img {
+  max-height: 18rem;
+  max-width: 100%;
+  object-fit: contain;
+}
 
 /* 问题句高亮底色（按严重级） */
 .mark-fatal {
@@ -335,4 +347,14 @@ input[name="website_alt"] {
 }
 .word-sheet--columns > * {
   break-inside: avoid;
+}
+
+.tender-docx-host [data-tender-hit="1"] {
+  background: oklch(var(--accent-100));
+  box-decoration-break: clone;
+}
+.tender-docx-host [data-tender-flash="1"] {
+  outline: 2px solid oklch(var(--primary-500) / 0.85);
+  outline-offset: 2px;
+  background: oklch(var(--primary-50));
 }

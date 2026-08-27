@@ -3,6 +3,7 @@ import OutlineTree from "./OutlineTree";
 import KnowledgePicker from "./KnowledgePicker";
 import FloatingChat from "./FloatingChat";
 import Toast from "../../components/Toast";
+import WordViewer, { type WordViewerHandle } from "../../parse/components/WordViewer";
 import {
   createOutlineJob,
   getLatestChecklist,
@@ -16,6 +17,8 @@ import {
   type ProjectDto,
   type TenderParagraph,
 } from "@/lib/api";
+import { compactOutlineTitles, displayOutlineTitle, isOriginalFormTitle, renumberOutline } from "@/lib/outlineNum";
+import { findTenderAnchor } from "@/lib/tenderAnchor";
 
 interface OutlineStepProps {
   projectId: string;
@@ -25,6 +28,7 @@ interface OutlineStepProps {
   outline: OutlineNode[];
   onOutlineChange: (nodes: OutlineNode[]) => void;
   initialKnowledgeRefs?: Record<string, KnowledgeRef[]>;
+  onOutlineRegenerated?: (payload?: { chapterContents?: Record<string, string> }) => void;
   onNext: () => void;
   onBack: () => void;
 }
@@ -49,6 +53,7 @@ export default function OutlineStep({
   outline,
   onOutlineChange,
   initialKnowledgeRefs,
+  onOutlineRegenerated,
   onNext,
   onBack,
 }: OutlineStepProps) {
@@ -69,8 +74,10 @@ export default function OutlineStep({
   const [tenderParagraphs, setTenderParagraphs] = useState<TenderParagraph[]>([]);
   const [tenderLoading, setTenderLoading] = useState(false);
   const [tenderError, setTenderError] = useState<string | null>(null);
+  const [tenderAnchor, setTenderAnchor] = useState<number | null>(null);
 
   const cardRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const viewerRef = useRef<WordViewerHandle>(null);
 
   useEffect(() => {
     if (!outline.some((n) => n.id === activeId)) {
@@ -98,7 +105,7 @@ export default function OutlineStep({
   }, [projectId]);
 
   useEffect(() => {
-    if (tab !== "tenderDoc" || !checklist?.tender_document_id || tenderParagraphs.length > 0) return;
+    if (!checklist?.tender_document_id) return;
     let cancelled = false;
     setTenderLoading(true);
     setTenderError(null);
@@ -115,8 +122,7 @@ export default function OutlineStep({
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, checklist?.tender_document_id]);
+  }, [checklist?.tender_document_id]);
 
   const active = outline.find((n) => n.id === activeId) ?? outline[0];
   const optimizedCount = outline.filter((n) => n.optimized).length;
@@ -131,19 +137,35 @@ export default function OutlineStep({
     onOutlineChange(outline.map((n) => (n.id === id ? { ...n, ...patch } : n)));
   };
 
-  const generateOutline = async () => {
+  const generateOutline = async (replaceExisting: boolean) => {
+    if (replaceExisting && outline.length > 0) {
+      const ok = window.confirm(
+        "将按招标文件重新生成全部目录。当前目录、编写思路、章节知识库绑定和已生成正文都会被替换，是否继续？",
+      );
+      if (!ok) return;
+    }
     setGeneratingOutline(true);
     try {
       const job = await createOutlineJob(draftId);
-      const result = await pollWriterJobUntilDone(job.jobId, { intervalMs: 1500, timeoutMs: 3 * 60 * 1000 });
+      const result = await pollWriterJobUntilDone(job.jobId, { intervalMs: 1500, timeoutMs: 10 * 60 * 1000 });
       if (result.status === "failed") {
         showToast(result.error || "目录生成失败，请重试", "error");
         return;
       }
       const refreshed = await getOrCreateWriterDraft(projectId);
-      onOutlineChange(refreshed.outline);
-      setActiveId(refreshed.outline[0]?.id ?? "");
-      showToast("AI 已生成目录草案，可继续编辑与优化");
+      const compacted = compactOutlineTitles(refreshed.outline || []);
+      onOutlineChange(compacted);
+      updateWriterDraft(draftId, { outline: compacted }).catch(() => {
+        /* 标题收短失败不阻塞目录展示，进入下一步时会再次保存 */
+      });
+      setKnowledgeMap({});
+      setActiveId(compacted[0]?.id ?? "");
+      onOutlineRegenerated?.({ chapterContents: refreshed.chapterContents || {} });
+      showToast(
+        replaceExisting
+          ? `已重新生成全部目录，共 ${compacted.length} 个节点`
+          : "已生成应标目录：短名称原样保留，需求说明已提炼为短标题",
+      );
     } catch {
       showToast("目录生成失败，请检查网络后重试", "error");
     } finally {
@@ -169,7 +191,7 @@ export default function OutlineStep({
       words: 0,
       aiRounds: 0,
     };
-    onOutlineChange([...outline, base]);
+    onOutlineChange(renumberOutline([...outline, base]));
     setActiveId(newId);
     setTab("outline");
     showToast("已新增章节，可编辑标题与编写思路");
@@ -205,18 +227,33 @@ export default function OutlineStep({
     }
   };
 
-  // 点击左侧目录树时，如果在「目录编写思路」标签，滚动到对应卡片
   const handleSelect = (id: string) => {
     setActiveId(id);
+    if (tab === "tenderDoc") {
+      const node = outline.find((n) => n.id === id);
+      const idx = findTenderAnchor(node, tenderParagraphs);
+      setTenderAnchor(idx);
+      window.setTimeout(() => {
+        if (idx != null) viewerRef.current?.scrollToIndex(idx);
+      }, 80);
+      if (idx == null && tenderParagraphs.length > 0) {
+        showToast("未在招标文件中定位到该章对应条款", "info");
+      }
+      return;
+    }
     if (tab === "outline") {
       window.setTimeout(() => {
-        const el = cardRefs.current[id];
-        if (el) {
-          el.scrollIntoView({ behavior: "smooth", block: "center" });
-        }
+        cardRefs.current[id]?.scrollIntoView({ behavior: "smooth", block: "center" });
       }, 50);
     }
   };
+
+  useEffect(() => {
+    if (tab !== "outline" || !activeId) return;
+    window.setTimeout(() => {
+      cardRefs.current[activeId]?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 50);
+  }, [tab]);
 
   const tabCls = (t: RightTab) =>
     `flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
@@ -239,7 +276,7 @@ export default function OutlineStep({
         </span>
         <div>
           <div className="font-heading text-sm font-semibold tracking-wide text-foreground-900">第三步 · 目录生成</div>
-          <div className="text-xs text-foreground-500">目录与编写思路支持 AI 优化与手动编辑，可为每章绑定参考知识库</div>
+          <div className="text-xs text-foreground-500">功能需求逐条对应；项目管理等其余需求整理为应标目录并覆盖全文</div>
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">
           <span className="rounded-md bg-secondary-100 px-2 py-1 text-[11px] font-medium text-secondary-700">
@@ -248,8 +285,20 @@ export default function OutlineStep({
           {outline.length > 0 && (
             <button
               type="button"
+              onClick={() => generateOutline(true)}
+              disabled={generatingOutline}
+              className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-accent-200 bg-accent-50 px-3 text-xs font-medium text-accent-700 transition-colors hover:bg-accent-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <i className={`${generatingOutline ? "ri-loader-4-line animate-spin" : "ri-refresh-line"} text-xs`}></i>
+              {generatingOutline ? "正在重新生成…" : "重新生成目录"}
+            </button>
+          )}
+          {outline.length > 0 && (
+            <button
+              type="button"
               onClick={optimizeAll}
-              className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-primary-200 bg-primary-50 px-3 text-xs font-medium text-primary-600 transition-colors hover:bg-primary-100"
+              disabled={generatingOutline}
+              className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-primary-200 bg-primary-50 px-3 text-xs font-medium text-primary-600 transition-colors hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-60"
             >
               <i className="ri-sparkling-2-line text-xs"></i>
               AI 整体优化目录
@@ -258,7 +307,8 @@ export default function OutlineStep({
           <button
             type="button"
             onClick={addTopChapter}
-            className="flex h-8 cursor-pointer items-center gap-1 whitespace-nowrap rounded-md border border-background-300 bg-background-50 px-3 text-xs font-medium text-foreground-600 transition-colors hover:bg-background-200"
+            disabled={generatingOutline}
+            className="flex h-8 cursor-pointer items-center gap-1 whitespace-nowrap rounded-md border border-background-300 bg-background-50 px-3 text-xs font-medium text-foreground-600 transition-colors hover:bg-background-200 disabled:cursor-not-allowed disabled:opacity-60"
           >
             <i className="ri-add-line text-sm"></i>
             新增章节
@@ -277,6 +327,11 @@ export default function OutlineStep({
             onNodesChange={onOutlineChange}
             onKnowledge={(id) => setPickerId(id)}
             knowledgeCounts={Object.fromEntries(Object.entries(knowledgeMap).map(([k, v]) => [k, v.length]))}
+            locateHint={
+              tab === "tenderDoc"
+                ? "当前在招标文件页：点击章节锚定到对应需求条款"
+                : "当前在编写思路页：点击章节定位到该章编写思路"
+            }
           />
         </div>
 
@@ -312,11 +367,11 @@ export default function OutlineStep({
                   </span>
                   <div className="text-sm font-semibold text-foreground-900">尚未生成目录</div>
                   <p className="max-w-md text-xs text-foreground-500">
-                    点击下方按钮，AI 将结合已锁定的评标尺子（评分规则 / 星号条款）自动生成一份可编辑的目录大纲，你也可以随时手动新增/调整章节。
+                    将由大模型阅读招标文件全文，按招标每一条独立要求编制可逐条打勾的应标目录。生成约需 1～3 分钟。
                   </p>
                   <button
                     type="button"
-                    onClick={generateOutline}
+                    onClick={() => generateOutline(false)}
                     disabled={generatingOutline}
                     className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-4 text-sm font-medium text-background-50 transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-60"
                   >
@@ -345,10 +400,10 @@ export default function OutlineStep({
                         >
                           {/* 章节标题行 */}
                           <div className="mb-3 flex flex-wrap items-center gap-2">
-                            <span className="font-label rounded bg-secondary-100 px-2 py-0.5 text-xs font-medium text-secondary-700">
-                              第 {node.num} 章
+                            <span className="font-label shrink-0 rounded bg-secondary-100 px-2 py-0.5 text-xs font-medium text-secondary-700">
+                              {node.num}
                             </span>
-                            <span className="min-w-0 truncate text-sm font-semibold text-foreground-900">{node.title}</span>
+                            <span className="min-w-0 truncate text-sm font-semibold text-foreground-900">{displayOutlineTitle(node.title, node.num)}</span>
                             {node.optimized && (
                               <span className="flex items-center gap-1 rounded bg-primary-50 px-2 py-0.5 text-[11px] font-medium text-primary-600">
                                 <i className="ri-sparkling-2-line"></i>已 AI 优化
@@ -362,8 +417,16 @@ export default function OutlineStep({
                           {/* 编写思路标签 */}
                           <div className="mb-2 flex items-center gap-1.5">
                             <i className="ri-lightbulb-flash-line text-sm text-accent-500"></i>
-                            <span className="text-xs font-medium text-foreground-700">编写思路</span>
-                            <span className="text-[11px] text-foreground-500">—— 决定本章节的编写方向和页数，点击目录优化路径</span>
+                            <span className="text-xs font-medium text-foreground-700">
+                              {isOriginalFormTitle(node.title, node.num) || node.status === "用原文"
+                                ? "使用招标书原文"
+                                : "编写思路"}
+                            </span>
+                            <span className="text-[11px] text-foreground-500">
+                              {isOriginalFormTitle(node.title, node.num) || node.status === "用原文"
+                                ? "—— 固定格式件填写后打印签字，不展开目录、不撰写正文"
+                                : "—— 功能点写应实现条款；其余需求写应覆盖全文，生成正文时按此应标"}
+                            </span>
                           </div>
 
                           {/* 编写思路输入 */}
@@ -372,12 +435,12 @@ export default function OutlineStep({
                               value={node.idea}
                               onChange={(e) => update(node.id, { idea: e.target.value })}
                               onBlur={saveOutline}
-                              rows={4}
-                              maxLength={500}
+                              rows={8}
+                              maxLength={8000}
                               className="w-full resize-none rounded-md border border-background-300 bg-background-50 px-3 py-2.5 text-sm leading-relaxed text-foreground-800 outline-none transition-all focus:border-primary-400 focus:ring-1 focus:ring-primary-400/20"
                             />
                             <div className="mt-1 flex items-center justify-between text-[11px] text-foreground-400">
-                              <span>{node.idea.length}/500</span>
+                              <span>{node.idea.length}/8000</span>
                               <button
                                 type="button"
                                 onClick={() => update(node.id, { idea: node.aiIdea, optimized: true })}
@@ -503,7 +566,8 @@ export default function OutlineStep({
                     <button
                       type="button"
                       onClick={onNext}
-                      className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-4 text-sm font-medium text-background-50 transition-colors hover:bg-primary-600"
+                      disabled={generatingOutline || outline.length === 0}
+                      className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-4 text-sm font-medium text-background-50 transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       目录确认，进入正文生成
                       <i className="ri-arrow-right-s-line text-base"></i>
@@ -516,7 +580,7 @@ export default function OutlineStep({
 
           {/* ========== 招标文件 ========== */}
           {tab === "tenderDoc" && (
-            <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto bg-background-200/60 px-4 py-5">
+            <div className="flex min-h-0 flex-1 flex-col p-3">
               {checklistLoading || tenderLoading ? (
                 <div className="flex flex-1 items-center justify-center text-xs text-foreground-500">
                   <i className="ri-loader-4-line mr-1.5 animate-spin"></i>
@@ -529,27 +593,15 @@ export default function OutlineStep({
               ) : tenderError ? (
                 <div className="flex flex-1 items-center justify-center text-xs text-red-500">{tenderError}</div>
               ) : (
-                <div className="w-full max-w-3xl space-y-3 rounded-lg bg-background-50 p-6 shadow-sm">
-                  <div className="mb-3 border-b border-background-200 pb-3 text-center">
-                    <div className="font-heading text-base font-semibold text-foreground-900">招标书原文 · 预览</div>
-                    <div className="mt-1 text-[11px] text-foreground-500">共 {tenderParagraphs.length} 个段落</div>
-                  </div>
-                  {tenderParagraphs.map((p) => {
-                    const isHeading = /heading/i.test(p.style) || (p.outlineLevel !== null && p.outlineLevel <= 2);
-                    return (
-                      <p
-                        key={p.index}
-                        className={
-                          isHeading
-                            ? "mb-1.5 text-sm font-semibold text-foreground-900"
-                            : "mb-1.5 text-[12px] leading-[1.9] text-foreground-600"
-                        }
-                      >
-                        {p.text}
-                      </p>
-                    );
-                  })}
-                </div>
+                <WordViewer
+                  ref={viewerRef}
+                  projectName={projectName}
+                  projectCode={project?.code ?? ""}
+                  tenderDocumentId={checklist.tender_document_id}
+                  fileName={projectName}
+                  paragraphs={tenderParagraphs}
+                  anchorIndex={tenderAnchor}
+                />
               )}
             </div>
           )}
@@ -770,7 +822,7 @@ export default function OutlineStep({
       </div>
 
       {/* 悬浮 AI 助手 */}
-      <FloatingChat projectName={projectName} />
+      <FloatingChat projectName={projectName} draftId={draftId} />
 
       {/* 知识库弹窗 */}
       {pickerId && pickerNode && (
@@ -783,6 +835,14 @@ export default function OutlineStep({
           onClose={() => setPickerId(null)}
           onSave={saveKnowledge}
         />
+      )}
+
+      {generatingOutline && outline.length > 0 && (
+        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-background-100/85 backdrop-blur-[1px]">
+          <i className="ri-loader-4-line animate-spin text-3xl text-primary-500"></i>
+          <div className="text-sm font-medium text-foreground-800">正在重新生成应标目录</div>
+          <div className="text-xs text-foreground-500">大模型正在阅读招标文件并编制应标目录，约需 1～3 分钟</div>
+        </div>
       )}
 
       <Toast message={toast.message} type={toast.type} visible={toast.visible} />

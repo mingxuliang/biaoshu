@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { OutlineNode } from "@/lib/api";
+import { displayOutlineTitle, renumberOutline } from "@/lib/outlineNum";
 
 interface OutlineTreeProps {
   nodes: OutlineNode[];
@@ -8,6 +9,7 @@ interface OutlineTreeProps {
   onNodesChange: (nodes: OutlineNode[]) => void;
   onKnowledge: (id: string) => void;
   knowledgeCounts?: Record<string, number>;
+  locateHint?: string;
 }
 
 type MenuAction = "rename" | "moveUp" | "moveDown" | "addSibling" | "addChild" | "delete";
@@ -17,8 +19,6 @@ interface ContextMenuState {
   x: number;
   y: number;
 }
-
-const CNUM_CHILD = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
 
 function getTopLevelNodes(nodes: OutlineNode[]): OutlineNode[] {
   return nodes.filter((n) => n.parentId === null);
@@ -41,18 +41,20 @@ function getSiblings(nodes: OutlineNode[], nodeId: string): OutlineNode[] {
 }
 
 function nextNum(nodes: OutlineNode[], parentId: string | null): string {
-  if (parentId === null) return String(getTopLevelNodes(nodes).length + 1);
-  const parent = nodes.find((n) => n.id === parentId);
-  const kids = getChildren(nodes, parentId);
-  return `${parent ? parent.num : ""}.${CNUM_CHILD[kids.length] ?? kids.length + 1}`;
+  const count = parentId === null ? getTopLevelNodes(nodes).length : getChildren(nodes, parentId).length;
+  return String(count + 1);
 }
 
 function getVisible(nodes: OutlineNode[]): OutlineNode[] {
   const out: OutlineNode[] = [];
-  for (const root of getTopLevelNodes(nodes)) {
-    out.push(root);
-    if (root.expanded) out.push(...getChildren(nodes, root.id));
-  }
+  const walk = (parentId: string | null) => {
+    const kids = parentId === null ? getTopLevelNodes(nodes) : getChildren(nodes, parentId);
+    for (const n of kids) {
+      out.push(n);
+      if (n.expanded) walk(n.id);
+    }
+  };
+  walk(null);
   return out;
 }
 
@@ -81,6 +83,7 @@ export default function OutlineTree({
   onNodesChange,
   onKnowledge,
   knowledgeCounts = {},
+  locateHint = "点击章节定位到对应编写思路；招标文件页可锚定原文条款",
 }: OutlineTreeProps) {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -127,7 +130,7 @@ export default function OutlineTree({
       switch (action) {
         case "rename":
           setEditingId(nodeId);
-          setEditValue(node.title);
+          setEditValue(displayOutlineTitle(node.title, node.num));
           break;
         case "moveUp":
         case "moveDown": {
@@ -140,7 +143,7 @@ export default function OutlineTree({
           const a = flat.findIndex((n) => n.id === nodeId);
           const b = flat.findIndex((n) => n.id === otherId);
           [flat[a], flat[b]] = [flat[b], flat[a]];
-          onNodesChange(flat);
+          onNodesChange(renumberOutline(flat));
           break;
         }
         case "addSibling": {
@@ -150,7 +153,7 @@ export default function OutlineTree({
           const insertIdx = flat.findIndex((n) => n.id === nodeId);
           const base = newNode(newId, nextNum(flat, node.parentId), node.parentId === null ? "新增章节" : "新增小节", node.parentId);
           flat.splice(insertIdx + 1, 0, base);
-          onNodesChange(flat);
+          onNodesChange(renumberOutline(flat));
           onSelect(newId);
           break;
         }
@@ -162,7 +165,7 @@ export default function OutlineTree({
           const insertIdx = flat.findIndex((n) => n.id === nodeId);
           const lastChildIdx = flat.reduce((last, n, i) => (n.parentId === nodeId ? i : last), insertIdx);
           flat.splice(lastChildIdx + 1, 0, base);
-          onNodesChange(flat);
+          onNodesChange(renumberOutline(flat));
           onSelect(newId);
           break;
         }
@@ -174,7 +177,7 @@ export default function OutlineTree({
           };
           collect(nodeId);
           const next = nodes.filter((n) => !del.has(n.id));
-          onNodesChange(next);
+          onNodesChange(renumberOutline(next));
           if (del.has(activeId)) onSelect(next[0]?.id ?? "");
           break;
         }
@@ -226,7 +229,7 @@ export default function OutlineTree({
           return (
             <div
               key={node.id}
-              className={`group relative flex cursor-pointer items-center gap-1 py-1 pr-1 transition-colors ${
+              className={`group relative flex cursor-pointer items-start gap-1 py-1.5 pr-1 transition-colors ${
                 active ? "bg-primary-50" : "hover:bg-background-50"
               }`}
               style={{ paddingLeft: `${level * 16 + 8}px` }}
@@ -242,15 +245,15 @@ export default function OutlineTree({
                     e.stopPropagation();
                     toggle(node.id);
                   }}
-                  className="flex h-4 w-4 shrink-0 cursor-pointer items-center justify-center rounded text-foreground-400 hover:text-foreground-600"
+                  className="mt-0.5 flex h-4 w-4 shrink-0 cursor-pointer items-center justify-center rounded text-foreground-400 hover:text-foreground-600"
                 >
                   <i className={`ri-arrow-right-s-line text-xs transition-transform ${node.expanded ? "rotate-90" : ""}`}></i>
                 </button>
               ) : (
-                <span className="h-4 w-4 shrink-0"></span>
+                <span className="mt-0.5 h-4 w-4 shrink-0"></span>
               )}
 
-              <span className={`font-label w-6 shrink-0 text-right text-[11px] ${active ? "text-primary-600" : "text-foreground-500"}`}>
+              <span className={`font-label mt-0.5 min-w-[2.75rem] shrink-0 text-right text-[11px] leading-snug ${active ? "text-primary-600" : "text-foreground-500"}`}>
                 {node.num}
               </span>
 
@@ -271,8 +274,8 @@ export default function OutlineTree({
                   onClick={(e) => e.stopPropagation()}
                 />
               ) : (
-                <span className={`min-w-0 flex-1 truncate text-xs ${active ? "font-medium text-primary-700" : "text-foreground-700"}`}>
-                  {node.title}
+                <span className={`min-w-0 flex-1 whitespace-normal break-words text-xs leading-snug ${active ? "font-medium text-primary-700" : "text-foreground-700"}`}>
+                  {displayOutlineTitle(node.title, node.num)}
                 </span>
               )}
 
@@ -320,7 +323,7 @@ export default function OutlineTree({
 
       <div className="border-t border-background-300 px-3 py-2.5 text-[11px] text-foreground-500">
         <i className="ri-sparkling-2-line mr-1 text-primary-500"></i>
-        右键章节可改名、移动、增删父子章节
+        {locateHint}
       </div>
 
       {contextMenu && (

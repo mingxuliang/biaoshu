@@ -11,24 +11,14 @@ import ProjectFormModal, { type ProjectFormValues } from "./components/ProjectFo
 import DeleteProjectModal from "./components/DeleteProjectModal";
 import { projectTypes, projectStatuses, type Project } from "@/mocks/projects";
 import { useProjects } from "@/context/ProjectContext";
-import { members, type Member } from "@/mocks/members";
+import { useAuth } from "@/context/AuthContext";
+import { hasPerm } from "@/lib/permissions";
 
 interface ToastState {
   message: string;
   type: "success" | "error" | "info";
   visible: boolean;
 }
-
-// 演示数据：各项目默认已分配成员（用于团队成员列展示）
-const defaultAssignments: Record<string, string[]> = {
-  "p-1001": ["m-01", "m-03", "m-05"],
-  "p-1002": ["m-02", "m-04"],
-  "p-1003": ["m-03", "m-06"],
-  "p-1004": ["m-01", "m-02", "m-05"],
-  "p-1005": ["m-03", "m-05", "m-07"],
-  "p-1006": ["m-01", "m-04"],
-  "p-1007": ["m-02", "m-03"],
-};
 
 const statCards = [
   { key: "total", label: "全部项目", icon: "ri-folder-2-line", gradient: "from-primary-400 to-primary-600", bar: "from-primary-500 to-primary-400" },
@@ -40,6 +30,8 @@ const statCards = [
 export default function ProjectsPage() {
   const navigate = useNavigate();
   const { projects, addProject, updateProject, deleteProject } = useProjects();
+  const { user } = useAuth();
+  const canEditProject = hasPerm(user?.role, "project_edit");
   const [keyword, setKeyword] = useState("");
   const [typeFilter, setTypeFilter] = useState<string>("全部");
   const [statusFilter, setStatusFilter] = useState<string>("全部");
@@ -49,18 +41,9 @@ export default function ProjectsPage() {
   const [editTarget, setEditTarget] = useState<Project | null>(null);
   const [toast, setToast] = useState<ToastState>({ message: "", type: "success", visible: false });
 
-  const [assignments, setAssignments] = useState<Record<string, string[]>>(defaultAssignments);
   const [assignTarget, setAssignTarget] = useState<{ projectId: string; selected: string[] } | null>(null);
   const [filesTarget, setFilesTarget] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
-
-  const memberMap = useMemo(() => {
-    const map: Record<string, Member> = {};
-    members.forEach((m) => {
-      map[m.id] = m;
-    });
-    return map;
-  }, []);
 
   const showToast = (message: string, type: ToastState["type"] = "success") => {
     setToast({ message, type, visible: true });
@@ -97,32 +80,32 @@ export default function ProjectsPage() {
       showToast("请填写项目名称与招标编号", "error");
       return;
     }
-    // 编辑已有项目
     if (editOpen && editTarget) {
       try {
-        await updateProject(editTarget.id, {
-          code: values.code.trim(),
-          name: values.name.trim(),
-          type: values.type,
-          owner: values.owner,
-          budget: values.budget ? `¥ ${values.budget} 万` : "待定",
-          deadline: values.deadline || "2026-12-31",
-          tenderDoc: values.tenderDoc,
-        });
-        setAssignments((prev) => ({ ...prev, [editTarget.id]: values.memberIds }));
+        await updateProject(
+          editTarget.id,
+          {
+            code: values.code.trim(),
+            name: values.name.trim(),
+            type: values.type,
+            owner: values.owner,
+            budget: values.budget ? `¥ ${values.budget} 万` : "待定",
+            deadline: values.deadline || "2026-12-31",
+          },
+          { tenderFile: values.tenderFile, memberIds: values.memberIds },
+        );
         setEditOpen(false);
         setEditTarget(null);
         showToast(
-          values.tenderDoc
-            ? `已更新「${values.name.trim()}」项目信息（招标文件：${values.tenderDoc.name}）`
-            : `已更新「${values.name.trim()}」项目信息（分配 ${values.memberIds.length} 人）`
+          values.tenderFile
+            ? `已更新「${values.name.trim()}」项目信息（招标文件：${values.tenderFile.name}）`
+            : `已更新「${values.name.trim()}」项目信息（分配 ${values.memberIds.length} 人）`,
         );
       } catch (err) {
         showToast(err instanceof Error ? err.message : "更新项目失败，请稍后重试", "error");
       }
       return;
     }
-    // 新建项目
     try {
       const newProject = await addProject({
         code: values.code.trim(),
@@ -131,16 +114,14 @@ export default function ProjectsPage() {
         owner: values.owner,
         budget: values.budget,
         deadline: values.deadline || "2026-12-31",
-        tenderDoc: values.tenderDoc,
+        tenderFile: values.tenderFile,
+        memberIds: values.memberIds,
       });
-      if (values.memberIds.length > 0) {
-        setAssignments((prev) => ({ ...prev, [newProject.id]: values.memberIds }));
-      }
       setCreateOpen(false);
       showToast(
         values.memberIds.length > 0
           ? `项目创建成功，已分配 ${values.memberIds.length} 人，正在进入招标解析…`
-          : "项目创建成功，正在进入招标解析…"
+          : "项目创建成功，正在进入招标解析…",
       );
       window.setTimeout(() => navigate(`/console/parse?project=${newProject.id}`), 600);
     } catch (err) {
@@ -159,16 +140,20 @@ export default function ProjectsPage() {
     setEditTarget(null);
   };
 
-  const openAssign = (projectId: string) => {
-    setAssignTarget({ projectId, selected: assignments[projectId] || [] });
+  const openAssign = (project: Project) => {
+    setAssignTarget({ projectId: project.id, selected: (project.team ?? []).map((m) => m.id) });
   };
 
-  const saveAssign = (memberIds: string[]) => {
+  const saveAssign = async (memberIds: string[]) => {
     if (!assignTarget) return;
-    setAssignments((prev) => ({ ...prev, [assignTarget.projectId]: memberIds }));
-    const project = projects.find((p) => p.id === assignTarget.projectId);
-    showToast(`已更新「${project?.name ?? ""}」项目人员分配（${memberIds.length} 人）`);
-    setAssignTarget(null);
+    try {
+      await updateProject(assignTarget.projectId, {}, { memberIds });
+      const project = projects.find((p) => p.id === assignTarget.projectId);
+      showToast(`已更新「${project?.name ?? ""}」项目人员分配（${memberIds.length} 人）`);
+      setAssignTarget(null);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "保存分配失败，请稍后重试", "error");
+    }
   };
 
   const assignProject = projects.find((p) => p.id === assignTarget?.projectId) ?? null;
@@ -183,6 +168,7 @@ export default function ProjectsPage() {
         title="标书项目管理中心"
         description="统一监控投标项目整体进程：跟踪撰写进度、AI 预测得分、人员分配与文件归档。"
         actions={
+          canEditProject ? (
           <button
             type="button"
             onClick={() => setCreateOpen(true)}
@@ -191,6 +177,7 @@ export default function ProjectsPage() {
             <i className="ri-add-line text-sm"></i>
             新建项目
           </button>
+          ) : undefined
         }
       />
 
@@ -293,8 +280,7 @@ export default function ProjectsPage() {
             </thead>
             <tbody>
               {filtered.map((project) => {
-                const teamIds = assignments[project.id] || [];
-                const teamMembers = teamIds.map((id) => memberMap[id]).filter(Boolean) as Member[];
+                const teamMembers = project.team ?? [];
                 const shown = teamMembers.slice(0, 3);
                 const rest = Math.max(teamMembers.length - 3, 0);
                 return (
@@ -368,6 +354,7 @@ export default function ProjectsPage() {
                     </td>
                     <td className="px-3 py-3.5">
                       <div className="flex items-center justify-end gap-0.5">
+                        {canEditProject && (
                         <button
                           type="button"
                           title="编辑项目信息"
@@ -379,17 +366,32 @@ export default function ProjectsPage() {
                         >
                           <i className="ri-edit-2-line text-sm"></i>
                         </button>
+                        )}
+                        {canEditProject && (
                         <button
                           type="button"
                           title="分配项目人员"
                           onClick={(e) => {
                             e.stopPropagation();
-                            openAssign(project.id);
+                            openAssign(project);
                           }}
                           className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-foreground-500 transition-all hover:scale-110 hover:bg-secondary-100 hover:text-secondary-700"
                         >
                           <i className="ri-team-line text-sm"></i>
                         </button>
+                        )}
+                        <button
+                          type="button"
+                          title="项目文件下载"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setFilesTarget(project.id);
+                          }}
+                          className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-foreground-500 transition-all hover:scale-110 hover:bg-primary-50 hover:text-primary-600"
+                        >
+                          <i className="ri-folder-download-line text-sm"></i>
+                        </button>
+                        {canEditProject && (
                         <button
                           type="button"
                           title="删除项目"
@@ -401,6 +403,7 @@ export default function ProjectsPage() {
                         >
                           <i className="ri-delete-bin-6-line text-sm"></i>
                         </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -410,7 +413,9 @@ export default function ProjectsPage() {
                 <tr>
                   <td colSpan={9} className="px-4 py-16 text-center">
                     <i className="ri-inbox-line text-3xl text-foreground-400"></i>
-                    <p className="mt-3 text-sm text-foreground-500">没有找到匹配的项目，试试调整筛选条件</p>
+                    <p className="mt-3 text-sm text-foreground-500">
+                      {projects.length === 0 ? "暂无项目，请新建后开始投标工作" : "没有找到匹配的项目，试试调整筛选条件"}
+                    </p>
                   </td>
                 </tr>
               )}
@@ -424,7 +429,7 @@ export default function ProjectsPage() {
         open={createOpen || editOpen}
         mode={editOpen ? "edit" : "create"}
         initial={editTarget}
-        initialMemberIds={editTarget ? assignments[editTarget.id] || [] : []}
+        initialMemberIds={editTarget ? (editTarget.team ?? []).map((m) => m.id) : []}
         onClose={closeForm}
         onSubmit={handleSubmit}
       />
@@ -443,7 +448,7 @@ export default function ProjectsPage() {
         open={!!filesTarget}
         project={filesProject}
         onClose={() => setFilesTarget(null)}
-        onToast={(msg) => showToast(msg)}
+        onToast={(msg, type) => showToast(msg, type ?? "success")}
       />
 
       {/* 删除项目确认弹窗 */}
@@ -455,11 +460,6 @@ export default function ProjectsPage() {
           if (!deleteTarget) return;
           try {
             await deleteProject(deleteTarget.id);
-            setAssignments((prev) => {
-              const next = { ...prev };
-              delete next[deleteTarget.id];
-              return next;
-            });
             showToast(`已删除项目「${deleteTarget.name}」及其全部文件`);
           } catch (err) {
             showToast(err instanceof Error ? err.message : "删除项目失败，请稍后重试", "error");

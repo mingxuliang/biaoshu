@@ -11,10 +11,21 @@ class Settings(BaseSettings):
 
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_model: str = "deepseek-chat"
+    deepseek_model: str = "deepseek-v4-pro"
+
+    ark_api_key: str = ""
+    ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
+    ark_image_model: str = "doubao-seedream-4-0-250828"
+    ark_chat_model: str = "doubao-seed-1-8-251228"
 
     upload_dir: str = "./uploads"
     sample_dir: str = "./sample_data"
+
+    minio_endpoint: str = "localhost:9000"
+    minio_access_key: str = "minioadmin"
+    minio_secret_key: str = "minioadmin"
+    minio_bucket: str = "zhibiaoyun"
+    minio_secure: bool = False
 
     cors_origins: str = "http://localhost:3000"
 

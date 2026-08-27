@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import StatusBadge from "../components/StatusBadge";
@@ -5,8 +6,10 @@ import TypeBadge from "../components/TypeBadge";
 import ProgressRing from "../components/ProgressRing";
 import ProjectDocuments from "./components/ProjectDocuments";
 import { useProjects } from "@/context/ProjectContext";
-import { timelineStages, type StageStatus } from "@/mocks/projectDetail";
-import { members } from "@/mocks/members";
+import { useAuth } from "@/context/AuthContext";
+import { getProjectTimeline, type TimelineStage } from "@/lib/api";
+
+type StageStatus = TimelineStage["status"];
 
 const stageDot: Record<StageStatus, string> = {
   已完成: "bg-primary-500 border-primary-300",
@@ -17,8 +20,30 @@ const stageDot: Record<StageStatus, string> = {
 export default function ProjectDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const { token } = useAuth();
   const { getProject, loading } = useProjects();
   const project = getProject(id);
+  const [timeline, setTimeline] = useState<TimelineStage[]>([]);
+  const [timelineLoading, setTimelineLoading] = useState(false);
+
+  useEffect(() => {
+    if (!token || !id) return;
+    let cancelled = false;
+    setTimelineLoading(true);
+    getProjectTimeline(token, id)
+      .then((stages) => {
+        if (!cancelled) setTimeline(stages);
+      })
+      .catch(() => {
+        if (!cancelled) setTimeline([]);
+      })
+      .finally(() => {
+        if (!cancelled) setTimelineLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token, id]);
 
   if (loading) {
     return (
@@ -47,7 +72,7 @@ export default function ProjectDetailPage() {
     );
   }
 
-  const teamMembers = members.slice(0, 5);
+  const teamMembers = project.team ?? [];
 
   const infoRows = [
     { label: "招标编号", value: project.code },
@@ -176,9 +201,12 @@ export default function ProjectDetailPage() {
               投标进度时间线
             </h3>
             <ol className="relative space-y-0">
-              {timelineStages.map((stage, index) => (
+              {timelineLoading && timeline.length === 0 ? (
+                <li className="py-6 text-center text-xs text-foreground-500">正在加载时间线…</li>
+              ) : (
+                timeline.map((stage, index) => (
                 <li key={stage.id} className="relative flex gap-4 pb-5 last:pb-0">
-                  {index < timelineStages.length - 1 && (
+                  {index < timeline.length - 1 && (
                     <span className="absolute left-[6px] top-3.5 h-full w-px bg-background-300" />
                   )}
                   <span
@@ -208,7 +236,8 @@ export default function ProjectDetailPage() {
                     </div>
                   </div>
                 </li>
-              ))}
+                ))
+              )}
             </ol>
           </div>
         </div>
@@ -227,22 +256,21 @@ export default function ProjectDetailPage() {
               </Link>
             </h3>
             <div className="space-y-2.5">
-              {teamMembers.map((member) => (
+              {teamMembers.length === 0 ? (
+                <p className="py-4 text-center text-xs text-foreground-500">尚未分配项目成员</p>
+              ) : (
+                teamMembers.map((member) => (
                 <div key={member.id} className="flex items-center gap-2.5">
-                  <span className="relative flex h-8 w-8 items-center justify-center rounded-full bg-secondary-100 text-sm font-medium text-secondary-700">
+                  <span className="flex h-8 w-8 items-center justify-center rounded-full bg-secondary-100 text-sm font-medium text-secondary-700">
                     {member.name.charAt(0)}
-                    <span
-                      className={`absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full border-2 border-background-100 ${
-                        member.status === "在线" ? "bg-primary-500 animate-pulse" : member.status === "忙碌" ? "bg-accent-500" : "bg-foreground-400"
-                      }`}
-                    />
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="text-sm font-medium text-foreground-900">{member.name}</div>
                     <div className="text-xs text-foreground-500">{member.role}</div>
                   </div>
                 </div>
-              ))}
+                ))
+              )}
             </div>
           </div>
         </div>
@@ -250,7 +278,7 @@ export default function ProjectDetailPage() {
 
       {/* 全部文档：招标文件 / 招标解析 / 技术标 / 商务标 */}
       <div className="mt-5">
-        <ProjectDocuments />
+        <ProjectDocuments projectId={project.id} />
       </div>
 
       <div className="mt-5 flex justify-end">

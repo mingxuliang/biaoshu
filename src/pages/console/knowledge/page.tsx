@@ -3,7 +3,9 @@ import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
 import Toast from "../components/Toast";
 import { useAuth } from "@/context/AuthContext";
+import { hasPerm } from "@/lib/permissions";
 import {
+  ApiError,
   KNOWLEDGE_SCOPES,
   KNOWLEDGE_TYPES,
   deleteKnowledgeDocument,
@@ -34,7 +36,8 @@ interface ToastState {
 }
 
 export default function KnowledgePage() {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
+  const canUpload = hasPerm(user?.role, "writer");
   const [docs, setDocs] = useState<KnowledgeDoc[]>([]);
   const [loading, setLoading] = useState(true);
   const [scope, setScope] = useState("全部");
@@ -121,8 +124,8 @@ export default function KnowledgePage() {
       resetUploadForm();
       showToast("文档已入库，正在按标题切片…", "success");
       loadDocs();
-    } catch {
-      showToast("上传失败，请确认文件为 .docx 或 .pdf 后重试", "error");
+    } catch (err) {
+      showToast(err instanceof ApiError ? err.message : "上传失败，请稍后重试", "error");
     } finally {
       setUploading(false);
     }
@@ -148,6 +151,7 @@ export default function KnowledgePage() {
         title="文档知识库"
         description="沉淀企业可复用的技术方案、历史标书片段、规范条文与图表，供撰写时检索引用；内置虚词表与高危句式规则知识。"
         actions={
+          canUpload ? (
           <button
             type="button"
             onClick={() => setUploadOpen(true)}
@@ -156,6 +160,7 @@ export default function KnowledgePage() {
             <i className="ri-add-line text-sm"></i>
             上传文档
           </button>
+          ) : undefined
         }
       />
 
@@ -253,6 +258,7 @@ export default function KnowledgePage() {
                   {doc.sliceCount} 个切片 · {doc.source}
                 </span>
                 <div className="flex items-center gap-1">
+                  {canUpload && (
                   <button
                     type="button"
                     title="删除"
@@ -261,6 +267,7 @@ export default function KnowledgePage() {
                   >
                     <i className="ri-delete-bin-line text-sm"></i>
                   </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -344,12 +351,12 @@ export default function KnowledgePage() {
           <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-background-300 bg-background-50 px-4 py-6 text-center">
             <i className="ri-upload-cloud-2-line text-2xl text-primary-500"></i>
             <p className="text-xs text-foreground-500">
-              {uploadFile ? uploadFile.name : "点击选择 .docx / .pdf 文件"}
+              {uploadFile ? uploadFile.name : "点击选择 .doc / .docx / .pdf 文件"}
             </p>
             <input
               ref={fileInputRef}
               type="file"
-              accept=".docx,.pdf"
+              accept=".doc,.docx,.pdf"
               onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
               className="hidden"
               id="k-file"

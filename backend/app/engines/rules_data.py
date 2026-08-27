@@ -1,78 +1,143 @@
-"""青天大模型规则数据的 Python 常量化落地。
+"""青天大模型规则目录。
 
-数值来源：
-- 《青天大模型AI评审规则 v1.1》：五维默认权重、查重阈值、财务阈值
-- 《青天大模型AI识别虚词表 v1.0》：六类虚词清单、高危句式
+数值与清单来源：
+- 《青天大模型AI评审规则 v1.1》：五维权重、查重红线、一票否决要点、商务自查、技术标评分模块、高分十条
+- 《青天大模型AI识别虚词表 v1.0》：六类虚词、高危句式、改写对照、虚词自查五规则
 
-本阶段（P3 最小闭环）先以常量形式内置，尚未接入 rules/page.tsx 的后端 CRUD，
-后续对接规则包管理时，这里的常量应改为从数据库按项目/属地读取。
+跨投标人围串标比对不在本投标方系统范围内。跨项目阈值用于本企业历史标书 / 知识库查重，不伪造其他投标人比对结果。
 """
 
-FILLER_WORD_CATEGORIES = [
-    {
-        "category": "一类：万能动词",
-        "level": "高危",
-        "words": ["加强", "确保", "狠抓", "严抓", "重视", "高度重视", "强化", "落实"],
-    },
-    {
-        "category": "二类：空洞形容词",
-        "level": "高危",
-        "words": [
-            "科学安排",
-            "合理调配",
-            "完善体系",
-            "充分准备",
-            "先进工艺",
-            "优质服务",
-            "一流水平",
-            "领先地位",
-        ],
-    },
-    {
-        "category": "三类：承诺套话",
-        "level": "高危",
-        "words": [
-            "优质服务",
-            "高效团队",
-            "保质保量",
-            "万无一失",
-            "绝无差错",
-            "全力以赴",
-            "精心组织",
-            "严格把关",
-            "层层审核",
-        ],
-    },
-    {
-        "category": "四类：无量化副词",
-        "level": "中危",
-        "words": ["大力", "高度", "切实", "深入", "全面", "积极", "主动", "及时", "充分", "严格"],
-    },
-    {
-        "category": "五类：连接废话与模板句",
-        "level": "中危",
-        "words": ["综上所述", "总而言之", "众所周知", "毋庸置疑", "随着", "为了积极响应"],
-    },
-    {
-        "category": "六类：口号标语类",
-        "level": "高危",
-        "words": [
-            "安全第一，预防为主",
-            "质量是企业的生命",
-            "用户至上，诚信为本",
-            "绿色施工，保护环境",
-        ],
-    },
+FILLER_WORDS = [
+    # 一类：万能动词
+    {"category": "一类：万能动词", "level": "高危", "word": "加强", "rewrite": "改为「增加X人」「配置X设备」「每周X次检查」"},
+    {"category": "一类：万能动词", "level": "高危", "word": "确保", "rewrite": "改为「验收合格率≥98%」「实测实量X项」"},
+    {"category": "一类：万能动词", "level": "高危", "word": "狠抓", "rewrite": "直接删除，写具体管控动作"},
+    {"category": "一类：万能动词", "level": "高危", "word": "严抓", "rewrite": "直接删除，写具体管控动作"},
+    {"category": "一类：万能动词", "level": "高危", "word": "重视", "rewrite": "删除，写「落实三级交底」「每周专项检查」"},
+    {"category": "一类：万能动词", "level": "高危", "word": "高度重视", "rewrite": "删除，写「落实三级交底」「每周专项检查」"},
+    {"category": "一类：万能动词", "level": "高危", "word": "强化", "rewrite": "改为「由X人专职负责」「每日X次巡检」"},
+    {"category": "一类：万能动词", "level": "中危", "word": "落实", "rewrite": "写「由XX部牵头，X月X日前完成」"},
+    {"category": "一类：万能动词", "level": "中危", "word": "贯彻", "rewrite": "删除或写具体执行动作"},
+    {"category": "一类：万能动词", "level": "中危", "word": "推进", "rewrite": "写「X月底完成XX」「分X阶段实施」"},
+    {"category": "一类：万能动词", "level": "中危", "word": "深化", "rewrite": "写「X月底完成XX」「分X阶段实施」"},
+    {"category": "一类：万能动词", "level": "中危", "word": "提升", "rewrite": "写「较上季度提升X%」「优化后节省X天」"},
+    {"category": "一类：万能动词", "level": "中危", "word": "优化", "rewrite": "写「较上季度提升X%」「优化后节省X天」"},
+    {"category": "一类：万能动词", "level": "中危", "word": "完善", "rewrite": "写「补充X项制度」「增加X个控制点」"},
+    # 二类：空洞形容词
+    {"category": "二类：空洞形容词", "level": "高危", "word": "科学安排", "rewrite": "写「分段流水施工，节拍7天，6天/层」"},
+    {"category": "二类：空洞形容词", "level": "高危", "word": "科学管理", "rewrite": "写「分段流水施工，节拍7天，6天/层」"},
+    {"category": "二类：空洞形容词", "level": "高危", "word": "合理调配", "rewrite": "写「高峰期300人，宿舍≥600㎡」"},
+    {"category": "二类：空洞形容词", "level": "高危", "word": "合理布局", "rewrite": "写「高峰期300人，宿舍≥600㎡」"},
+    {"category": "二类：空洞形容词", "level": "高危", "word": "完善体系", "rewrite": "列出制度名称、责任人、运行频次"},
+    {"category": "二类：空洞形容词", "level": "高危", "word": "完善制度", "rewrite": "列出制度名称、责任人、运行频次"},
+    {"category": "二类：空洞形容词", "level": "高危", "word": "充分准备", "rewrite": "写「提前X天备料，储备X%余量」"},
+    {"category": "二类：空洞形容词", "level": "高危", "word": "充分考虑", "rewrite": "写「提前X天备料，储备X%余量」"},
+    {"category": "二类：空洞形容词", "level": "中危", "word": "先进工艺", "rewrite": "写「采用铝合金模板+爬架工艺」"},
+    {"category": "二类：空洞形容词", "level": "中危", "word": "先进技术", "rewrite": "写「采用铝合金模板+爬架工艺」"},
+    {"category": "二类：空洞形容词", "level": "中危", "word": "优质服务", "rewrite": "写「2小时到场、24小时修复」"},
+    {"category": "二类：空洞形容词", "level": "中危", "word": "优质材料", "rewrite": "写「2小时到场、24小时修复」"},
+    {"category": "二类：空洞形容词", "level": "中危", "word": "良好信誉", "rewrite": "附信用评级、获奖证书、业绩数据"},
+    {"category": "二类：空洞形容词", "level": "中危", "word": "良好状态", "rewrite": "附信用评级、获奖证书、业绩数据"},
+    {"category": "二类：空洞形容词", "level": "中危", "word": "全面检查", "rewrite": "写「覆盖X个分项、X个检验批」"},
+    {"category": "二类：空洞形容词", "level": "中危", "word": "全面覆盖", "rewrite": "写「覆盖X个分项、X个检验批」"},
+    {"category": "二类：空洞形容词", "level": "中危", "word": "系统管理", "rewrite": "列出模块、频次、考核方式"},
+    {"category": "二类：空洞形容词", "level": "中危", "word": "系统培训", "rewrite": "列出模块、频次、考核方式"},
+    {"category": "二类：空洞形容词", "level": "中危", "word": "有效管控", "rewrite": "写「整改率100%，复检合格率≥99%」"},
+    {"category": "二类：空洞形容词", "level": "中危", "word": "有效处理", "rewrite": "写「整改率100%，复检合格率≥99%」"},
+    {"category": "二类：空洞形容词", "level": "中危", "word": "深入调研", "rewrite": "写「排查X项风险源，形成X份台账」"},
+    {"category": "二类：空洞形容词", "level": "中危", "word": "深入排查", "rewrite": "写「排查X项风险源，形成X份台账」"},
+    {"category": "二类：空洞形容词", "level": "中危", "word": "显著提升", "rewrite": "写「工期缩短X天，成本降低X%」"},
+    {"category": "二类：空洞形容词", "level": "中危", "word": "显著改善", "rewrite": "写「工期缩短X天，成本降低X%」"},
+    # 三类：承诺套话
+    {"category": "三类：承诺套话", "level": "高危", "word": "高效团队", "rewrite": "写「配X名售后工程师，X小时响应」"},
+    {"category": "三类：承诺套话", "level": "高危", "word": "保质保量", "rewrite": "写「X年X月X日前竣工，一次验收合格」"},
+    {"category": "三类：承诺套话", "level": "高危", "word": "保质保量按时完成", "rewrite": "写「X年X月X日前竣工，一次验收合格」"},
+    {"category": "三类：承诺套话", "level": "高危", "word": "万无一失", "rewrite": "写「设置X道复核工序，双人复核」"},
+    {"category": "三类：承诺套话", "level": "高危", "word": "绝无差错", "rewrite": "写「设置X道复核工序，双人复核」"},
+    {"category": "三类：承诺套话", "level": "高危", "word": "全力以赴", "rewrite": "写「投入X个班组共X人，倒排工期」"},
+    {"category": "三类：承诺套话", "level": "高危", "word": "精心组织", "rewrite": "写「投入X个班组共X人，倒排工期」"},
+    {"category": "三类：承诺套话", "level": "高危", "word": "周密部署", "rewrite": "写「分X阶段实施，X月X日节点控制」"},
+    {"category": "三类：承诺套话", "level": "中危", "word": "严格把关", "rewrite": "写「三级审核：编制→技术负责人→项目经理」"},
+    {"category": "三类：承诺套话", "level": "中危", "word": "层层审核", "rewrite": "写「三级审核：编制→技术负责人→项目经理」"},
+    {"category": "三类：承诺套话", "level": "中危", "word": "常抓不懈", "rewrite": "写「每周一安全例会，每月X次专项检查」"},
+    {"category": "三类：承诺套话", "level": "中危", "word": "持之以恒", "rewrite": "写「每周一安全例会，每月X次专项检查」"},
+    {"category": "三类：承诺套话", "level": "中危", "word": "切实抓好", "rewrite": "写「由安全总监牵头，每日班前教育」"},
+    {"category": "三类：承诺套话", "level": "中危", "word": "认真落实", "rewrite": "写「由安全总监牵头，每日班前教育」"},
+    {"category": "三类：承诺套话", "level": "中危", "word": "以人为本", "rewrite": "写「夏季调整作业时间，配防暑物资X项」"},
+    {"category": "三类：承诺套话", "level": "中危", "word": "顾客至上", "rewrite": "写「夏季调整作业时间，配防暑物资X项」"},
+    {"category": "三类：承诺套话", "level": "中危", "word": "时间就是生命", "rewrite": "删除，替换为具体制度和数据"},
+    {"category": "三类：承诺套话", "level": "中危", "word": "安全第一", "rewrite": "删除，替换为具体制度和数据"},
+    # 四类：无量化副词
+    {"category": "四类：无量化副词", "level": "高危", "word": "大力", "rewrite": "删除，写「投入X万元」「新增X台设备」"},
+    {"category": "四类：无量化副词", "level": "高危", "word": "高度", "rewrite": "删除，写具体措施"},
+    {"category": "四类：无量化副词", "level": "高危", "word": "切实", "rewrite": "删除，写「X月X日前完成」"},
+    {"category": "四类：无量化副词", "level": "中危", "word": "深入", "rewrite": "写「排查X项」「走访X次」"},
+    {"category": "四类：无量化副词", "level": "中危", "word": "全面", "rewrite": "写「覆盖X个点位」"},
+    {"category": "四类：无量化副词", "level": "中危", "word": "积极", "rewrite": "删除，写具体动作"},
+    {"category": "四类：无量化副词", "level": "中危", "word": "主动", "rewrite": "写「提前X天介入」「X小时内响应」"},
+    {"category": "四类：无量化副词", "level": "中危", "word": "及时", "rewrite": "写「X小时内处理」「当日内回复」"},
+    {"category": "四类：无量化副词", "level": "中危", "word": "充分", "rewrite": "写「储备X%」「准备X项」"},
+    {"category": "四类：无量化副词", "level": "中危", "word": "严格", "rewrite": "写「按GB50204-2015第X.X.X条执行」"},
+    # 五类：连接废话与模板句
+    {"category": "五类：连接废话与模板句", "level": "中危", "word": "综上所述", "rewrite": "删除，直接进入结论"},
+    {"category": "五类：连接废话与模板句", "level": "中危", "word": "总而言之", "rewrite": "删除，直接进入结论"},
+    {"category": "五类：连接废话与模板句", "level": "中危", "word": "众所周知", "rewrite": "删除"},
+    {"category": "五类：连接废话与模板句", "level": "中危", "word": "毋庸置疑", "rewrite": "删除"},
+    {"category": "五类：连接废话与模板句", "level": "中危", "word": "不难看出", "rewrite": "删除"},
+    {"category": "五类：连接废话与模板句", "level": "中危", "word": "我们可以说", "rewrite": "删除"},
+    {"category": "五类：连接废话与模板句", "level": "中危", "word": "正所谓", "rewrite": "删除，除非引用规范条文"},
+    {"category": "五类：连接废话与模板句", "level": "中危", "word": "常言道", "rewrite": "删除，除非引用规范条文"},
+    {"category": "五类：连接废话与模板句", "level": "中危", "word": "的领导下", "rewrite": "删除公文模板句"},
+    {"category": "五类：连接废话与模板句", "level": "高危", "word": "随着", "rewrite": "删除网络范文开头，直接写本项目内容"},
+    {"category": "五类：连接废话与模板句", "level": "高危", "word": "为了积极响应", "rewrite": "删除模板句"},
+    {"category": "五类：连接废话与模板句", "level": "低危", "word": "在百忙之中", "rewrite": "删除客套话"},
+    {"category": "五类：连接废话与模板句", "level": "低危", "word": "不辞辛劳", "rewrite": "删除客套话"},
+    {"category": "五类：连接废话与模板句", "level": "低危", "word": "我们坚信", "rewrite": "删除，用数据证明"},
+    {"category": "五类：连接废话与模板句", "level": "低危", "word": "我们有信心", "rewrite": "删除，用数据证明"},
+    {"category": "五类：连接废话与模板句", "level": "低危", "word": "下一步", "rewrite": "写「X月X日前完成XX」"},
+    {"category": "五类：连接废话与模板句", "level": "低危", "word": "后续将", "rewrite": "写「X月X日前完成XX」"},
+    # 六类：口号标语类
+    {"category": "六类：口号标语类", "level": "高危", "word": "安全第一，预防为主", "rewrite": "写「危大工程X项，每项配专项方案+专家论证」"},
+    {"category": "六类：口号标语类", "level": "高危", "word": "质量是企业的生命", "rewrite": "写「三检制+样板引路，实测实量合格率≥98%」"},
+    {"category": "六类：口号标语类", "level": "高危", "word": "用户至上，诚信为本", "rewrite": "写「售后2小时到场，24小时解决」"},
+    {"category": "六类：口号标语类", "level": "高危", "word": "精心施工，铸造精品", "rewrite": "写「分项工程一次验收合格率100%」"},
+    {"category": "六类：口号标语类", "level": "中危", "word": "绿色施工，保护环境", "rewrite": "写「扬尘6个100%，雾炮机覆盖半径X米」"},
+    {"category": "六类：口号标语类", "level": "中危", "word": "文明施工，和谐共建", "rewrite": "写「围挡公益广告X幅，渣土运输路线报备」"},
 ]
 
+
+def _categories_from_words() -> list[dict]:
+    groups: dict[str, dict] = {}
+    for item in FILLER_WORDS:
+        cat = item["category"]
+        if cat not in groups:
+            groups[cat] = {"category": cat, "level": item["level"], "words": []}
+        if item["word"] not in groups[cat]["words"]:
+            groups[cat]["words"].append(item["word"])
+    return list(groups.values())
+
+
+FILLER_WORD_CATEGORIES = _categories_from_words()
+
 HIGH_RISK_SENTENCE_PATTERNS = [
-    r"加强\S{0,6}管理[，,].{0,6}确保\S{0,6}(安全|质量)",
-    r"高度重视\S{0,6}工作[，,].{0,6}全面加强\S{0,6}建设",
+    r"加强\S{0,8}管理[，,].{0,8}确保\S{0,8}(安全|质量)",
+    r"高度重视\S{0,8}工作[，,].{0,8}全面加强\S{0,8}建设",
     r"科学安排施工进度[，,]合理组织劳动力",
     r"严格按照国家规范和相关标准施工",
     r"根据工程实际情况[，,]采取有效措施",
-    r"建立健全\S{0,6}体系[，,]完善\S{0,6}制度",
+    r"在施工过程中[，,]我们[将会]?",
+    r"建立健全\S{0,8}体系[，,]完善\S{0,8}制度",
     r"采用先进施工工艺[，,]保证工程质量",
+    r"认真做好各项准备工作",
+    r"加大投入力度[，,]确保工期",
+]
+
+FILLER_SELF_CHECK_RULES = [
+    "数字规则：段落中至少出现 1 个数字（数量、时间、频率、百分比、尺寸、规范号）",
+    "动作规则：动词必须是可执行动作（配置、安装、检查、验收、培训），而不是态度（加强、重视、确保）",
+    "对象规则：每项措施必须有明确对象（谁来做、做什么、对什么做）",
+    "验证规则：每项承诺必须有验证方式（验收标准、检查频次、整改时限、复检方法）",
+    "密度规则：全文虚词密度不超过 5%，每页至少 1 个数据或图表支撑",
 ]
 
 DEFAULT_WEIGHTS = {
@@ -91,14 +156,581 @@ DIMENSION_LABELS = {
     "standardization": "规范性",
 }
 
-THRESHOLDS = {
-    "full_text_similarity_safe": 30,
-    "full_text_similarity_risk": 42,
-    "key_section_similarity_safe": 20,
-    "key_section_similarity_risk": 40,
-    "filler_density_safe": 5,
-    "asset_liability_ratio_max": 85,
+DIMENSION_RUBRIC = {
+    "completeness": {
+        "focus": "逐条对照招标文件评分目录，核对章节、附表、附图、承诺书、资质资料是否齐全",
+        "penalty": "缺一项该小项直接 0 分；自动生成缺项清单",
+    },
+    "relevance": {
+        "focus": "识别通用空话、万能模板；校验是否匹配本项目地点、规模、地质、工期、现场工况",
+        "penalty": "全文模板相似度>42%→技术标整体降档；重难点/四新查重>40%→小节清零",
+    },
+    "compliance": {
+        "focus": "自动匹配现行强条规范；施工工艺、安全、扬尘、危大工程方案审查（临边防护 1.2m、扫地杆≤20cm 等属地细节）",
+        "penalty": "违规标准注低分；严重违规触发否决投标提示",
+    },
+    "feasibility": {
+        "focus": "过滤完善、充分、合理等无量化虚词；优先采信带具体工期、人员数量、设备型号、工程量测算、闭环管控流程的表述",
+        "penalty": "无量化数据/图表/台账=空话不得分",
+    },
+    "standardization": {
+        "focus": "三级标题编号、目录页码、图表索引、PDF 识别清晰度、排版统一度、查重检测",
+        "penalty": "乱码、图片 PDF 无法识别、目录错位、暗标违规扣分",
+    },
 }
+
+THRESHOLD_CATALOG = [
+    {
+        "key": "filler_density_safe",
+        "label": "虚词密度安全线",
+        "value": 5,
+        "unit": "%",
+        "description": "超过该密度的段落由 E4 标记为虚词堆砌；对应虚词自查「密度规则」",
+    },
+    {
+        "key": "full_text_similarity_safe",
+        "label": "全文模板相似度安全线",
+        "value": 30,
+        "unit": "%",
+        "description": "v1.1 查重红线：全文模板相似度应 ≤30%",
+    },
+    {
+        "key": "full_text_similarity_risk",
+        "label": "全文模板相似度风险线",
+        "value": 42,
+        "unit": "%",
+        "description": "超过则技术标整体降档（E4 对内置模板库与本企业历史标书自检）",
+    },
+    {
+        "key": "key_section_similarity_safe",
+        "label": "重难点/四新专项查重安全线",
+        "value": 20,
+        "unit": "%",
+        "description": "重难点、四新等专项章节相似度应 ≤20%",
+    },
+    {
+        "key": "key_section_similarity_risk",
+        "label": "重难点/四新专项查重风险线",
+        "value": 40,
+        "unit": "%",
+        "description": "超过则该小节清零",
+    },
+    {
+        "key": "cross_bidder_paragraph_risk",
+        "label": "本企业跨项目段落雷同风险线",
+        "value": 60,
+        "unit": "%",
+        "description": "与本企业其他项目投标文件或知识库段落相似度超过该值时由 E4 标记；不比对其他投标人",
+    },
+    {
+        "key": "cross_bidder_whole_risk",
+        "label": "本企业跨项目整体雷同风险线",
+        "value": 80,
+        "unit": "%",
+        "description": "与本企业其他项目全文相似度超过该值时由 E4 标记；不比对其他投标人",
+    },
+    {
+        "key": "asset_liability_ratio_max",
+        "label": "资产负债率上限",
+        "value": 85,
+        "unit": "%",
+        "description": "超过该比例由 E2 标记财务风险；若评标尺子另有上限则尺子优先",
+    },
+    {
+        "key": "price_deviation_ok",
+        "label": "报价偏离正常区间",
+        "value": 5,
+        "unit": "%",
+        "description": "相对评标基准价偏离 ±5% 内视为正常（E2）",
+    },
+    {
+        "key": "price_deviation_warn",
+        "label": "报价偏离预警区间",
+        "value": 10,
+        "unit": "%",
+        "description": "相对基准价偏离 >10% 触发异常价预警；无合理说明的恶意低价由 E1 废标",
+    },
+]
+
+THRESHOLDS = {item["key"]: item["value"] for item in THRESHOLD_CATALOG}
+
+VETO_CHECK_POINTS = [
+    {
+        "key": "file_form",
+        "category": "文件形态",
+        "point": "格式、目录、页码、加密、上传格式符合招标要求；无空白页、乱码、错页、漏页；不使用纯图片扫描 PDF",
+        "items": [
+            "格式、目录、页码符合招标要求",
+            "无空白页、乱码、错页、漏页",
+            "不使用纯图片扫描 PDF",
+            "文件未加密、可正常打开",
+        ],
+        "wired": "部分接入",
+        "wiredNote": "L5 检查空白页、目录域、修订痕迹、批注、加密/损坏文件与纯图片扫描 PDF",
+        "engine": "e5_layout",
+    },
+    {
+        "key": "qualification",
+        "category": "资质证书",
+        "point": "营业执照、资质证书、安全生产许可证、人员证书有效期/等级/专业匹配",
+        "items": [
+            "营业执照在有效期内",
+            "企业资质证书等级/专业匹配",
+            "安全生产许可证在有效期内",
+            "人员证书有效期与专业匹配",
+        ],
+        "wired": "部分接入",
+        "wiredNote": "E1 核验正文有效期日期，并对照资质库缺件/过期；专业对口仍需人工确认",
+        "engine": "e1_veto",
+    },
+    {
+        "key": "personnel",
+        "category": "人员核查",
+        "point": "项目经理注册单位、安考证、社保一致；无在建承诺；安全员、八大员社保证书齐全",
+        "items": [
+            "项目经理注册单位与投标人一致",
+            "安考证与社保缴纳单位一致",
+            "无在建项目任职承诺",
+            "安全员、八大员社保证明齐全",
+        ],
+        "wired": "部分接入",
+        "wiredNote": "E1 按招标/正文关键词对照资质库人员与社保证明；不联网社保局",
+        "engine": "e1_veto",
+    },
+    {
+        "key": "collusion",
+        "category": "串标痕迹",
+        "point": "不与其他投标人共享制作环境；本系统核验本企业文件哈希与历史标书雷同，不伪造其他投标人围串标",
+        "items": [
+            "不与其他投标人共用制作环境",
+            "本企业已归档投标文件 MD5 撞库",
+            "不比对其他公司未公开的投标文件",
+        ],
+        "wired": "接入判定",
+        "wiredNote": "E4 对本企业其他项目文件做 MD5 与段落/全文相似度比对；明确不伪造跨投标人围串标结果",
+        "engine": "e4_duplicate_filler",
+    },
+    {
+        "key": "content_match",
+        "category": "内容合规",
+        "point": "不出现其他项目名称、其他地区名称、其他招标人名称等错配",
+        "items": [
+            "不得出现其他项目名称",
+            "不得出现其他地区名称",
+            "不得出现其他招标人名称",
+        ],
+        "wired": "接入判定",
+        "wiredNote": "E1 扫描本企业其他项目名称是否串入当前投标文件",
+        "engine": "e1_veto",
+    },
+    {
+        "key": "bid_elements",
+        "category": "投标要素",
+        "point": "投标有效期、保证金、签字盖章、骑缝章、法人授权书合规；暗标无单位标识",
+        "items": [
+            "投标有效期满足招标天数",
+            "投标保证金按招标要求提交",
+            "签字盖章、骑缝章、法人授权书已实质完成",
+            "暗标文件无单位名称、徽标、作者信息",
+        ],
+        "wired": "部分接入",
+        "wiredNote": "E1 检查有效期天数、签章占位符与保证金关键词；L5 检查文档作者属性。正文暗标单位名未自动扫描",
+        "engine": "e1_veto",
+    },
+    {
+        "key": "price",
+        "category": "报价",
+        "point": "无漏项、无负数、无异常畸高畸低；暂列金额按招标文件固定填写",
+        "items": [
+            "报价不得为负数",
+            "报价不得漏项、不得留空占位",
+            "不得超过招标预算上限",
+            "相对评标基准价偏离过大须说明",
+            "暂列金额按招标文件固定填写",
+        ],
+        "wired": "部分接入",
+        "wiredNote": "E1 废标：负数、漏项占位、超预算。L2 对基准价 ±5%/±10% 偏离扣分或预警。暂列金额与恶意低价废标未自动判定",
+        "engine": "e1_veto",
+    },
+    {
+        "key": "star_clause",
+        "category": "星号条款",
+        "point": "招标文件标记*的实质性条款全部响应，任何一条不响应即废标",
+        "items": [
+            "星号条款全部响应",
+            "废标条款全部响应",
+            "任何一条实质性不响应即废标",
+        ],
+        "wired": "接入判定",
+        "wiredNote": "项目锁定评标尺子后，E1 按 mustRespond 在投标文件中检索条款核心表述，未检出即废标",
+        "engine": "e1_veto",
+    },
+]
+
+BUSINESS_CHECK_POINTS = [
+    {
+        "key": "performance",
+        "category": "企业类似业绩",
+        "point": "数量、规模、时间、合同、验收证明齐全；合同+中标通知书+竣工验收报告+官网截图四件套齐全",
+        "items": [
+            "业绩数量、规模、时间齐全",
+            "合同原件或复印件",
+            "中标通知书",
+            "竣工验收报告",
+            "招标官网中标公示截图",
+        ],
+        "wired": "部分接入",
+        "wiredNote": "E2 在正文出现「业绩」等关键词时核验四件套关键词；数量/规模/时间未自动判定",
+        "engine": "e2_business",
+    },
+    {
+        "key": "finance",
+        "category": "财务指标",
+        "point": "近三年资产负债率、营收、现金流、审计报告完整清晰，数据前后一致",
+        "items": ["资产负债率不超过上限", "近三年营收可核验", "现金流与审计报告完整", "数据前后一致"],
+        "wired": "部分接入",
+        "wiredNote": "E2 核验正文中的资产负债率是否超过规则页上限（评标尺子优先）；营收、现金流、审计报告未自动判定",
+        "engine": "e2_business",
+    },
+    {
+        "key": "honor",
+        "category": "荣誉认证",
+        "point": "企业荣誉、奖项、ISO 体系认证按要求附有效期内证书",
+        "items": ["荣誉奖项按招标要求附证", "ISO 体系认证在有效期内"],
+        "wired": "部分接入",
+        "wiredNote": "E2 对照资质库荣誉/ISO 条目及有效期；不联网颁证机构",
+        "engine": "e2_business",
+    },
+    {
+        "key": "localization",
+        "category": "本地化服务",
+        "point": "本地分支机构、售后网点、备品备件库、应急响应方案",
+        "items": ["本地分支机构", "售后网点", "备品备件库", "应急响应方案"],
+        "wired": "部分接入",
+        "wiredNote": "E2 在正文写到本地化服务时核验分支/网点/备品/应急是否写全",
+        "engine": "e2_business",
+    },
+    {
+        "key": "staffing",
+        "category": "人员配置",
+        "point": "岗位齐全、证书对口、持证人数达标",
+        "items": ["岗位齐全", "证书专业对口", "持证人数达标"],
+        "wired": "部分接入",
+        "wiredNote": "E2 对照资质库人员证书是否已录入；人数达标仍需对照招标要求人工确认",
+        "engine": "e2_business",
+    },
+    {
+        "key": "equipment",
+        "category": "设备机械",
+        "point": "清单齐全，型号参数数量符合需求，附购置发票或租赁协议",
+        "items": ["设备清单齐全", "型号参数数量符合需求", "购置发票或租赁协议"],
+        "wired": "部分接入",
+        "wiredNote": "E2 对照资质库设备台账及发票/租赁关键词",
+        "engine": "e2_business",
+    },
+    {
+        "key": "credit",
+        "category": "信用记录",
+        "point": "信用中国、中国政府采购网无失信，附查询截图",
+        "items": ["信用中国无失信", "中国政府采购网无失信", "附查询截图"],
+        "wired": "部分接入",
+        "wiredNote": "E2 对照资质库信用材料；不联网信用中国或政府采购网",
+        "engine": "e2_business",
+    },
+]
+
+TECH_SCORE_MODULES = [
+    {
+        "key": "org_outline",
+        "module": "施工组织总纲",
+        "logic": "工程概况、重难点结合本项目实际；开篇绑定本项目全称+独有特征",
+        "category": "施工组织总纲",
+        "point": "工程概况、重难点结合本项目实际；开篇绑定本项目全称+独有特征",
+        "items": ["开篇写明本项目全称", "重难点结合本项目地点/工期/地质", "避免通用模板开篇"],
+        "wired": "部分接入",
+        "wiredNote": "E3 将本模块写入五维评分 Prompt，不按模块单独出分",
+        "engine": "e3_semantic",
+    },
+    {
+        "key": "special_plan",
+        "module": "专项施工方案",
+        "logic": "分部分项方案完整；关键工序、危大工程单独阐述并引用最新规范条文号",
+        "category": "专项施工方案",
+        "point": "分部分项方案完整；关键工序、危大工程单独阐述并引用最新规范条文号",
+        "items": ["分部分项方案完整", "危大工程单独阐述", "引用最新规范条文号"],
+        "wired": "部分接入",
+        "wiredNote": "E3 写入 Prompt 作为完整性/合规性判分参考；条文号未做规范库自动核对",
+        "engine": "e3_semantic",
+    },
+    {
+        "key": "schedule",
+        "module": "工期管控",
+        "logic": "必须附双代号网络图或横道图，纯文字不认；关键线路清晰",
+        "category": "工期管控",
+        "point": "必须附双代号网络图或横道图，纯文字不认；关键线路清晰",
+        "items": ["双代号网络图或横道图", "关键线路清晰", "纯文字进度描述不得分"],
+        "wired": "部分接入",
+        "wiredNote": "E3 可在可落地性中提示缺图；不解析图片内容，无法确认是否真为网络图",
+        "engine": "e3_semantic",
+    },
+    {
+        "key": "quality",
+        "module": "质量管理",
+        "logic": "质保体系、三级交底、样板引路、验收流程完整；引用具体规范条文号",
+        "category": "质量管理",
+        "point": "质保体系、三级交底、样板引路、验收流程完整；引用具体规范条文号",
+        "items": ["质保体系", "三级交底", "样板引路", "验收流程", "规范条文号"],
+        "wired": "部分接入",
+        "wiredNote": "E3 写入 Prompt；未对质保体系附件做自动核验",
+        "engine": "e3_semantic",
+    },
+    {
+        "key": "safety",
+        "module": "安全文明",
+        "logic": "安全责任制、危险源清单、专项防护；属地扬尘六个 100%、临边 1.2m 等细则写入",
+        "category": "安全文明",
+        "point": "安全责任制、危险源清单、专项防护；属地扬尘六个 100%、临边 1.2m 等细则写入",
+        "items": ["安全责任制", "危险源清单", "专项防护", "扬尘六个 100%", "临边防护 1.2m"],
+        "wired": "部分接入",
+        "wiredNote": "E3 Prompt 含属地细节；E2 在正文已写临边/扬尘主题时核验启用细则包中的量化要求",
+        "engine": "e3_semantic",
+    },
+    {
+        "key": "environment",
+        "module": "环保水保",
+        "logic": "噪声治理、污水固废处理具体；绿色施工四节一环保量化",
+        "category": "环保水保",
+        "point": "噪声治理、污水固废处理具体；绿色施工四节一环保量化",
+        "items": ["噪声治理", "污水固废处理", "四节一环保量化"],
+        "wired": "部分接入",
+        "wiredNote": "E3 写入 Prompt 作为可落地性参考；未做环保指标自动计算",
+        "engine": "e3_semantic",
+    },
+    {
+        "key": "resources",
+        "module": "资源配置",
+        "logic": "劳动力动态曲线、材料采购、机械进退场全部量化，数据可交叉验证",
+        "category": "资源配置",
+        "point": "劳动力动态曲线、材料采购、机械进退场全部量化，数据可交叉验证",
+        "items": ["劳动力动态曲线", "材料采购量化", "机械进退场", "数据可交叉验证"],
+        "wired": "部分接入",
+        "wiredNote": "E3 关注有无量化；E2 在人数与宿舍面积同时出现时按人均 4㎡ 交叉验算",
+        "engine": "e3_semantic",
+    },
+    {
+        "key": "after_sales",
+        "module": "售后质保",
+        "logic": "维修响应时限（2小时到场/24小时修复）、巡检计划、备品备件清单齐全",
+        "category": "售后质保",
+        "point": "维修响应时限（2小时到场/24小时修复）、巡检计划、备品备件清单齐全",
+        "items": ["2小时到场", "24小时修复", "巡检计划", "备品备件清单"],
+        "wired": "部分接入",
+        "wiredNote": "E3 写入 Prompt；未核验售后网点真实性",
+        "engine": "e3_semantic",
+    },
+]
+
+DUP_CHECK_POINTS = [
+    {
+        "key": "filler_density",
+        "category": "虚词密度",
+        "point": "全文虚词密度不超过规则页安全线（默认 5%），每页应有数据或图表支撑",
+        "items": ["虚词密度安全线默认 5%", "超过则标记虚词堆砌", "数值在「查重阈值」tab 可改"],
+        "wired": "接入判定",
+        "wiredNote": "E4 按启用虚词表统计密度，超过规则页 filler_density_safe 即出问题项",
+        "engine": "e4_duplicate_filler",
+    },
+    {
+        "key": "high_risk_words",
+        "category": "高危虚词",
+        "point": "命中虚词表高危词/句式时扣分，并给出改写建议",
+        "items": ["高危万能动词", "空洞形容词", "承诺套话", "口号标语"],
+        "wired": "接入判定",
+        "wiredNote": "E4 按「虚词表」启用项检索；改写建议取规则页 rewrite 字段",
+        "engine": "e4_duplicate_filler",
+    },
+    {
+        "key": "high_risk_sentences",
+        "category": "高危模板句",
+        "point": "识别「科学安排施工进度，合理组织劳动力」等高危句式",
+        "items": ["模板句正则命中", "建议注入本项目地点/工期/地质重写"],
+        "wired": "接入判定",
+        "wiredNote": "E4 使用内置高危句式正则；不把命中写成跨投标人串标",
+        "engine": "e4_duplicate_filler",
+    },
+    {
+        "key": "self_check_five",
+        "category": "虚词自查五规则",
+        "point": "数字、动作、对象、验证、密度五条，作为技术标语义评审约束",
+        "items": list(FILLER_SELF_CHECK_RULES),
+        "wired": "部分接入",
+        "wiredNote": "密度由 E4 硬判定；其余四条写入 E3 Prompt，由大模型参考给分，不是逐条规则引擎",
+        "engine": "e3_semantic",
+    },
+    {
+        "key": "full_text_sim",
+        "category": "全文模板查重",
+        "point": "全文与既有模板相似度应 ≤30%，超过 42% 技术标整体降档",
+        "items": ["安全线默认 30%", "风险线默认 42%", "对内置模板库自检"],
+        "wired": "部分接入",
+        "wiredNote": "E4 与内置示例模板库及本企业历史标书做相似度比对，不比对其他投标人",
+        "engine": "e4_duplicate_filler",
+    },
+    {
+        "key": "key_section_sim",
+        "category": "重难点/四新专项查重",
+        "point": "重难点、四新等专项章节相似度应 ≤20%，超过 40% 该小节清零",
+        "items": ["安全线默认 20%", "风险线默认 40%", "命中重难点/四新标题后再比"],
+        "wired": "部分接入",
+        "wiredNote": "E4 在出现重难点/四新等提示语的段落上做专项比对；阈值在「查重阈值」tab 可改",
+        "engine": "e4_duplicate_filler",
+    },
+    {
+        "key": "cross_bidder",
+        "category": "本企业跨项目查重",
+        "point": "段落雷同风险线 60%、整体雷同风险线 80%——比对本企业历史标书与知识库",
+        "items": ["本企业段落雷同 60%", "本企业整体雷同 80%", "不比对其他投标人未公开文件"],
+        "wired": "接入判定",
+        "wiredNote": "E4 使用规则页阈值对本企业其他项目文件与知识库做相似度/MD5 比对，明确不伪造跨投标人结果",
+        "engine": "e4_duplicate_filler",
+    },
+    {
+        "key": "anon_meta",
+        "category": "暗标身份残留",
+        "point": "清除文档属性中的作者/单位/软件元数据，避免暗标可识别身份",
+        "items": ["文档作者属性", "最后修改者", "单位/软件元数据"],
+        "wired": "部分接入",
+        "wiredNote": "E5 检查 Word 核心作者属性；图片内嵌单位名与正文暗标单位名未自动扫描",
+        "engine": "e5_layout",
+    },
+]
+
+HIGH_SCORE_STRATEGIES = [
+    {
+        "key": "checklist_map",
+        "category": "清单化对标响应",
+        "point": "评分点→标书章节→页码一一映射",
+        "items": ["评分点映射章节", "页码可回溯", "缺项可见"],
+        "wired": "部分接入",
+        "wiredNote": "招标解析锁定评标尺子后，撰写大纲可挂接评分点；页码一一映射依赖导出目录，不保证自动生成页码表",
+        "engine": "e3_semantic",
+    },
+    {
+        "key": "quantify",
+        "category": "数据代替定性空话",
+        "point": "虚词全部替换为可量化表述",
+        "items": ["删除加强/确保等态度词", "改为数量、时限、频次、百分比"],
+        "wired": "部分接入",
+        "wiredNote": "E4 命中虚词时给出改写建议；不自动改写全文",
+        "engine": "e4_duplicate_filler",
+    },
+    {
+        "key": "originality",
+        "category": "原创度控制红线",
+        "point": "全文查重≤30%，重难点章节≤20%",
+        "items": ["全文 ≤30%", "重难点 ≤20%"],
+        "wired": "部分接入",
+        "wiredNote": "与「专项检查」全文/专项查重同一套 E4 阈值，对内置模板库自检",
+        "engine": "e4_duplicate_filler",
+    },
+    {
+        "key": "local_first",
+        "category": "本地化策略优先",
+        "point": "本地业绩、本地团队、本地售后列明",
+        "items": ["本地业绩", "本地团队", "本地售后"],
+        "wired": "部分接入",
+        "wiredNote": "属地细则包启用后由 E2 核验量化条款；本地业绩真实性未自动核验",
+        "engine": "e2_business",
+    },
+    {
+        "key": "structured_layout",
+        "category": "严格结构化排版",
+        "point": "三级标题 1→1.1→1.1.1，目录自动生成",
+        "items": ["标题层级连续", "目录使用自动域", "页码与正文一致"],
+        "wired": "部分接入",
+        "wiredNote": "E5 检查标题跳级、目录域、修订痕迹和批注",
+        "engine": "e5_layout",
+    },
+    {
+        "key": "data_loop",
+        "category": "数据链逻辑闭环",
+        "point": "高峰人数与宿舍面积、塔吊覆盖与平面图可交叉验证",
+        "items": ["劳动力与临建面积匹配", "机械覆盖与平面图匹配"],
+        "wired": "部分接入",
+        "wiredNote": "E2 在高峰人数与宿舍/临建面积同时写出时按人均 4㎡ 交叉验算；塔吊覆盖未自动验算",
+        "engine": "e2_business",
+    },
+    {
+        "key": "chart_meta",
+        "category": "图表自制规范",
+        "point": "清除图片属性中的作者/单位/软件元数据",
+        "items": ["清除作者", "清除单位", "清除软件元数据"],
+        "wired": "部分接入",
+        "wiredNote": "E5 检查文档级作者属性；不解析每张图片的 EXIF",
+        "engine": "e5_layout",
+    },
+    {
+        "key": "code_cite",
+        "category": "规范引用精准",
+        "point": "精确到条文号，不使用废止规范",
+        "items": ["引用到条文号", "不使用废止规范"],
+        "wired": "部分接入",
+        "wiredNote": "E3 Prompt 要求引用条文号；E2 在正文同时出现规范编号与「废止」时提示人工核对。本系统无国家现行规范库",
+        "engine": "e2_business",
+    },
+    {
+        "key": "mock_review",
+        "category": "模拟 AI 预审",
+        "point": "正式投标前自检缺项、查重、格式、逻辑矛盾",
+        "items": ["缺项", "查重", "格式", "逻辑矛盾"],
+        "wired": "接入判定",
+        "wiredNote": "即本系统预审中心 E1–E5；逻辑矛盾依赖 E3 语义，不是形式化证明",
+        "engine": "e1_veto",
+    },
+    {
+        "key": "zero_veto",
+        "category": "一票否决零容错",
+        "point": "资质、人员、社保、签字、盖章、保证金、有效期、报价专人交叉复核",
+        "items": ["资质", "人员社保", "签字盖章", "保证金", "有效期", "报价"],
+        "wired": "部分接入",
+        "wiredNote": "与「一票否决」tab 同一口径：星号/报价/有效期/保证金关键词已接入，人员社保对照资质库且不联网社保局",
+        "engine": "e1_veto",
+    },
+]
+
+RULE_CATALOGS = {
+    "business": BUSINESS_CHECK_POINTS,
+    "tech": TECH_SCORE_MODULES,
+    "dup_check": DUP_CHECK_POINTS,
+    "strategy": HIGH_SCORE_STRATEGIES,
+}
+
+LOCAL_RULE_PACKAGES = [
+    {
+        "name": "扬尘六个 100% 细则包",
+        "region": "合肥/安徽",
+        "status": "启用",
+        "items": [
+            "围挡率 100%",
+            "洒水降尘 100%",
+            "出入口冲洗 100%",
+            "扬尘防治 6 个 100%",
+            "雾炮机覆盖半径可核验",
+            "渣土运输路线报备",
+        ],
+    },
+    {
+        "name": "临边洞口防护细则包",
+        "region": "合肥/安徽",
+        "status": "启用",
+        "items": [
+            "临边防护高度 1.2m",
+            "扫地杆距地 ≤20cm",
+            "洞口盖板固定",
+            "安全网兜底",
+        ],
+    },
+]
 
 SEVERITY_PENALTY = {
     "废标": 40,
@@ -106,3 +738,5 @@ SEVERITY_PENALTY = {
     "扣分": 8,
     "建议": 3,
 }
+
+REWRITE_BY_WORD = {item["word"]: item["rewrite"] for item in FILLER_WORDS}

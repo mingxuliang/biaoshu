@@ -3,6 +3,7 @@ import { Navigate } from "react-router-dom";
 import NotFound from "../pages/NotFound";
 import ConsoleLayout from "../pages/console/components/ConsoleLayout";
 import RequireAuth from "./RequireAuth";
+import RequirePerm from "./RequirePerm";
 import ProjectsPage from "../pages/console/projects/page";
 import ProjectDetailPage from "../pages/console/projects/detail";
 import WriterPage from "../pages/console/writer/page";
@@ -10,6 +11,8 @@ import TeamPage from "../pages/console/team/page";
 import ParsePage from "../pages/console/parse/page";
 import QualificationsPage from "../pages/console/qualifications/page";
 import KnowledgePage from "../pages/console/knowledge/page";
+import ProductsPage from "../pages/console/products/page";
+import ProductLibraryDetailPage from "../pages/console/products/detail";
 import AuditPage from "../pages/console/audit/page";
 import ReviewPage from "../pages/console/review/page";
 import ExportPage from "../pages/console/export/page";
@@ -34,64 +37,80 @@ const routes: RouteObject[] = [
       </RequireAuth>
     ),
     children: [
-      {
-        index: true,
-        element: <Navigate to="/console/projects" replace />,
-      },
-      {
-        path: "projects",
-        element: <ProjectsPage />,
-      },
-      {
-        path: "projects/:id",
-        element: <ProjectDetailPage />,
-      },
+      { index: true, element: <Navigate to="/console/projects" replace /> },
+      { path: "projects", element: <ProjectsPage /> },
+      { path: "projects/:id", element: <ProjectDetailPage /> },
       {
         path: "writer",
-        element: <WriterPage />,
+        element: (
+          <RequirePerm anyOf={["writer"]}>
+            <WriterPage />
+          </RequirePerm>
+        ),
       },
       {
         path: "parse",
-        element: <ParsePage />,
+        element: (
+          <RequirePerm anyOf={["project_edit", "writer"]}>
+            <ParsePage />
+          </RequirePerm>
+        ),
       },
-      {
-        path: "qualifications",
-        element: <QualificationsPage />,
-      },
-      {
-        path: "knowledge",
-        element: <KnowledgePage />,
-      },
+      { path: "qualifications", element: <QualificationsPage /> },
+      { path: "knowledge", element: <KnowledgePage /> },
+      { path: "products", element: <ProductsPage /> },
+      { path: "products/:libraryId", element: <ProductLibraryDetailPage /> },
       {
         path: "audit",
-        element: <AuditPage />,
+        element: (
+          <RequirePerm anyOf={["review"]}>
+            <AuditPage />
+          </RequirePerm>
+        ),
       },
       {
         path: "review",
-        element: <ReviewPage />,
+        element: (
+          <RequirePerm anyOf={["writer"]}>
+            <ReviewPage />
+          </RequirePerm>
+        ),
       },
       {
         path: "export",
-        element: <ExportPage />,
+        element: (
+          <RequirePerm anyOf={["export"]}>
+            <ExportPage />
+          </RequirePerm>
+        ),
       },
       {
         path: "rules",
-        element: <RulesPage />,
+        element: (
+          <RequirePerm anyOf={["settings"]}>
+            <RulesPage />
+          </RequirePerm>
+        ),
       },
       {
         path: "team",
-        element: <TeamPage />,
+        element: (
+          <RequirePerm anyOf={["members"]}>
+            <TeamPage />
+          </RequirePerm>
+        ),
       },
       {
         path: "auditlog",
-        element: <AuditLogPage />,
+        element: (
+          <RequirePerm anyOf={["settings"]}>
+            <AuditLogPage />
+          </RequirePerm>
+        ),
       },
     ],
   },
-  {
-    path: "*",
-    element: <NotFound />,
-  },
+  { path: "*", element: <NotFound /> },
 ];
 
 export default routes;

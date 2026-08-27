@@ -5,7 +5,7 @@ import {
   archImageOptions, aiImageStyles,
   type StyleConfig, type PageConfig, type LayoutConfig, type ImageConfig,
 } from "@/mocks/writerSteps";
-import { KNOWLEDGE_SCOPES, KNOWLEDGE_TYPES, listKnowledgeDocuments, type KnowledgeDoc } from "@/lib/api";
+import { KNOWLEDGE_SCOPES, KNOWLEDGE_TYPES, listKnowledgeDocuments, listProductLibraries, type KnowledgeDoc, type ProductLibrary } from "@/lib/api";
 
 export interface WriterSettingsPayload {
   style: StyleConfig;
@@ -20,6 +20,8 @@ interface BidSettingsProps {
   onModelChange: (id: string) => void;
   selectedKnowledge: string[];
   onKnowledgeChange: (ids: string[]) => void;
+  selectedProductLibraryId: string;
+  onProductLibraryChange: (id: string) => void;
   initialSettings?: Partial<WriterSettingsPayload>;
   onNext: (settings: WriterSettingsPayload) => void;
 }
@@ -30,6 +32,8 @@ export default function BidSettings({
   onModelChange,
   selectedKnowledge,
   onKnowledgeChange,
+  selectedProductLibraryId,
+  onProductLibraryChange,
   initialSettings,
   onNext,
 }: BidSettingsProps) {
@@ -43,6 +47,7 @@ export default function BidSettings({
   const [image, setImage] = useState<ImageConfig>(initialSettings?.image ?? defaultImage);
 
   const [knowledgeDocs, setKnowledgeDocs] = useState<KnowledgeDoc[]>([]);
+  const [productLibraries, setProductLibraries] = useState<ProductLibrary[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,6 +57,13 @@ export default function BidSettings({
       })
       .catch(() => {
         /* 知识库拉取失败不阻塞标书设置流程，列表保持为空 */
+      });
+    listProductLibraries()
+      .then((libs) => {
+        if (!cancelled) setProductLibraries(libs);
+      })
+      .catch(() => {
+        /* 产品库拉取失败不阻塞设置流程 */
       });
     return () => {
       cancelled = true;
@@ -89,10 +101,10 @@ export default function BidSettings({
         </span>
         <div>
           <div className="font-heading text-sm font-semibold tracking-wide text-foreground-900">第一步 · 标书设置</div>
-          <div className="text-xs text-foreground-500">选择撰写大模型，并配置 AI 生成时引用的知识库资料</div>
+          <div className="text-xs text-foreground-500">选择撰写大模型，目录生成与正文生成均使用该模型</div>
         </div>
         <span className="ml-auto rounded-md bg-secondary-100 px-2 py-1 text-[11px] font-medium text-secondary-700">
-          {selectedKnowledge.length} 份知识库资料已选中
+          {selectedProductLibraryId ? "已选产品库" : `${selectedKnowledge.length} 份知识库资料已选中`}
         </span>
       </div>
 
@@ -103,7 +115,7 @@ export default function BidSettings({
           <div className="mb-2.5 flex items-center gap-2">
             <span className="flex h-5 w-5 items-center justify-center rounded bg-primary-500 text-[10px] font-bold text-background-50">1</span>
             <h4 className="text-sm font-semibold text-foreground-900">选择撰写大模型</h4>
-            <span className="text-[11px] text-foreground-500">AI 将基于该模型能力定向撰写标书正文</span>
+            <span className="text-[11px] text-foreground-500">目录与章节正文均由该模型生成</span>
           </div>
           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
             {modelOptions.map((m) => {
@@ -136,7 +148,41 @@ export default function BidSettings({
           </div>
         </section>
 
-        {/* 2. 知识库引用配置 */}
+        <section className="rounded-lg border border-background-300 bg-background-50 p-3.5">
+          <div className="mb-2.5 flex flex-wrap items-center gap-2">
+            <span className="flex h-5 w-5 items-center justify-center rounded bg-primary-500 text-[10px] font-bold text-background-50">2</span>
+            <h4 className="text-sm font-semibold text-foreground-900">投标产品</h4>
+            <span className="text-[11px] text-foreground-500">一个项目只选一个产品库，正文按已入库功能点组句插图</span>
+          </div>
+          {productLibraries.length === 0 ? (
+            <p className="text-xs text-foreground-500">暂无产品库。请先在「产品功能库」上传技术标并审核入库，或改用下方知识库切片。</p>
+          ) : (
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {productLibraries.map((lib) => {
+                const active = selectedProductLibraryId === lib.id;
+                return (
+                  <button
+                    key={lib.id}
+                    type="button"
+                    onClick={() => onProductLibraryChange(active ? "" : lib.id)}
+                    className={`flex cursor-pointer flex-col gap-1 rounded-lg border p-3 text-left transition-all ${
+                      active ? "border-primary-400 bg-primary-50/70 ring-1 ring-primary-200" : "border-background-300 bg-background-100 hover:border-primary-200"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-semibold text-foreground-900">{lib.name}</span>
+                      <span className="rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700">{lib.category}</span>
+                    </div>
+                    <p className="line-clamp-2 text-[11px] text-foreground-500">{lib.description || "无说明"}</p>
+                    <span className="text-[10px] text-foreground-500">已入库功能点以审核为准 · 共 {lib.featureCount || 0} 条</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        {/* 知识库引用配置 */}
         <section className="rounded-lg border border-background-300 bg-background-50 p-3.5">
           <div className="mb-2.5 flex flex-wrap items-center gap-2">
             <span className="flex h-5 w-5 items-center justify-center rounded bg-primary-500 text-[10px] font-bold text-background-50">2</span>
@@ -474,10 +520,9 @@ export default function BidSettings({
               {normalImageOptions.map((opt) => {
                 const active = image.normal === opt;
                 const meta = {
-                  "互联网搜图": { icon: "ri-global-line", desc: "联网检索与内容匹配的配图素材" },
-                  "图库配图": { icon: "ri-image-add-line", desc: "从企业图库中挑选规范图片" },
-                  "AI生图": { icon: "ri-sparkling-line", desc: "由 AI 按章节内容生成定制配图" },
-                }[opt]!;
+                  "AI生图": { icon: "ri-sparkling-line", desc: "由豆包 Seedream 按章节描述生成配图" },
+                  "本机上传": { icon: "ri-upload-2-line", desc: "在正文配图面板上传本地图片插入章节" },
+                }[opt] ?? { icon: "ri-image-line", desc: "在撰写正文的配图面板中完成" };
                 return (
                   <button
                     key={opt}
@@ -535,9 +580,9 @@ export default function BidSettings({
               {archImageOptions.map((opt) => {
                 const active = image.arch === opt;
                 const meta = {
-                  "图库配图": { icon: "ri-layout-grid-line", desc: "选用企业图库中已有的架构图模板" },
-                  "AI生成架构图": { icon: "ri-organization-chart", desc: "AI 根据技术方案自动绘制架构图" },
-                }[opt]!;
+                  "AI生成架构图": { icon: "ri-organization-chart", desc: "由豆包 Seedream 按架构描述生成示意图" },
+                  "本机上传": { icon: "ri-upload-2-line", desc: "在配图面板上传已有架构图插入章节" },
+                }[opt] ?? { icon: "ri-image-line", desc: "在撰写正文的配图面板中完成" };
                 return (
                   <button
                     key={opt}
@@ -614,7 +659,7 @@ export default function BidSettings({
         <button
           type="button"
           onClick={() => onNext({ style, page, layout, image })}
-          disabled={!modelId || selectedKnowledge.length === 0}
+          disabled={!modelId || (!selectedProductLibraryId && selectedKnowledge.length === 0)}
           className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-4 text-sm font-medium text-background-50 transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-50"
         >
           保存设置，进入下一步

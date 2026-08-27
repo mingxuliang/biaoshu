@@ -1,157 +1,212 @@
-"""开发环境种子数据：首次启动时写入默认账号与演示项目。
+"""启动时：仅在零用户时创建引导管理员；规则目录 upsert；清除历史演示种子。
 
-与前端 src/context/AuthContext.tsx 的 defaultUser、src/mocks/projects.ts 的
-projects 数组保持一致，确保迁移到真实后端后功能演示不受影响
-（projects/page.tsx 里按 p-1001~p-1007 硬编码的 defaultAssignments 依然生效）。
+不写入虚构项目、演示人名、演示证照。引导账号仅用于空库可登录，不是业务演示数据。
 """
-
-from datetime import datetime
 
 from sqlalchemy.orm import Session
 
 from .auth import hash_password
-from .models import Project, User
+from .engines import rules_data
+from .models import (
+    CatalogRule,
+    FillerWordRule,
+    Project,
+    ProjectMember,
+    QualificationAsset,
+    RulePackage,
+    ThresholdRule,
+    User,
+    VetoRule,
+    WeightTemplate,
+)
+from .project_ops import delete_project_cascade
 
-DEFAULT_USER = {
+BOOTSTRAP_ADMIN = {
     "id": "user-000000000001",
-    "name": "陈立群",
+    "name": "系统管理员",
     "email": "chen@zhibiaoyun.com",
     "password": "123456",
-    "phone": "138 0013 8000",
-    "company": "中建八局·华东公司",
-    "position": "投标主管",
+    "phone": "",
+    "company": "",
+    "position": "管理员",
     "role": "管理员",
 }
 
-SEED_PROJECTS = [
-    {
-        "id": "p-1001",
-        "code": "ZB-2026-0412",
-        "name": "城市轨道交通 3 号线智能化机电安装工程",
-        "type": "交通",
-        "owner": "陈立群",
-        "budget": "¥ 8,600 万",
-        "deadline": "2026-08-28",
-        "progress": 76,
-        "score": 91.5,
-        "status": "评标中",
-        "created_at": "2026-06-18",
-    },
-    {
-        "id": "p-1002",
-        "code": "CG-2026-0877",
-        "name": "市政务数据中心云资源池扩容采购项目",
-        "type": "政采",
-        "owner": "林晓雯",
-        "budget": "¥ 2,450 万",
-        "deadline": "2026-08-22",
-        "progress": 92,
-        "score": 88.2,
-        "status": "已提交",
-        "created_at": "2026-06-25",
-    },
-    {
-        "id": "p-1003",
-        "code": "GX-2026-1530",
-        "name": "三甲医院智慧医疗一体化信息平台建设",
-        "type": "医疗",
-        "owner": "王浩然",
-        "budget": "¥ 3,180 万",
-        "deadline": "2026-09-05",
-        "progress": 45,
-        "score": 84.6,
-        "status": "撰写中",
-        "created_at": "2026-07-02",
-    },
-    {
-        "id": "p-1004",
-        "code": "YT-2026-0934",
-        "name": "河西综合管廊二期土建施工总承包工程",
-        "type": "工程",
-        "owner": "赵启铭",
-        "budget": "¥ 12,900 万",
-        "deadline": "2026-08-15",
-        "progress": 100,
-        "score": 93.1,
-        "status": "已中标",
-        "created_at": "2026-05-20",
-    },
-    {
-        "id": "p-1005",
-        "code": "XX-2026-0219",
-        "name": "省级国资云安全态势感知平台建设项目",
-        "type": "IT",
-        "owner": "李思源",
-        "budget": "¥ 1,860 万",
-        "deadline": "2026-09-12",
-        "progress": 18,
-        "score": 0,
-        "status": "撰写中",
-        "created_at": "2026-07-20",
-    },
-    {
-        "id": "p-1006",
-        "code": "NY-2026-0671",
-        "name": "光伏电站智能运维监控系统集成项目",
-        "type": "能源",
-        "owner": "陈立群",
-        "budget": "¥ 4,520 万",
-        "deadline": "2026-08-30",
-        "progress": 100,
-        "score": 79.8,
-        "status": "未中标",
-        "created_at": "2026-04-15",
-    },
-    {
-        "id": "p-1007",
-        "code": "CG-2026-1022",
-        "name": "智慧园区一网统管综合服务平台建设",
-        "type": "政采",
-        "owner": "林晓雯",
-        "budget": "¥ 2,980 万",
-        "deadline": "2026-09-20",
-        "progress": 8,
-        "score": 0,
-        "status": "撰写中",
-        "created_at": "2026-08-02",
-    },
-]
+DEMO_PROJECT_IDS = [f"p-100{i}" for i in range(1, 8)]
+DEMO_USER_IDS = [f"user-m0{i}" for i in range(2, 8)]
+DEMO_USER_EMAILS = {
+    "linxiaowen@zby.ai",
+    "wanghaoran@zby.ai",
+    "zhaoqiming@zby.ai",
+    "lisiyuan@zby.ai",
+    "shenhuimin@zby.ai",
+    "fengtiejun@zby.ai",
+}
+DEMO_QUAL_IDS = [f"qual-q{i}" for i in range(1, 11)]
+DEMO_COMPANY = "中建八局·华东公司"
+DEMO_PERSON_NAMES = {"陈立群", "林晓雯", "王浩然", "赵启铭", "李思源", "沈慧敏", "冯铁军"}
+
+
+def purge_demo_data(db: Session) -> None:
+    """删除历史上写入的演示项目、演示成员、演示证照，并把引导账号去演示化。"""
+    for project_id in DEMO_PROJECT_IDS:
+        if db.get(Project, project_id):
+            delete_project_cascade(db, project_id)
+
+    db.query(ProjectMember).filter(ProjectMember.user_id.in_(DEMO_USER_IDS)).delete(synchronize_session=False)
+    db.query(User).filter(User.id.in_(DEMO_USER_IDS)).delete(synchronize_session=False)
+    extra_demo_users = db.query(User).filter(User.email.in_(DEMO_USER_EMAILS)).all()
+    for user in extra_demo_users:
+        db.query(ProjectMember).filter(ProjectMember.user_id == user.id).delete(synchronize_session=False)
+        db.delete(user)
+
+    db.query(QualificationAsset).filter(QualificationAsset.id.in_(DEMO_QUAL_IDS)).delete(synchronize_session=False)
+
+    bootstrap = db.get(User, BOOTSTRAP_ADMIN["id"]) or db.query(User).filter(User.email == BOOTSTRAP_ADMIN["email"]).first()
+    if bootstrap:
+        if bootstrap.name in DEMO_PERSON_NAMES:
+            bootstrap.name = BOOTSTRAP_ADMIN["name"]
+        if (bootstrap.company or "") == DEMO_COMPANY:
+            bootstrap.company = ""
+        if bootstrap.position in DEMO_PERSON_NAMES or bootstrap.position == "投标主管":
+            bootstrap.position = BOOTSTRAP_ADMIN["position"]
+        bootstrap.role = "管理员"
+
+    for project in db.query(Project).all():
+        if project.owner in DEMO_PERSON_NAMES:
+            owner_user = db.get(User, project.owner_id) if project.owner_id else None
+            project.owner = owner_user.name if owner_user else BOOTSTRAP_ADMIN["name"]
+
+    db.commit()
 
 
 def seed_defaults(db: Session) -> None:
-    default_user = None
-    if db.query(User).count() == 0:
-        default_user = User(
-            id=DEFAULT_USER["id"],
-            name=DEFAULT_USER["name"],
-            email=DEFAULT_USER["email"],
-            password_hash=hash_password(DEFAULT_USER["password"]),
-            phone=DEFAULT_USER["phone"],
-            company=DEFAULT_USER["company"],
-            position=DEFAULT_USER["position"],
-            role=DEFAULT_USER["role"],
+    """空库才创建引导管理员，便于首次登录；已有任意用户则不动。"""
+    if db.query(User).count() > 0:
+        return
+    db.add(
+        User(
+            id=BOOTSTRAP_ADMIN["id"],
+            name=BOOTSTRAP_ADMIN["name"],
+            email=BOOTSTRAP_ADMIN["email"],
+            password_hash=hash_password(BOOTSTRAP_ADMIN["password"]),
+            phone=BOOTSTRAP_ADMIN["phone"],
+            company=BOOTSTRAP_ADMIN["company"],
+            position=BOOTSTRAP_ADMIN["position"],
+            role=BOOTSTRAP_ADMIN["role"],
         )
-        db.add(default_user)
-        db.flush()
+    )
+    db.commit()
 
-    if db.query(Project).count() == 0:
-        owner_id = default_user.id if default_user else None
-        for item in SEED_PROJECTS:
+
+def seed_rules(db: Session) -> None:
+    """把 rules_data 目录 upsert 进规则表。已有库会补齐新虚词、改写、阈值和属地条目，不覆盖用户改过的数值/启停。"""
+    if db.query(WeightTemplate).count() == 0:
+        db.add(
+            WeightTemplate(
+                name="青天默认五维",
+                completeness=rules_data.DEFAULT_WEIGHTS["completeness"],
+                relevance=rules_data.DEFAULT_WEIGHTS["relevance"],
+                compliance=rules_data.DEFAULT_WEIGHTS["compliance"],
+                feasibility=rules_data.DEFAULT_WEIGHTS["feasibility"],
+                standardization=rules_data.DEFAULT_WEIGHTS["standardization"],
+                scope="全局默认",
+                active=True,
+            )
+        )
+
+    existing_words = {r.word: r for r in db.query(FillerWordRule).all()}
+    for item in rules_data.FILLER_WORDS:
+        row = existing_words.get(item["word"])
+        if row is None:
             db.add(
-                Project(
-                    id=item["id"],
-                    code=item["code"],
-                    name=item["name"],
-                    type=item["type"],
-                    owner=item["owner"],
-                    owner_id=owner_id,
-                    budget=item["budget"],
-                    deadline=item["deadline"],
-                    progress=item["progress"],
-                    score=item["score"],
-                    status=item["status"],
-                    created_at=datetime.strptime(item["created_at"], "%Y-%m-%d"),
+                FillerWordRule(
+                    category=item["category"],
+                    level=item["level"],
+                    word=item["word"],
+                    rewrite=item.get("rewrite") or "",
+                    enabled=True,
                 )
             )
+            continue
+        row.category = item["category"]
+        row.level = item["level"]
+        if not (row.rewrite or "").strip():
+            row.rewrite = item.get("rewrite") or ""
+
+    existing_thresholds = {r.key: r for r in db.query(ThresholdRule).all()}
+    for item in rules_data.THRESHOLD_CATALOG:
+        row = existing_thresholds.get(item["key"])
+        if row is None:
+            db.add(
+                ThresholdRule(
+                    key=item["key"],
+                    label=item["label"],
+                    value=item["value"],
+                    unit=item.get("unit") or "%",
+                    description=item.get("description") or "",
+                )
+            )
+            continue
+        row.label = item["label"]
+        row.unit = item.get("unit") or row.unit
+        row.description = item.get("description") or ""
+
+    existing_packages = {p.name: p for p in db.query(RulePackage).all()}
+    for item in rules_data.LOCAL_RULE_PACKAGES:
+        row = existing_packages.get(item["name"])
+        if row is None:
+            db.add(
+                RulePackage(
+                    name=item["name"],
+                    region=item["region"],
+                    status=item["status"],
+                    items_json=item["items"],
+                )
+            )
+            continue
+        current = list(row.items_json or [])
+        for entry in item["items"]:
+            if entry not in current:
+                current.append(entry)
+        row.items_json = current
+        row.region = item["region"]
+
+    existing_veto = {r.key: r for r in db.query(VetoRule).all()}
+    for seq, item in enumerate(rules_data.VETO_CHECK_POINTS):
+        row = existing_veto.get(item["key"])
+        payload = dict(
+            category=item["category"],
+            point=item["point"],
+            items_json=item.get("items") or [],
+            wired=item.get("wired") or "仅对照",
+            wired_note=item.get("wiredNote") or "",
+            engine=item.get("engine") or "",
+            seq=seq,
+        )
+        if row is None:
+            db.add(VetoRule(key=item["key"], **payload))
+            continue
+        for field, value in payload.items():
+            setattr(row, field, value)
+
+    existing_catalog = {(r.kind, r.key): r for r in db.query(CatalogRule).all()}
+    for kind, items in rules_data.RULE_CATALOGS.items():
+        for seq, item in enumerate(items):
+            payload = dict(
+                category=item.get("category") or item.get("module") or "",
+                point=item.get("point") or item.get("logic") or "",
+                items_json=item.get("items") or [],
+                wired=item.get("wired") or "仅对照",
+                wired_note=item.get("wiredNote") or "",
+                engine=item.get("engine") or "",
+                seq=seq,
+            )
+            row = existing_catalog.get((kind, item["key"]))
+            if row is None:
+                db.add(CatalogRule(kind=kind, key=item["key"], **payload))
+                continue
+            for field, value in payload.items():
+                setattr(row, field, value)
 
     db.commit()

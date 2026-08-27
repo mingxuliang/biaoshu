@@ -33,6 +33,24 @@ def _doc_titles(db: Session, doc_ids: list[str]) -> dict[str, str]:
     return {d.id: d.title for d in docs}
 
 
+def list_knowledge_headings(db: Session, doc_ids: list[str], limit: int = 40) -> list[str]:
+    """取出已选知识库文档的标题切片，供目录生成借鉴结构（不去重后的顺序 heading）。"""
+    if not doc_ids:
+        return []
+    slices = _load_slices(db, doc_ids)
+    seen: set[str] = set()
+    headings: list[str] = []
+    for slice_ in slices:
+        heading = (slice_.heading or "").strip()
+        if not heading or heading in seen or heading == "全文":
+            continue
+        seen.add(heading)
+        headings.append(heading)
+        if len(headings) >= limit:
+            break
+    return headings
+
+
 def retrieve_for_chapter(db: Session, doc_ids: list[str], query: str, top_k: int = 4) -> list[dict]:
     """在给定文档池内，按 query 用 BM25 检索最相关的 top_k 个片段。"""
     slices = _load_slices(db, doc_ids)

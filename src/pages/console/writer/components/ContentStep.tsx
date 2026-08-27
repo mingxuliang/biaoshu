@@ -1,16 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import Toast from "../../components/Toast";
 import ChapterTree from "./ChapterTree";
-import EditorPanel from "./EditorPanel";
+import EditorPanel, { type EditorPanelHandle } from "./EditorPanel";
 import ImagePanel from "./ImagePanel";
 import FloatingChat from "./FloatingChat";
 import {
+  ApiError,
   createChapterGenerateJob,
+  exportWriterDraftDocx,
   getOrCreateWriterDraft,
   pollWriterJobUntilDone,
   saveChapterContent,
   type OutlineNode,
+  type WriterImageItem,
 } from "@/lib/api";
+import { isOriginalFormTitle } from "@/lib/outlineNum";
 
 interface ToastState {
   message: string;
@@ -41,9 +45,10 @@ export default function ContentStep({
 }: ContentStepProps) {
   const [activeId, setActiveId] = useState<string>(outline[0]?.id ?? "");
   const [generatingId, setGeneratingId] = useState<string | null>(null);
-  const [insertedImages, setInsertedImages] = useState<{ url: string; type: string }[]>([]);
+  const [exporting, setExporting] = useState(false);
   const [toast, setToast] = useState<ToastState>({ message: "", type: "success", visible: false });
   const generatingRef = useRef(false);
+  const editorRef = useRef<EditorPanelHandle>(null);
 
   useEffect(() => {
     if (!outline.some((n) => n.id === activeId)) {
@@ -58,13 +63,17 @@ export default function ContentStep({
   };
 
   const activeNode = outline.find((c) => c.id === activeId);
-  const doneCount = outline.filter((c) => c.status === "已完成").length;
+  const doneCount = outline.filter((c) => c.status === "已完成" || c.status === "用原文").length;
   const totalWords = outline.reduce((s, c) => s + (c.words || 0), 0);
 
   const startGenerate = async (chapterId: string) => {
     if (generatingRef.current) return;
     const node = outline.find((c) => c.id === chapterId);
     if (!node) return;
+    if (node.status === "用原文" || isOriginalFormTitle(node.title, node.num)) {
+      showToast("本章请直接使用招标书原文填写后打印签字，无需 AI 撰写", "info");
+      return;
+    }
 
     generatingRef.current = true;
     setGeneratingId(chapterId);
@@ -102,9 +111,40 @@ export default function ContentStep({
     }
   };
 
-  const handleInsertImage = (item: { url: string; type: string }) => {
-    setInsertedImages((prev) => [...prev, item]);
-    showToast(item.type === "flow" ? "流程图已插入当前章节" : "图片已插入当前章节", "info");
+  const handleContentChange = (text: string) => {
+    if (!activeId) return;
+    onChapterContentsChange({ ...chapterContents, [activeId]: text });
+  };
+
+  const handleInsertImage = (item: WriterImageItem) => {
+    if (!activeId) return;
+    const label = (item.prompt || item.filename || "插图").replace(/[[\]]/g, "");
+    const inserted = editorRef.current?.insertImage(item.url, label);
+    if (!inserted) {
+      const line = `\n\n![${label}](${item.url})\n`;
+      onChapterContentsChange({ ...chapterContents, [activeId]: (chapterContents[activeId] || "") + line });
+    }
+    showToast(item.mode === "flow" ? "流程图已插入当前章节" : "图片已插入当前章节");
+  };
+
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const blob = await exportWriterDraftDocx(draftId);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${projectName}-投标书（撰写工作台导出）.docx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      showToast("导出成功，已开始下载 Word 文档");
+    } catch (err) {
+      showToast(err instanceof ApiError ? err.message : "导出失败，请检查网络后重试", "error");
+    } finally {
+      setExporting(false);
+    }
   };
 
   return (
@@ -116,7 +156,7 @@ export default function ContentStep({
         </span>
         <div>
           <div className="font-heading text-sm font-semibold tracking-wide text-foreground-900">第四步 · 正文生成</div>
-          <div className="text-xs text-foreground-500">按目录逐章 AI 撰写，支持插图插入与保存，全部写完后可进入预审</div>
+          <div className="text-xs text-foreground-500">按目录逐章 AI 撰写；承诺/授权/报价/偏差表等固定格式件直接用招标书原文</div>
         </div>
         <div className="ml-auto flex items-center gap-2">
           <button
@@ -149,21 +189,28 @@ export default function ContentStep({
           onNodesChange={onOutlineChange}
         />
         <EditorPanel
+          ref={editorRef}
           chapter={activeNode}
           content={chapterContents[activeId] || ""}
           generating={generatingId === activeId}
           onGenerate={() => startGenerate(activeId)}
           onSave={handleSave}
-          onExport={() => showToast("已导出 Word 文档（演示）", "info")}
-          insertedImages={insertedImages}
+          onExport={handleExport}
+          onContentChange={handleContentChange}
+          exporting={exporting}
         />
         <div className="hidden lg:flex">
-          <ImagePanel onInsertImage={handleInsertImage} />
+          <ImagePanel projectId={projectId} onInsertImage={handleInsertImage} />
         </div>
       </div>
 
       {/* 悬浮 AI 聊天 */}
-      <FloatingChat projectName={projectName} />
+      <FloatingChat
+        projectName={projectName}
+        draftId={draftId}
+        chapterTitle={activeNode?.title}
+        chapterExcerpt={(chapterContents[activeId] || "").slice(0, 1200)}
+      />
 
       <Toast message={toast.message} type={toast.type} visible={toast.visible} />
     </div>

@@ -10,6 +10,14 @@ class UploadDocOut(BaseModel):
     source: str
 
 
+class BidDocumentSummaryOut(BaseModel):
+    id: str
+    filename: str
+    source: str
+    sizeBytes: int
+    uploadedAt: str
+
+
 class CreateJobIn(BaseModel):
     bid_document_id: str
     scope: Literal["full"] = "full"
@@ -126,6 +134,30 @@ class FormatItemOut(BaseModel):
     level: Literal["废标", "建议", "强制"]
 
 
+class ParseRowOut(BaseModel):
+    label: str
+    content: str = ""
+
+
+class ParseSectionOut(BaseModel):
+    id: str
+    title: str
+    rows: list[ParseRowOut] = []
+
+
+class ParseSubItemOut(BaseModel):
+    id: str
+    label: str
+    sections: list[ParseSectionOut] = []
+
+
+class ParseDimensionOut(BaseModel):
+    key: str
+    label: str
+    completed: bool = False
+    items: list[ParseSubItemOut] = []
+
+
 class VetoParamsOut(BaseModel):
     validity_days_required: Optional[int] = None
     budget_cap_wan: Optional[float] = None
@@ -145,6 +177,7 @@ class ChecklistOut(BaseModel):
     mustRespond: list[MustRespondOut] = []
     qualification: list[QualificationItemOut] = []
     formatRequirements: list[FormatItemOut] = []
+    dimensions: list[ParseDimensionOut] = []
     vetoParams: VetoParamsOut = VetoParamsOut()
     error: Optional[str] = None
 
@@ -198,6 +231,102 @@ class TenderUploadMetaOut(BaseModel):
     pages: Optional[int] = None
 
 
+class TeamMemberOut(BaseModel):
+    id: str
+    name: str
+    email: str
+    role: str
+    phone: str = ""
+    disabled: bool = False
+    projectCount: int = 0
+    joinedAt: str = ""
+
+
+class InviteUserIn(BaseModel):
+    name: str
+    email: str
+    phone: str = ""
+    role: str = "撰写专家"
+
+
+class InviteUserOut(TeamMemberOut):
+    initialPassword: str = ""
+
+
+class UpdateUserIn(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    role: Optional[str] = None
+    disabled: Optional[bool] = None
+
+
+class QualificationImageOut(BaseModel):
+    id: str
+    caption: str = ""
+    url: str = ""
+
+
+class QualificationOut(BaseModel):
+    id: str
+    kind: Literal["cert", "people", "achievement", "equipment", "credit", "contract", "financial"]
+    name: str
+    level: str = ""
+    number: str = ""
+    validUntil: str = "长期"
+    status: Literal["有效", "将到期", "已过期"]
+    warnDays: Optional[int] = None
+    owner: str = ""
+    detail: str = ""
+    filename: str = ""
+    hasFile: bool = False
+    ocrText: str = ""
+    ocrStatus: str = ""
+    reviewStatus: Literal["待审核", "已入库"] = "已入库"
+    mergeStatus: Literal["新增", "并入已有", "疑似重复", "信息冲突"] = "新增"
+    aliases: list[str] = []
+    sources: list[dict] = []
+    evidence: list[dict] = []
+    fieldConflict: list[str] = []
+    suspectedIds: list[str] = []
+    images: list[QualificationImageOut] = []
+    updatedAt: str = ""
+
+
+class QualificationMergeIn(BaseModel):
+    otherId: str
+
+
+class QualificationResolveIn(BaseModel):
+    keepId: str
+    dropId: str
+    action: Literal["merge", "keep_both"]
+
+
+class QualificationParseJobOut(BaseModel):
+    id: str
+    filename: str
+    status: Literal["解析中", "已完成", "抽取失败"]
+    extracted: int = 0
+    merged: int = 0
+    suspected: int = 0
+    conflicts: int = 0
+    sizeLabel: str = ""
+    uploadedAt: str
+    note: str = ""
+    error: Optional[str] = None
+
+
+class QualificationExtractJobOut(BaseModel):
+    jobId: str
+    status: Literal["queued", "running", "done", "failed"]
+    extracted: int = 0
+    merged: int = 0
+    suspected: int = 0
+    conflicts: int = 0
+    error: Optional[str] = None
+    note: str = ""
+
+
 class ProjectOut(BaseModel):
     id: str
     code: str
@@ -211,6 +340,7 @@ class ProjectOut(BaseModel):
     status: Literal["撰写中", "评标中", "已提交", "已中标", "未中标"]
     createdAt: str
     tenderDoc: Optional[TenderUploadMetaOut] = None
+    team: list[TeamMemberOut] = []
 
 
 class CreateProjectIn(BaseModel):
@@ -220,7 +350,6 @@ class CreateProjectIn(BaseModel):
     budget: Optional[str] = None
     deadline: Optional[str] = None
     owner: Optional[str] = None
-    tenderDoc: Optional[TenderUploadMetaOut] = None
 
 
 class TenderParagraphOut(BaseModel):
@@ -248,6 +377,7 @@ class OutlineNodeOut(BaseModel):
     status: Literal["待生成", "生成中", "已完成"] = "待生成"
     words: int = 0
     aiRounds: int = 0
+    sourceIndex: Optional[int] = None
 
 
 class OutlineNodeIn(OutlineNodeOut):
@@ -266,6 +396,7 @@ class WriterDraftOut(BaseModel):
     projectId: str
     modelId: str
     selectedKnowledge: list[str] = []
+    selectedProductLibraryId: Optional[str] = None
     knowledgeRefs: dict[str, list[KnowledgeRefIn]] = {}
     settings: dict = {}
     interpretSource: Literal["reuse", "upload"] = "reuse"
@@ -277,6 +408,7 @@ class WriterDraftOut(BaseModel):
 class UpdateWriterDraftIn(BaseModel):
     modelId: Optional[str] = None
     selectedKnowledge: Optional[list[str]] = None
+    selectedProductLibraryId: Optional[str] = None
     knowledgeRefs: Optional[dict[str, list[KnowledgeRefIn]]] = None
     settings: Optional[dict] = None
     interpretSource: Optional[Literal["reuse", "upload"]] = None
@@ -294,6 +426,48 @@ class WriterJobOut(BaseModel):
 
 class SaveChapterContentIn(BaseModel):
     content: str
+
+
+class WriterImageOut(BaseModel):
+    id: str
+    projectId: str
+    source: Literal["generated", "upload", "knowledge", "product"]
+    mode: Literal["normal", "flow", "arch"]
+    prompt: str = ""
+    filename: str
+    url: str
+    createdAt: str
+
+
+class GenerateWriterImageIn(BaseModel):
+    prompt: str
+    mode: Literal["normal", "flow", "arch"] = "normal"
+
+
+class OptimizeImagePromptIn(BaseModel):
+    prompt: str
+    mode: Literal["normal", "flow", "arch"] = "normal"
+
+
+class OptimizeImagePromptOut(BaseModel):
+    prompt: str
+
+
+class WriterChatMessageIn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class WriterChatIn(BaseModel):
+    message: str
+    history: list[WriterChatMessageIn] = []
+    chapterTitle: Optional[str] = None
+    chapterExcerpt: Optional[str] = None
+
+
+class WriterChatOut(BaseModel):
+    reply: str
+    hasChecklist: bool = False
 
 
 # 以下模型对应「审核后修改闭环」真实后端接入：把预审 Finding 锚定到投标书真实段落，
@@ -398,6 +572,40 @@ class KnowledgeSuggestOut(BaseModel):
     chapters: list[str] = []
 
 
+class ExportCheckItemOut(BaseModel):
+    key: str
+    label: str
+    ok: bool
+    note: str = ""
+
+
+class ExportChecksOut(BaseModel):
+    revisionId: str
+    versionLabel: str
+    wordCount: int
+    updatedAt: str
+    items: list[ExportCheckItemOut] = []
+    blocked: bool
+    blockReason: str = ""
+
+
+class CreateExportIn(BaseModel):
+    mode: Literal["明标", "暗标"]
+
+
+class ExportRecordOut(BaseModel):
+    id: str
+    projectId: str
+    mode: Literal["明标", "暗标"]
+    operator: str
+    checkStatus: Literal["通过", "阻断"]
+    checkNote: str = ""
+    fileSize: int = 0
+    fileHash: str = ""
+    filename: str = ""
+    createdAt: str
+
+
 class UpdateProjectIn(BaseModel):
     name: Optional[str] = None
     code: Optional[str] = None
@@ -408,4 +616,322 @@ class UpdateProjectIn(BaseModel):
     progress: Optional[int] = None
     score: Optional[float] = None
     status: Optional[Literal["撰写中", "评标中", "已提交", "已中标", "未中标"]] = None
-    tenderDoc: Optional[TenderUploadMetaOut] = None
+
+
+# 以下模型对应「预审规则真实后端接入」：五维权重 / 虚词表 / 查重阈值 / 属地细则包
+# 四组真实规则数据的 CRUD，字段严格对齐前端 src/mocks/rules.ts 的展示结构。
+
+
+class WeightTemplateOut(BaseModel):
+    id: str
+    name: str
+    completeness: float
+    relevance: float
+    compliance: float
+    feasibility: float
+    standardization: float
+    scope: str
+    active: bool
+
+
+class WeightTemplateIn(BaseModel):
+    name: str
+    completeness: float
+    relevance: float
+    compliance: float
+    feasibility: float
+    standardization: float
+    scope: str = "全局默认"
+
+
+class UpdateWeightTemplateIn(BaseModel):
+    name: Optional[str] = None
+    completeness: Optional[float] = None
+    relevance: Optional[float] = None
+    compliance: Optional[float] = None
+    feasibility: Optional[float] = None
+    standardization: Optional[float] = None
+    scope: Optional[str] = None
+
+
+class FillerWordRuleOut(BaseModel):
+    id: str
+    category: str
+    level: Literal["高危", "中危", "低危"]
+    word: str
+    rewrite: str = ""
+    enabled: bool
+
+
+class FillerWordRuleIn(BaseModel):
+    category: str
+    level: Literal["高危", "中危", "低危"] = "中危"
+    word: str
+    rewrite: str = ""
+
+
+class UpdateFillerWordRuleIn(BaseModel):
+    category: Optional[str] = None
+    level: Optional[Literal["高危", "中危", "低危"]] = None
+    word: Optional[str] = None
+    rewrite: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+class ThresholdRuleOut(BaseModel):
+    id: str
+    key: str
+    label: str
+    value: float
+    unit: str = "%"
+    description: str = ""
+
+
+class UpdateThresholdIn(BaseModel):
+    value: float
+
+
+class RulePackageOut(BaseModel):
+    id: str
+    name: str
+    region: str
+    status: Literal["启用", "停用"]
+    items: list[str] = []
+
+
+class RulePackageIn(BaseModel):
+    name: str
+    region: str = "全国"
+    items: list[str] = []
+
+
+class UpdateRulePackageIn(BaseModel):
+    name: Optional[str] = None
+    region: Optional[str] = None
+    status: Optional[Literal["启用", "停用"]] = None
+    items: Optional[list[str]] = None
+
+
+class VetoRuleOut(BaseModel):
+    id: str
+    key: str
+    category: str
+    point: str
+    items: list[str] = []
+    wired: Literal["接入判定", "部分接入", "仅对照"]
+    wiredNote: str = ""
+    engine: str = ""
+    seq: int = 0
+
+
+class CatalogRuleOut(BaseModel):
+    id: str
+    kind: Literal["business", "tech", "dup_check", "strategy"]
+    key: str
+    category: str
+    point: str
+    items: list[str] = []
+    wired: Literal["接入判定", "部分接入", "仅对照"]
+    wiredNote: str = ""
+    engine: str = ""
+    seq: int = 0
+
+
+# 以下模型对应「项目中心补全」：团队分配 / 文件归档 / 进度时间线 / 招标文件真实落库。
+
+
+class SetProjectMembersIn(BaseModel):
+    user_ids: list[str]
+
+
+class TenderDocumentSummaryOut(BaseModel):
+    id: str
+    filename: str
+    sizeBytes: int
+    uploadedAt: str
+
+
+class ProjectDocumentsOut(BaseModel):
+    tenderDocuments: list[TenderDocumentSummaryOut] = []
+    bidDocuments: list[BidDocumentSummaryOut] = []
+
+
+class TimelineStageOut(BaseModel):
+    id: str
+    label: str
+    date: str
+    status: Literal["已完成", "进行中", "待开始"]
+    desc: str = ""
+
+
+class AuditLogOut(BaseModel):
+    id: str
+    time: str
+    user: str
+    action: str
+    target: str
+    version: str
+    detail: str
+    result: str = "成功"
+
+
+class AuditLogListOut(BaseModel):
+    items: list[AuditLogOut]
+    total: int
+    weekTotal: int
+    weekExport: int
+    aiCount: int
+
+
+class SearchProjectHit(BaseModel):
+    id: str
+    name: str
+    code: str
+    type: str
+
+
+class SearchMemberHit(BaseModel):
+    id: str
+    name: str
+    email: str
+    role: str
+    position: str = ""
+
+
+class SearchDocumentHit(BaseModel):
+    id: str
+    title: str
+    kind: str
+    href: str
+
+
+class SearchOut(BaseModel):
+    projects: list[SearchProjectHit] = []
+    members: list[SearchMemberHit] = []
+    documents: list[SearchDocumentHit] = []
+
+
+ProductLibraryCategory = Literal["软件系统", "货物设备", "综合方案"]
+ProductKindLit = Literal["软件功能", "货物产品", "模块方案"]
+ProductStatusLit = Literal["待审核", "已入库", "已停用"]
+ProductMergeStatusLit = Literal["新增", "并入已有", "疑似重复", "参数冲突"]
+ProductImageKindLit = Literal["界面", "架构", "流程", "实物"]
+
+
+class ProductLibraryIn(BaseModel):
+    name: str
+    category: ProductLibraryCategory = "软件系统"
+    description: str = ""
+    owner: str = ""
+
+
+class ProductLibraryOut(BaseModel):
+    id: str
+    name: str
+    category: ProductLibraryCategory
+    description: str = ""
+    owner: str = ""
+    createdAt: str
+    updatedAt: str
+    featureCount: int = 0
+    pendingCount: int = 0
+    imageCount: int = 0
+    sourceCount: int = 0
+
+
+class ProductImageOut(BaseModel):
+    id: str
+    caption: str = ""
+    kind: ProductImageKindLit = "界面"
+    url: str = ""
+
+
+class ProductFeatureSourceOut(BaseModel):
+    docId: str = ""
+    filename: str = ""
+
+
+class ProductFeatureOut(BaseModel):
+    id: str
+    libraryId: str
+    name: str
+    kind: ProductKindLit
+    module: str = ""
+    params: str = ""
+    intro: str = ""
+    bidCopy: str = ""
+    brand: str = ""
+    model: str = ""
+    unit: str = ""
+    sourceDoc: str = ""
+    status: ProductStatusLit
+    mergeStatus: ProductMergeStatusLit = "新增"
+    aliases: list[str] = []
+    sources: list[ProductFeatureSourceOut] = []
+    evidence: list[dict] = []
+    paramsConflict: list[str] = []
+    suspectedIds: list[str] = []
+    images: list[ProductImageOut] = []
+    updatedAt: str
+
+
+class ProductFeatureIn(BaseModel):
+    name: str
+    kind: ProductKindLit = "软件功能"
+    module: str = ""
+    params: str = ""
+    intro: str = ""
+    bidCopy: str = ""
+    brand: str = ""
+    model: str = ""
+    unit: str = ""
+    status: Optional[ProductStatusLit] = None
+
+
+class ProductFeaturePatchIn(BaseModel):
+    name: Optional[str] = None
+    kind: Optional[ProductKindLit] = None
+    module: Optional[str] = None
+    params: Optional[str] = None
+    intro: Optional[str] = None
+    bidCopy: Optional[str] = None
+    brand: Optional[str] = None
+    model: Optional[str] = None
+    unit: Optional[str] = None
+    status: Optional[ProductStatusLit] = None
+
+
+class ProductMergeIn(BaseModel):
+    otherId: str
+
+
+class ProductResolveIn(BaseModel):
+    keepId: str
+    dropId: str
+    action: Literal["merge", "keep_both"]
+
+
+class ProductParseJobOut(BaseModel):
+    id: str
+    libraryId: str
+    filename: str
+    status: Literal["解析中", "已完成", "抽取失败"]
+    extracted: int = 0
+    merged: int = 0
+    suspected: int = 0
+    conflicts: int = 0
+    sizeLabel: str = ""
+    uploadedAt: str
+    note: str = ""
+    error: Optional[str] = None
+
+
+class ProductExtractJobOut(BaseModel):
+    jobId: str
+    status: Literal["queued", "running", "done", "failed"]
+    extracted: int = 0
+    merged: int = 0
+    suspected: int = 0
+    conflicts: int = 0
+    error: Optional[str] = None
+    note: str = ""

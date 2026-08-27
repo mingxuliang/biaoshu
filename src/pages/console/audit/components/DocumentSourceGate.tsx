@@ -1,11 +1,10 @@
-import { useMemo, useRef, useState } from "react";
-import { projectDocGroups } from "@/mocks/projectDocs";
-import { fetchSampleDocument, uploadBidDocument } from "@/lib/api";
+import { useEffect, useRef, useState } from "react";
+import { listProjectBidDocuments, uploadBidDocument, type BidDocumentSummary } from "@/lib/api";
 
 export interface PreReviewDoc {
-  kind: "workbench" | "upload";
+  kind: "existing" | "upload";
   name: string;
-  source: string; // 来源说明：文档分组或「手动上传」
+  source: string; // 来源说明：真实文件来源或「手动上传」
   size: string;
   updated: string;
   pages?: number;
@@ -20,58 +19,74 @@ interface DocumentSourceGateProps {
   onContinue: (doc: PreReviewDoc) => void;
 }
 
-interface WorkbenchFile {
-  id: string;
-  name: string;
-  group: string;
-  size: string;
-  updated: string;
-  pages?: number;
+const SOURCE_LABELS: Record<string, string> = {
+  upload: "手动上传",
+  workbench: "预审示例文档",
+  writer: "撰写工作台导出",
+  revision: "修改闭环保存版本",
+  "export-anon": "导出中心（暗标版）",
+};
+
+function sourceLabel(source: string): string {
+  return SOURCE_LABELS[source] || source;
 }
 
-const ACCEPT = ".doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+function formatSize(bytes: number): string {
+  if (!bytes) return "—";
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatTime(iso: string): string {
+  if (!iso) return "—";
+  return iso.replace("T", " ").slice(0, 16);
+}
+
+const ACCEPT = ".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 export default function DocumentSourceGate({ projectId, projectName, projectCode, onContinue }: DocumentSourceGateProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [existingDocs, setExistingDocs] = useState<BidDocumentSummary[]>([]);
+  const [docsLoading, setDocsLoading] = useState(true);
   const [selected, setSelected] = useState<PreReviewDoc | null>(null);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
-  const [workbenchId, setWorkbenchId] = useState<string | null>(null);
+  const [existingId, setExistingId] = useState<string | null>(null);
   const [uploadName, setUploadName] = useState<string | null>(null);
   const [uploadErr, setUploadErr] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitErr, setSubmitErr] = useState<string | null>(null);
 
-  const workbenchFiles = useMemo<WorkbenchFile[]>(
-    () =>
-      projectDocGroups
-        .filter((g) => g.key === "technical" || g.key === "commercial")
-        .flatMap((g) =>
-          g.docs.map((d) => ({
-            id: d.id,
-            name: d.name,
-            group: g.label,
-            size: d.size,
-            updated: d.updated,
-            pages: d.pages,
-          })),
-        ),
-    [],
-  );
+  useEffect(() => {
+    let cancelled = false;
+    setDocsLoading(true);
+    listProjectBidDocuments(projectId)
+      .then((docs) => {
+        if (!cancelled) setExistingDocs(docs);
+      })
+      .catch(() => {
+        if (!cancelled) setExistingDocs([]);
+      })
+      .finally(() => {
+        if (!cancelled) setDocsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
 
-  const pickWorkbench = (f: WorkbenchFile) => {
-    setWorkbenchId(f.id);
+  const pickExisting = (doc: BidDocumentSummary) => {
+    setExistingId(doc.id);
     setUploadName(null);
     setUploadErr(null);
     setSubmitErr(null);
     setPendingFile(null);
     setSelected({
-      kind: "workbench",
-      name: f.name,
-      source: f.group,
-      size: f.size,
-      updated: f.updated,
-      pages: f.pages,
-      bidDocumentId: "",
+      kind: "existing",
+      name: doc.filename,
+      source: sourceLabel(doc.source),
+      size: formatSize(doc.sizeBytes),
+      updated: formatTime(doc.uploadedAt),
+      bidDocumentId: doc.id,
     });
   };
 
@@ -82,7 +97,7 @@ export default function DocumentSourceGate({ projectId, projectName, projectCode
       return;
     }
     const mb = (file.size / 1024 / 1024).toFixed(1);
-    setWorkbenchId(null);
+    setExistingId(null);
     setUploadErr(null);
     setSubmitErr(null);
     setUploadName(file.name);
@@ -102,11 +117,12 @@ export default function DocumentSourceGate({ projectId, projectName, projectCode
     setSubmitting(true);
     setSubmitErr(null);
     try {
-      const uploaded =
-        selected.kind === "upload" && pendingFile
-          ? await uploadBidDocument(projectId, pendingFile)
-          : await fetchSampleDocument(projectId);
-      onContinue({ ...selected, bidDocumentId: uploaded.id });
+      if (selected.kind === "upload" && pendingFile) {
+        const uploaded = await uploadBidDocument(projectId, pendingFile);
+        onContinue({ ...selected, bidDocumentId: uploaded.id });
+      } else {
+        onContinue(selected);
+      }
     } catch (err) {
       setSubmitErr(err instanceof Error ? err.message : "文件处理失败，请重试");
     } finally {
@@ -125,7 +141,7 @@ export default function DocumentSourceGate({ projectId, projectName, projectCode
           <div>
             <div className="font-label text-sm font-semibold text-foreground-900">第一步 · 选择预审投标文件</div>
             <div className="text-xs text-foreground-500">
-              预审前需先确定分析对象：从撰写工作台选择已写好的投标文件，或手动上传您自己的 Word 文档
+              预审前需先确定分析对象：从该项目已有的真实投标文件中选择，或手动上传您自己的 Word 文档
             </div>
           </div>
         </div>
@@ -137,49 +153,52 @@ export default function DocumentSourceGate({ projectId, projectName, projectCode
 
       {/* 两种来源 */}
       <div className="grid grid-cols-1 gap-3 p-5 lg:grid-cols-2">
-        {/* 撰写工作台 */}
+        {/* 已有文件 */}
         <div className="flex flex-col overflow-hidden rounded-lg border border-background-300 bg-background-50">
           <div className="flex items-center gap-2 border-b border-background-300 bg-background-100 px-4 py-2.5">
             <span className="flex h-6 w-6 items-center justify-center rounded-md bg-primary-50 text-primary-600">
-              <i className="ri-edit-2-line text-sm"></i>
+              <i className="ri-file-list-3-line text-sm"></i>
             </span>
-            <span className="text-sm font-medium text-foreground-800">从撰写工作台选择</span>
-            <span className="font-label ml-auto rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700">工作台已生成</span>
+            <span className="text-sm font-medium text-foreground-800">从已有投标文件中选择</span>
+            <span className="font-label ml-auto rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700">
+              {docsLoading ? "加载中…" : `共 ${existingDocs.length} 份`}
+            </span>
           </div>
           <ul className="flex-1 divide-y divide-background-200">
-            {workbenchFiles.map((f) => (
-              <li key={f.id}>
+            {!docsLoading && existingDocs.length === 0 && (
+              <li className="px-4 py-8 text-center text-xs text-foreground-500">
+                该项目暂无已上传/已生成的投标文件，请手动上传或先在撰写工作台导出
+              </li>
+            )}
+            {existingDocs.map((doc) => (
+              <li key={doc.id}>
                 <button
                   type="button"
-                  onClick={() => pickWorkbench(f)}
+                  onClick={() => pickExisting(doc)}
                   className={`flex w-full cursor-pointer items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-background-100 ${
-                    workbenchId === f.id ? "bg-primary-50/60" : ""
+                    existingId === doc.id ? "bg-primary-50/60" : ""
                   }`}
                 >
                   <span
                     className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${
-                      workbenchId === f.id ? "bg-primary-500 text-background-50" : "bg-secondary-100 text-secondary-600"
+                      existingId === doc.id ? "bg-primary-500 text-background-50" : "bg-secondary-100 text-secondary-600"
                     }`}
                   >
                     <i className="ri-file-word-2-line text-base"></i>
                   </span>
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium text-foreground-800">{f.name}</div>
+                    <div className="truncate text-sm font-medium text-foreground-800">{doc.filename}</div>
                     <div className="mt-0.5 flex items-center gap-2 text-[11px] text-foreground-500">
-                      <span>{f.group}</span>
+                      <span>{sourceLabel(doc.source)}</span>
                       <span>·</span>
-                      <span>{f.size}</span>
-                      {f.pages ? (
-                        <>
-                          <span>·</span>
-                          <span>{f.pages} 页</span>
-                        </>
-                      ) : null}
+                      <span>{formatSize(doc.sizeBytes)}</span>
+                      <span>·</span>
+                      <span>{formatTime(doc.uploadedAt)}</span>
                     </div>
                   </div>
                   <span
                     className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-xs ${
-                      workbenchId === f.id
+                      existingId === doc.id
                         ? "border-primary-500 bg-primary-500 text-background-50"
                         : "border-background-300 text-transparent"
                     }`}
@@ -199,7 +218,7 @@ export default function DocumentSourceGate({ projectId, projectName, projectCode
               <i className="ri-upload-2-line text-sm"></i>
             </span>
             <span className="text-sm font-medium text-foreground-800">手动上传 Word 文档</span>
-            <span className="font-label ml-auto rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700">支持 .doc / .docx</span>
+            <span className="font-label ml-auto rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700">仅支持 .docx</span>
           </div>
           <div className="flex flex-1 flex-col p-4">
             <button
@@ -265,11 +284,6 @@ export default function DocumentSourceGate({ projectId, projectName, projectCode
               </span>
             )}
           </div>
-          {selected?.kind === "workbench" && (
-            <p className="text-[11px] text-secondary-600">
-              提示：撰写工作台生成内容尚未接入真实引擎，此处将使用内置示例投标书运行五大预审引擎进行演示
-            </p>
-          )}
           {submitErr && (
             <p className="flex items-center gap-1 text-[11px] text-accent-600">
               <i className="ri-error-warning-line"></i>

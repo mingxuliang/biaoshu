@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Modal from "../../components/Modal";
-import { members, memberRoles, type Member } from "@/mocks/members";
+import { useAuth } from "@/context/AuthContext";
+import { listUsers, type TeamMember } from "@/lib/api";
 import type { Project } from "@/mocks/projects";
 
 interface AssignMembersModalProps {
@@ -8,7 +9,7 @@ interface AssignMembersModalProps {
   project: Project | null;
   selected: string[];
   onClose: () => void;
-  onSave: (memberIds: string[]) => void;
+  onSave: (memberIds: string[]) => Promise<void> | void;
 }
 
 const roleColor: Record<string, string> = {
@@ -18,12 +19,6 @@ const roleColor: Record<string, string> = {
   评标专家: "bg-primary-50 text-primary-600",
 };
 
-const statusDot: Record<string, string> = {
-  在线: "bg-primary-500",
-  忙碌: "bg-accent-500",
-  离线: "bg-secondary-400",
-};
-
 export default function AssignMembersModal({
   open,
   project,
@@ -31,30 +26,57 @@ export default function AssignMembersModal({
   onClose,
   onSave,
 }: AssignMembersModalProps) {
+  const { token } = useAuth();
+  const [users, setUsers] = useState<TeamMember[]>([]);
   const [picked, setPicked] = useState<string[]>(selected);
+  const [saving, setSaving] = useState(false);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
 
-  // 弹窗打开时同步外部选中的成员
-  const isOpen = open;
-  const draft = useMemo(() => (isOpen ? [...picked] : []), [isOpen, picked]);
+  useEffect(() => {
+    if (!open) return;
+    setPicked(selected);
+    if (!token) return;
+    let cancelled = false;
+    listUsers(token)
+      .then((list) => {
+        if (!cancelled) {
+          setUsers(list.filter((u) => !u.disabled));
+          setLoadErr(null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLoadErr("无法加载用户列表");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, selected, token]);
 
   const grouped = useMemo(() => {
-    return memberRoles
-      .map((role) => ({ role, list: members.filter((m) => m.role === role) }))
+    const roles = Array.from(new Set(users.map((u) => u.role || "成员")));
+    return roles
+      .map((role) => ({ role, list: users.filter((u) => (u.role || "成员") === role) }))
       .filter((g) => g.list.length > 0);
-  }, []);
+  }, [users]);
 
   const toggle = (id: string) => {
     setPicked((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
-  const selectedMembers = useMemo(
-    () => members.filter((m) => draft.includes(m.id)) as Member[],
-    [draft],
-  );
+  const selectedMembers = useMemo(() => users.filter((u) => picked.includes(u.id)), [users, picked]);
 
   const handleClose = () => {
     setPicked(selected);
     onClose();
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await onSave(picked);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -65,8 +87,8 @@ export default function AssignMembersModal({
       subtitle={project ? `${project.name} · 编号 ${project.code}` : ""}
       width="max-w-2xl"
     >
+      {loadErr && <p className="mb-3 text-xs text-accent-600">{loadErr}</p>}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        {/* 成员候选区 */}
         <div className="space-y-4 md:col-span-2">
           {grouped.map((group) => (
             <div key={group.role}>
@@ -90,16 +112,11 @@ export default function AssignMembersModal({
                           : "border-background-300 bg-background-50 hover:border-background-400"
                       }`}
                     >
-                      <span className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-secondary-100 text-sm font-medium text-secondary-700">
+                      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-secondary-100 text-sm font-medium text-secondary-700">
                         {member.name.charAt(0)}
-                        <span
-                          className={`absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full border-2 border-background-50 ${statusDot[member.status]}`}
-                        />
                       </span>
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate text-sm font-medium text-foreground-900">
-                          {member.name}
-                        </span>
+                        <span className="block truncate text-sm font-medium text-foreground-900">{member.name}</span>
                         <span className="block text-[11px] text-foreground-500">{member.email}</span>
                       </span>
                       <span
@@ -115,9 +132,11 @@ export default function AssignMembersModal({
               </div>
             </div>
           ))}
+          {users.length === 0 && !loadErr && (
+            <p className="py-8 text-center text-xs text-foreground-500">正在加载用户列表…</p>
+          )}
         </div>
 
-        {/* 已选成员 */}
         <div className="rounded-lg border border-background-300 bg-background-50 p-3">
           <div className="mb-2 flex items-center justify-between">
             <span className="text-xs font-medium text-foreground-700">已分配成员</span>
@@ -136,7 +155,11 @@ export default function AssignMembersModal({
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-xs font-medium text-foreground-900">{m.name}</div>
-                    <span className={`mt-0.5 inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${roleColor[m.role]}`}>
+                    <span
+                      className={`mt-0.5 inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                        roleColor[m.role] ?? "bg-secondary-100 text-secondary-700"
+                      }`}
+                    >
                       {m.role}
                     </span>
                   </div>
@@ -169,11 +192,12 @@ export default function AssignMembersModal({
           </button>
           <button
             type="button"
-            onClick={() => onSave(picked)}
-            className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-4 text-sm font-medium text-background-50 transition-colors hover:bg-primary-600"
+            disabled={saving}
+            onClick={handleSave}
+            className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-4 text-sm font-medium text-background-50 transition-colors hover:bg-primary-600 disabled:opacity-60"
           >
-            <i className="ri-check-double-line text-sm"></i>
-            保存分配
+            <i className={`${saving ? "ri-loader-4-line animate-spin" : "ri-check-double-line"} text-sm`}></i>
+            {saving ? "保存中…" : "保存分配"}
           </button>
         </div>
       </div>

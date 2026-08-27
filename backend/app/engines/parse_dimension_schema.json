@@ -1,0 +1,657 @@
+[
+  {
+    "key": "basic",
+    "label": "基本信息",
+    "items": [
+      {
+        "id": "basic-tenderer",
+        "label": "招标人/代理信息",
+        "sections": [
+          {
+            "id": "bt-1",
+            "title": "招标人与代理机构",
+            "rows": [
+              "招标人",
+              "招标代理机构"
+            ]
+          },
+          {
+            "id": "bt-2",
+            "title": "联系与答疑",
+            "rows": [
+              "质疑澄清渠道"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "basic-project",
+        "label": "项目信息",
+        "sections": [
+          {
+            "id": "bp-1",
+            "title": "项目概况",
+            "rows": [
+              "项目名称",
+              "招标编号",
+              "建设地点",
+              "预算上限",
+              "资金来源"
+            ]
+          },
+          {
+            "id": "bp-2",
+            "title": "招标范围",
+            "rows": [
+              "招标范围"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "basic-time",
+        "label": "关键时间/内容",
+        "sections": [
+          {
+            "id": "btm-1",
+            "title": "关键时间节点",
+            "rows": [
+              "时间安排"
+            ]
+          },
+          {
+            "id": "btm-2",
+            "title": "履约时间",
+            "rows": [
+              "工期与质保"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "basic-other",
+        "label": "其他信息",
+        "sections": [
+          {
+            "id": "bo-1",
+            "title": "其他补充要求",
+            "rows": [
+              "踏勘与答疑",
+              "评标方式"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "basic-purchase",
+        "label": "采购要求",
+        "sections": [
+          {
+            "id": "bpu-1",
+            "title": "采购与交付要求",
+            "rows": [
+              "采购方式",
+              "验收标准"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "key": "qualification",
+    "label": "资格要求",
+    "items": [
+      {
+        "id": "qual-applicant",
+        "label": "申请人资格要求",
+        "sections": [
+          {
+            "id": "qa-1",
+            "title": "资质与业绩要求",
+            "rows": [
+              "资质条件",
+              "业绩要求",
+              "人员要求"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "qual-capacity",
+        "label": "资格性审查",
+        "sections": [
+          {
+            "id": "qc-1",
+            "title": "资格性审查要点",
+            "rows": [
+              "审查内容",
+              "审查结果判定"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "qual-conformity",
+        "label": "符合性审查",
+        "sections": [
+          {
+            "id": "qcf-1",
+            "title": "符合性审查要点",
+            "rows": [
+              "审查内容",
+              "审查结果判定"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "key": "review",
+    "label": "评审要求",
+    "items": [
+      {
+        "id": "review-tech",
+        "label": "技术",
+        "sections": [
+          {
+            "id": "rt-1",
+            "title": "功能响应与需求满足度",
+            "rows": [
+              "评分细则"
+            ]
+          },
+          {
+            "id": "rt-2",
+            "title": "系统架构与本地化部署",
+            "rows": [
+              "评分细则"
+            ]
+          },
+          {
+            "id": "rt-3",
+            "title": "系统集成与接口方案",
+            "rows": [
+              "评分细则"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "review-service",
+        "label": "服务",
+        "sections": [
+          {
+            "id": "rs-1",
+            "title": "实施与交付服务",
+            "rows": [
+              "评分细则"
+            ]
+          },
+          {
+            "id": "rs-2",
+            "title": "培训与上线服务",
+            "rows": [
+              "评分细则"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "review-after",
+        "label": "售后",
+        "sections": [
+          {
+            "id": "ra-1",
+            "title": "质保与运维服务",
+            "rows": [
+              "评分细则"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "key": "business",
+    "label": "商务评分",
+    "items": [
+      {
+        "id": "business-credit",
+        "label": "资信",
+        "sections": [
+          {
+            "id": "bc-1",
+            "title": "资信评分要点",
+            "rows": [
+              "评分细则"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "business-commerce",
+        "label": "商务",
+        "sections": [
+          {
+            "id": "bc2-1",
+            "title": "商务条款响应",
+            "rows": [
+              "评分细则"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "business-price",
+        "label": "报价",
+        "sections": [
+          {
+            "id": "bp-1",
+            "title": "报价评分细则",
+            "rows": [
+              "评分细则"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "key": "reject",
+    "label": "废标项",
+    "items": [
+      {
+        "id": "reject-base",
+        "label": "废标项",
+        "sections": [
+          {
+            "id": "rb-1",
+            "title": "废标条款清单",
+            "rows": [
+              "废标情形"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "reject-forbidden",
+        "label": "不得存在的情形",
+        "sections": [
+          {
+            "id": "rf-1",
+            "title": "投标人不得存在的情形",
+            "rows": [
+              "负面清单"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "reject-invalid",
+        "label": "否决和无效投标情形",
+        "sections": [
+          {
+            "id": "ri-1",
+            "title": "否决与无效投标情形",
+            "rows": [
+              "无效投标情形"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "key": "bidReq",
+    "label": "招标文件要求",
+    "items": [
+      {
+        "id": "req-submit",
+        "label": "响应文件提交",
+        "sections": [
+          {
+            "id": "rq-1",
+            "title": "响应文件提交要求",
+            "rows": [
+              "提交要求"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "req-compose",
+        "label": "响应文件编制",
+        "sections": [
+          {
+            "id": "rq-2",
+            "title": "响应文件编制要求",
+            "rows": [
+              "编制要求"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "req-seal",
+        "label": "响应文件盖章",
+        "sections": [
+          {
+            "id": "rq-3",
+            "title": "盖章与签署要求",
+            "rows": [
+              "盖章要求"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "req-encrypt",
+        "label": "响应文件加密、上传",
+        "sections": [
+          {
+            "id": "rq-4",
+            "title": "加密与上传要求",
+            "rows": [
+              "加密上传"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "req-mustsubmit",
+        "label": "应标需提交文件",
+        "sections": [
+          {
+            "id": "rq-5",
+            "title": "应标需提交文件清单",
+            "rows": [
+              "文件清单"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "req-qualifyfiles",
+        "label": "资格证明文件",
+        "sections": [
+          {
+            "id": "rq-6",
+            "title": "资格证明文件",
+            "rows": [
+              "资格证明"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "req-invalid",
+        "label": "响应无效情形",
+        "sections": [
+          {
+            "id": "rq-7",
+            "title": "响应无效情形",
+            "rows": [
+              "无效情形"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "req-format",
+        "label": "响应文件格式与签署要求",
+        "sections": [
+          {
+            "id": "rq-8",
+            "title": "格式与签署要求",
+            "rows": [
+              "格式要求"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "req-reviewprocess",
+        "label": "评审过程中的响应文件处理",
+        "sections": [
+          {
+            "id": "rq-9",
+            "title": "评审过程文件处理",
+            "rows": [
+              "处理要求"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "req-structure",
+        "label": "投标文件组成和内容",
+        "sections": [
+          {
+            "id": "rq-10",
+            "title": "投标文件组成和内容",
+            "rows": [
+              "组成内容"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "req-formatrule",
+        "label": "格式要求",
+        "sections": [
+          {
+            "id": "rq-11",
+            "title": "格式要求",
+            "rows": [
+              "格式要求"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "req-delivery",
+        "label": "递交方式及时间",
+        "sections": [
+          {
+            "id": "rq-12",
+            "title": "递交方式及时间",
+            "rows": [
+              "递交要求"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "req-attachment",
+        "label": "已约定附件",
+        "sections": [
+          {
+            "id": "rq-13",
+            "title": "已约定附件",
+            "rows": [
+              "附件清单"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "key": "rejectCheck",
+    "label": "应标提交文件",
+    "items": [
+      {
+        "id": "submit-must",
+        "label": "应标需提交文件",
+        "sections": [
+          {
+            "id": "sm-1",
+            "title": "应标需提交文件清单",
+            "rows": [
+              "文件清单"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "key": "docReview",
+    "label": "招标文件审查",
+    "items": [
+      {
+        "id": "doc-risk",
+        "label": "条款风险",
+        "sections": [
+          {
+            "id": "dr-1",
+            "title": "条款风险审查",
+            "rows": [
+              "风险条款",
+              "应对建议"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "doc-fair",
+        "label": "公平性审查风险",
+        "sections": [
+          {
+            "id": "df-1",
+            "title": "公平性审查",
+            "rows": [
+              "公平性要点",
+              "审查结论"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "key": "process",
+    "label": "开标评定流程",
+    "items": [
+      {
+        "id": "pro-open",
+        "label": "开标流程",
+        "sections": [
+          {
+            "id": "po-1",
+            "title": "开标流程",
+            "rows": [
+              "开标程序"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "pro-unseal",
+        "label": "开启响应文件",
+        "sections": [
+          {
+            "id": "pu-1",
+            "title": "开启响应文件",
+            "rows": [
+              "开启要求"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "pro-panel",
+        "label": "磋商小组",
+        "sections": [
+          {
+            "id": "pp-1",
+            "title": "磋商小组组成",
+            "rows": [
+              "小组构成"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "pro-procedure",
+        "label": "评审程序",
+        "sections": [
+          {
+            "id": "ppr-1",
+            "title": "评审程序",
+            "rows": [
+              "评审流程"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "pro-standard",
+        "label": "评分标准",
+        "sections": [
+          {
+            "id": "ps-1",
+            "title": "评分标准",
+            "rows": [
+              "评分构成"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "pro-negotiate",
+        "label": "磋商",
+        "sections": [
+          {
+            "id": "pn-1",
+            "title": "磋商要求",
+            "rows": [
+              "磋商规则"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "pro-deal",
+        "label": "成交",
+        "sections": [
+          {
+            "id": "pd-1",
+            "title": "成交与定标",
+            "rows": [
+              "定标规则"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "pro-contract",
+        "label": "合同授予和签订流程",
+        "sections": [
+          {
+            "id": "pc-1",
+            "title": "合同授予与签订",
+            "rows": [
+              "流程要求"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "pro-terminate",
+        "label": "合同解除和终止条件",
+        "sections": [
+          {
+            "id": "pt-1",
+            "title": "合同解除与终止",
+            "rows": [
+              "解除终止情形"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+]

@@ -8,51 +8,71 @@ import json
 import httpx
 
 from ..config import get_settings
-from .rules_data import DEFAULT_WEIGHTS
-
-SYSTEM_PROMPT = """你是"青天大模型"口径的招投标技术标评审专家。请严格按照以下五维评分标准对投标文件技术标内容打分：
-- 完整性(30%)：是否覆盖招标文件要求的章节、附表、承诺内容
-- 针对性(25%)：是否结合本项目实际（地点/规模/工期/地质等），而非通用模板空话
-- 合规性(20%)：是否符合现行工程规范、安全标准
-- 可落地性(15%)：是否有具体数字、流程、人员设备配置，而非空洞形容词
-- 规范性(10%)：格式、编号、术语是否规范统一
-
-评分时请遵循"虚词自查五规则"：
-1. 数字规则：段落应至少包含一个可验证数字
-2. 动作规则：动词应为可执行动作，而非空洞态度词（如"加强""确保"）
-3. 对象规则：措施应有明确责任对象
-4. 验证规则：承诺应有验证方式
-5. 密度规则：全文虚词密度不应超过 5%
-
-请仅返回严格的 JSON，不要包含任何其他文字说明，格式如下：
-{
-  "dimensions": {
-    "completeness": {"score": 0-100, "reason": "..."},
-    "relevance": {"score": 0-100, "reason": "..."},
-    "compliance": {"score": 0-100, "reason": "..."},
-    "feasibility": {"score": 0-100, "reason": "..."},
-    "standardization": {"score": 0-100, "reason": "..."}
-  },
-  "issues": [
-    {"severity": "扣分|降档|建议", "location": "章节/位置描述", "excerpt": "原文片段", "suggestion": "改写建议"}
-  ]
-}
-"""
+from .rules_data import (
+    DEFAULT_WEIGHTS,
+    DIMENSION_LABELS,
+    DIMENSION_RUBRIC,
+    FILLER_SELF_CHECK_RULES,
+    HIGH_SCORE_STRATEGIES,
+    TECH_SCORE_MODULES,
+)
 
 MAX_CHARS = 12000
 
 
-def run(full_text: str) -> dict:
+def _build_system_prompt(weights: dict) -> str:
+    dim_lines = []
+    for key, weight in weights.items():
+        label = DIMENSION_LABELS.get(key, key)
+        rubric = DIMENSION_RUBRIC.get(key, {})
+        dim_lines.append(
+            f"- {label}({weight}%)：校验重点：{rubric.get('focus', '')}；扣分/否决：{rubric.get('penalty', '')}"
+        )
+    check_lines = "\n".join(f"{i}. {rule}" for i, rule in enumerate(FILLER_SELF_CHECK_RULES, 1))
+    strategy_lines = "\n".join(f"- {s['category']}：{s['point']}" for s in HIGH_SCORE_STRATEGIES[:6])
+    module_lines = "\n".join(f"- {m['module']}：{m['logic']}" for m in TECH_SCORE_MODULES)
+    return f"""你是"青天大模型"口径的招投标技术标评审专家。请严格按照以下五维评分标准对投标文件技术标内容打分：
+{chr(10).join(dim_lines)}
+
+技术标评分模块：
+{module_lines}
+
+评分时请遵循"虚词自查五规则"：
+{check_lines}
+
+属地合规细节（合肥/安徽常见）：临边防护高度 1.2m、扫地杆距地 ≤20cm、扬尘六个 100%。若正文涉及对应主题但缺少量化，在合规性或可落地性中扣分。
+
+高分策略参考（用于给改写建议，不作为虚构加分）：
+{strategy_lines}
+
+请仅返回严格的 JSON，不要包含任何其他文字说明，格式如下：
+{{
+  "dimensions": {{
+    "completeness": {{"score": 0-100, "reason": "..."}},
+    "relevance": {{"score": 0-100, "reason": "..."}},
+    "compliance": {{"score": 0-100, "reason": "..."}},
+    "feasibility": {{"score": 0-100, "reason": "..."}},
+    "standardization": {{"score": 0-100, "reason": "..."}}
+  }},
+  "issues": [
+    {{"severity": "扣分|降档|建议", "location": "章节/位置描述", "excerpt": "原文片段", "suggestion": "改写建议"}}
+  ]
+}}
+"""
+
+
+def run(full_text: str, weights: dict | None = None) -> dict:
     settings = get_settings()
+    weights = weights or DEFAULT_WEIGHTS
 
     if not settings.deepseek_api_key:
-        return _fallback_result("未配置 DeepSeek API Key，已使用保守默认分，请人工复核技术标内容")
+        return _fallback_result("未配置 DeepSeek API Key，已使用保守默认分，请人工复核技术标内容", weights)
 
     truncated = full_text[:MAX_CHARS]
     payload = {
         "model": settings.deepseek_model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": _build_system_prompt(weights)},
             {"role": "user", "content": f"以下是投标文件技术标正文（可能因篇幅截断）：\n\n{truncated}"},
         ],
         "temperature": 0.2,
@@ -66,14 +86,14 @@ def run(full_text: str) -> dict:
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"]
             data = json.loads(content)
-            return _normalize(data)
+            return _normalize(data, weights)
     except Exception as exc:  # noqa: BLE001 —— 任何网络/解析异常都应降级而不是让整轮预审失败
-        return _fallback_result(f"调用 DeepSeek 失败（{exc.__class__.__name__}），已使用保守默认分，请人工复核")
+        return _fallback_result(f"调用 DeepSeek 失败（{exc.__class__.__name__}），已使用保守默认分，请人工复核", weights)
 
 
-def _normalize(data: dict) -> dict:
+def _normalize(data: dict, weights: dict) -> dict:
     dims: dict[str, dict] = {}
-    for key in DEFAULT_WEIGHTS:
+    for key in weights:
         d = (data.get("dimensions") or {}).get(key, {}) or {}
         score = d.get("score", 70)
         try:
@@ -102,8 +122,9 @@ def _normalize(data: dict) -> dict:
     return {"dimensions": dims, "issues": issues}
 
 
-def _fallback_result(reason: str) -> dict:
-    dims = {key: {"score": 70.0, "reason": reason} for key in DEFAULT_WEIGHTS}
+def _fallback_result(reason: str, weights: dict | None = None) -> dict:
+    weights = weights or DEFAULT_WEIGHTS
+    dims = {key: {"score": 70.0, "reason": reason} for key in weights}
     issues = [
         {
             "engine": "e3_semantic",

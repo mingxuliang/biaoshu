@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import Modal from "../../components/Modal";
-import { projectTypes, type Project, type ProjectType, type TenderUpload } from "@/mocks/projects";
-import { members, type Member } from "@/mocks/members";
+import { projectTypes, type Project, type ProjectType } from "@/mocks/projects";
+import { useAuth } from "@/context/AuthContext";
+import { listUsers, type TeamMember } from "@/lib/api";
 
 export interface ProjectFormValues {
   name: string;
@@ -11,7 +12,7 @@ export interface ProjectFormValues {
   deadline: string;
   owner: string;
   memberIds: string[];
-  tenderDoc?: TenderUpload;
+  tenderFile?: File;
 }
 
 interface ProjectFormModalProps {
@@ -27,20 +28,12 @@ const inputCls =
   "h-9 w-full rounded-md border border-background-300 bg-background-50 px-3 text-sm text-foreground-900 outline-none transition-all focus:border-primary-400 focus:ring-1 focus:ring-primary-400/20 placeholder:text-foreground-500";
 const labelCls = "mb-1.5 block text-xs font-medium text-foreground-600";
 
-const ACCEPT =
-  ".doc,.docx,.pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf";
+const ACCEPT = ".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
-// 从「¥ 8,600 万」这类预算字符串中提取数字
 function parseBudget(budget?: string): string {
   if (!budget) return "";
-  const num = budget.replace(/[^\d.]/g, "");
-  return num;
+  return budget.replace(/[^\d.]/g, "");
 }
-
-const memberMapInit = members.reduce<Record<string, Member>>((acc, m) => {
-  acc[m.id] = m;
-  return acc;
-}, {});
 
 export default function ProjectFormModal({
   open,
@@ -50,64 +43,88 @@ export default function ProjectFormModal({
   onClose,
   onSubmit,
 }: ProjectFormModalProps) {
+  const { token, user } = useAuth();
+  const [users, setUsers] = useState<TeamMember[]>([]);
   const [form, setForm] = useState({
-    name: initial?.name ?? "",
-    code: initial?.code ?? "",
-    type: initial?.type ?? ("工程" as ProjectType),
-    budget: parseBudget(initial?.budget),
-    deadline: initial?.deadline ?? "",
-    owner: initial?.owner ?? members[1].name,
+    name: "",
+    code: "",
+    type: "工程" as ProjectType,
+    budget: "",
+    deadline: "",
+    owner: "",
   });
   const [memberIds, setMemberIds] = useState<string[]>(initialMemberIds);
   const [openPanel, setOpenPanel] = useState(false);
-  const [tenderDoc, setTenderDoc] = useState<TenderUpload | undefined>(initial?.tenderDoc);
+  const [tenderFile, setTenderFile] = useState<File | undefined>();
+  const [existingTenderName, setExistingTenderName] = useState<string | undefined>();
   const [tenderErr, setTenderErr] = useState<string | null>(null);
   const tenderInputRef = useRef<HTMLInputElement>(null);
 
-  // 每次打开弹窗时，根据目标项目重置表单（兼容编辑不同项目）
   useEffect(() => {
-    if (open) {
-      setForm({
-        name: initial?.name ?? "",
-        code: initial?.code ?? "",
-        type: initial?.type ?? "工程",
-        budget: parseBudget(initial?.budget),
-        deadline: initial?.deadline ?? "",
-        owner: initial?.owner ?? members[1].name,
-      });
-      setMemberIds(initialMemberIds);
-      setOpenPanel(false);
-      setTenderDoc(initial?.tenderDoc);
-      setTenderErr(null);
-    }
+    if (!open || !token) return;
+    let cancelled = false;
+    listUsers(token).then((list) => {
+      if (!cancelled) setUsers(list);
+    }).catch(() => {
+      if (!cancelled) setUsers([]);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, token]);
+
+  useEffect(() => {
+    if (!open) return;
+    const defaultOwner = initial?.owner || user?.name || "";
+    setForm({
+      name: initial?.name ?? "",
+      code: initial?.code ?? "",
+      type: initial?.type ?? "工程",
+      budget: parseBudget(initial?.budget),
+      deadline: initial?.deadline ?? "",
+      owner: defaultOwner,
+    });
+    setMemberIds(initialMemberIds);
+    setOpenPanel(false);
+    setTenderFile(undefined);
+    setExistingTenderName(initial?.tenderDoc?.name);
+    setTenderErr(null);
+    if (tenderInputRef.current) tenderInputRef.current.value = "";
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const grouped = useMemo(() => {
-    const roles: string[] = ["管理员", "项目经理", "撰写专家", "评标专家"];
+    const roles = Array.from(new Set(users.map((u) => u.role || "成员")));
     return roles
-      .map((role) => ({ role, list: members.filter((m) => m.role === role) }))
+      .map((role) => ({ role, list: users.filter((u) => (u.role || "成员") === role) }))
       .filter((g) => g.list.length > 0);
-  }, []);
+  }, [users]);
+
+  const ownerCandidates = useMemo(() => {
+    const preferred = users.filter((u) => u.role === "项目经理" || u.role === "管理员");
+    return preferred.length > 0 ? preferred : users;
+  }, [users]);
+
+  const userMap = useMemo(() => {
+    const map: Record<string, TeamMember> = {};
+    users.forEach((u) => {
+      map[u.id] = u;
+    });
+    return map;
+  }, [users]);
 
   const toggleMember = (id: string) => {
     setMemberIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
   const handleTenderPick = (file: File) => {
-    const valid = /\.(doc|docx|pdf)$/i.test(file.name);
-    if (!valid) {
-      setTenderErr("仅支持 .doc / .docx / .pdf 格式的招标文件");
+    if (!/\.docx$/i.test(file.name)) {
+      setTenderErr("仅支持 .docx 格式的招标文件（暂不支持 .doc / .pdf，请另存为 .docx 后重新上传）");
       return;
     }
-    const mb = (file.size / 1024 / 1024).toFixed(1);
-    const extMatch = /\.([a-z0-9]+)$/i.exec(file.name);
     setTenderErr(null);
-    setTenderDoc({
-      name: file.name,
-      size: `${mb} MB`,
-      format: extMatch ? extMatch[1].toUpperCase() : "文件",
-    });
+    setTenderFile(file);
+    setExistingTenderName(undefined);
   };
 
   const handleSubmit = (e: FormEvent) => {
@@ -120,11 +137,13 @@ export default function ProjectFormModal({
       deadline: form.deadline,
       owner: form.owner,
       memberIds,
-      tenderDoc,
+      tenderFile,
     });
   };
 
   const isEdit = mode === "edit";
+  const displayTenderName = tenderFile?.name || existingTenderName;
+  const displayTenderSize = tenderFile ? `${(tenderFile.size / 1024 / 1024).toFixed(1)} MB` : initial?.tenderDoc?.size;
 
   return (
     <Modal
@@ -134,7 +153,7 @@ export default function ProjectFormModal({
       subtitle={
         isEdit
           ? `更新项目基本信息与人员分配 · ${initial?.code ?? ""}`
-          : "创建后 AI 将自动解析招标文件并生成撰写大纲"
+          : "创建后可上传招标文件并进入招标解析"
       }
     >
       <form onSubmit={handleSubmit} className="space-y-4">
@@ -218,16 +237,16 @@ export default function ProjectFormModal({
             onChange={(e) => setForm((f) => ({ ...f, owner: e.target.value }))}
             className={`${inputCls} cursor-pointer`}
           >
-            {members
-              .filter((m) => m.role === "项目经理" || m.role === "管理员")
-              .map((m) => (
-                <option key={m.id} value={m.name}>
-                  {m.name}（{m.role}）
-                </option>
-              ))}
+            {form.owner && !ownerCandidates.some((m) => m.name === form.owner) && (
+              <option value={form.owner}>{form.owner}</option>
+            )}
+            {ownerCandidates.map((m) => (
+              <option key={m.id} value={m.name}>
+                {m.name}（{m.role}）
+              </option>
+            ))}
           </select>
         </div>
-        {/* 项目人员分配 */}
         <div>
           <label className={labelCls} htmlFor="np-members">
             分配项目人员
@@ -245,12 +264,12 @@ export default function ProjectFormModal({
                   <span className="truncate">
                     已选{" "}
                     {memberIds
-                      .map((id) => memberMapInit[id]?.name)
+                      .map((id) => userMap[id]?.name)
                       .filter(Boolean)
                       .join("、")}
                   </span>
                 ) : (
-                  <span className="text-foreground-500">从团队选择成员（可多选）</span>
+                  <span className="text-foreground-500">从已注册用户中选择成员（可多选）</span>
                 )}
               </span>
               <span className="flex shrink-0 items-center gap-1.5">
@@ -272,7 +291,7 @@ export default function ProjectFormModal({
                 <div className="fixed inset-0 z-40 cursor-default" onClick={() => setOpenPanel(false)} />
                 <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-50 max-h-72 overflow-y-auto rounded-lg border border-background-300 bg-background-100 p-2 shadow-lg">
                   <div className="mb-2 flex items-center justify-between px-1">
-                    <span className="text-xs font-medium text-foreground-600">团队成员</span>
+                    <span className="text-xs font-medium text-foreground-600">已注册用户</span>
                     {memberIds.length > 0 && (
                       <button
                         type="button"
@@ -329,11 +348,12 @@ export default function ProjectFormModal({
             )}
           </div>
         </div>
-        {/* 招标文件上传 */}
         <div>
           <label className={labelCls} htmlFor="np-tender">
             招标文件
-            <span className="ml-1 font-normal text-foreground-500">（{isEdit ? "重新选择可替换" : "可选，后续可在招标解析中上传"}）</span>
+            <span className="ml-1 font-normal text-foreground-500">
+              （{isEdit ? "重新选择可替换为真实 .docx 文件" : "可选，后续可在招标解析中上传"}）
+            </span>
           </label>
           <input
             ref={tenderInputRef}
@@ -346,16 +366,16 @@ export default function ProjectFormModal({
               if (file) handleTenderPick(file);
             }}
           />
-          {tenderDoc ? (
+          {displayTenderName ? (
             <div className="flex items-center gap-3 rounded-md border border-primary-200 bg-primary-50/60 px-3 py-2.5">
               <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary-500 text-background-50">
                 <i className="ri-file-text-line text-base"></i>
               </span>
               <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium text-foreground-900">{tenderDoc.name}</div>
+                <div className="truncate text-sm font-medium text-foreground-900">{displayTenderName}</div>
                 <div className="mt-0.5 text-[11px] text-foreground-500">
-                  {tenderDoc.format} · {tenderDoc.size}
-                  {tenderDoc.pages ? ` · ${tenderDoc.pages} 页` : ""}
+                  DOCX{displayTenderSize ? ` · ${displayTenderSize}` : ""}
+                  {tenderFile ? " · 待上传" : " · 已归档"}
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-1">
@@ -371,7 +391,8 @@ export default function ProjectFormModal({
                   type="button"
                   title="移除文件"
                   onClick={() => {
-                    setTenderDoc(undefined);
+                    setTenderFile(undefined);
+                    setExistingTenderName(undefined);
                     if (tenderInputRef.current) tenderInputRef.current.value = "";
                   }}
                   className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-md text-foreground-500 transition-colors hover:bg-secondary-100 hover:text-secondary-700"
@@ -387,7 +408,7 @@ export default function ProjectFormModal({
               className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-background-300 bg-background-50 px-3 py-3 text-sm text-foreground-500 transition-colors hover:border-primary-300 hover:bg-primary-50/40 hover:text-primary-600"
             >
               <i className="ri-upload-cloud-2-line text-base"></i>
-              点击上传招标文件（支持 .doc / .docx / .pdf）
+              点击上传招标文件（仅支持 .docx）
             </button>
           )}
           {tenderErr && (

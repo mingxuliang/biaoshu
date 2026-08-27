@@ -1,16 +1,15 @@
-import os
-import urllib.parse
-import uuid
-
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
-from ..config import get_settings
+from ..audit import actor_from_request, project_label, write_audit
+from ..auth import get_current_user
 from ..db import get_db
 from ..engines.docx_extract import extract_paragraphs
 from ..engines.revision_build import anchor_findings, blocks_to_docx, build_sections
-from ..models import BidDocument, BidRevision, BidRevisionVersion, ReviewFinding, ReviewRun
+from ..models import BidDocument, BidRevision, BidRevisionVersion, ReviewFinding, ReviewRun, User
+from ..permissions import PERM_WRITER, require_project
+from .. import storage
 from ..schemas import (
     BidRevisionOut,
     BidRevisionVersionOut,
@@ -51,7 +50,11 @@ def _build_revision_content(db: Session, run: ReviewRun) -> tuple[list[dict], li
     bid_doc = db.get(BidDocument, run.bid_document_id)
     if not bid_doc:
         raise HTTPException(404, "预审对应的投标文件不存在")
-    paragraphs = extract_paragraphs(bid_doc.storage_path)
+    try:
+        with storage.as_local(bid_doc.storage_path) as path:
+            paragraphs = extract_paragraphs(path)
+    except FileNotFoundError:
+        raise HTTPException(404, "预审对应的投标文件不存在")
     issues = [_finding_to_issue_dict(f) for f in run.findings]
     sections = build_sections(paragraphs)
     sections = anchor_findings(sections, issues)
@@ -70,8 +73,19 @@ def _revision_to_out(revision: BidRevision) -> BidRevisionOut:
     )
 
 
+def _require_revision(db, user: User, revision_id: str) -> BidRevision:
+    revision = db.get(BidRevision, revision_id)
+    if not revision:
+        raise HTTPException(404, "修改闭环草稿不存在")
+    require_project(db, user, revision.project_id, PERM_WRITER)
+    return revision
+
+
 @router.get("/projects/{project_id}/bid-revision", response_model=BidRevisionOut)
-def get_or_create_bid_revision(project_id: str, db: Session = Depends(get_db)) -> BidRevisionOut:
+def get_or_create_bid_revision(
+    project_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+) -> BidRevisionOut:
+    require_project(db, current_user, project_id, PERM_WRITER)
     revision = db.query(BidRevision).filter(BidRevision.project_id == project_id).first()
     if revision:
         return _revision_to_out(revision)
@@ -93,10 +107,13 @@ def get_or_create_bid_revision(project_id: str, db: Session = Depends(get_db)) -
 
 
 @router.post("/bid-revisions/{revision_id}/regenerate", response_model=BidRevisionOut)
-def regenerate_bid_revision(revision_id: str, db: Session = Depends(get_db)) -> BidRevisionOut:
-    revision = db.get(BidRevision, revision_id)
-    if not revision:
-        raise HTTPException(404, "修改闭环草稿不存在")
+def regenerate_bid_revision(
+    revision_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> BidRevisionOut:
+    revision = _require_revision(db, current_user, revision_id)
 
     run = _latest_done_run(db, revision.project_id)
     sections, issues = _build_revision_content(db, run)
@@ -106,6 +123,14 @@ def regenerate_bid_revision(revision_id: str, db: Session = Depends(get_db)) -> 
     revision.sections_json = sections
     revision.issues_json = issues
     revision.content_state_json = None
+    write_audit(
+        db,
+        action="AI 改写",
+        user_name=actor_from_request(db, request),
+        target=project_label(db, revision.project_id),
+        version="—",
+        detail=f"根据第 {run.round} 轮预审结果重新生成对照稿，待编写人确认",
+    )
     db.commit()
     db.refresh(revision)
     return _revision_to_out(revision)
@@ -113,11 +138,12 @@ def regenerate_bid_revision(revision_id: str, db: Session = Depends(get_db)) -> 
 
 @router.patch("/bid-revisions/{revision_id}/content", response_model=BidRevisionOut)
 def autosave_bid_revision_content(
-    revision_id: str, payload: PatchRevisionContentIn, db: Session = Depends(get_db)
+    revision_id: str,
+    payload: PatchRevisionContentIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> BidRevisionOut:
-    revision = db.get(BidRevision, revision_id)
-    if not revision:
-        raise HTTPException(404, "修改闭环草稿不存在")
+    revision = _require_revision(db, current_user, revision_id)
     revision.content_state_json = payload.contentState
     db.commit()
     db.refresh(revision)
@@ -126,24 +152,21 @@ def autosave_bid_revision_content(
 
 @router.post("/bid-revisions/{revision_id}/versions", response_model=BidRevisionVersionOut)
 def create_bid_revision_version(
-    revision_id: str, payload: CreateVersionIn, db: Session = Depends(get_db)
+    revision_id: str,
+    payload: CreateVersionIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> BidRevisionVersionOut:
-    revision = db.get(BidRevision, revision_id)
-    if not revision:
-        raise HTTPException(404, "修改闭环草稿不存在")
+    revision = _require_revision(db, current_user, revision_id)
 
-    settings = get_settings()
-    os.makedirs(settings.upload_dir, exist_ok=True)
     docx_bytes = blocks_to_docx([b.model_dump() for b in payload.blocks])
-    stored_name = f"{uuid.uuid4().hex}.docx"
-    storage_path = os.path.join(settings.upload_dir, stored_name)
-    with open(storage_path, "wb") as f:
-        f.write(docx_bytes)
+    key = storage.put_bytes(f"bid-documents/{revision.project_id}", docx_bytes, ".docx")
 
     new_doc = BidDocument(
         project_id=revision.project_id,
-        filename=f"投标书修改版-{stored_name}",
-        storage_path=storage_path,
+        filename="投标书修改版.docx",
+        storage_path=key,
         size_bytes=len(docx_bytes),
         source="revision",
     )
@@ -162,6 +185,14 @@ def create_bid_revision_version(
     )
     db.add(version)
     revision.content_state_json = payload.contentState
+    write_audit(
+        db,
+        action="改写接受",
+        user_name=actor_from_request(db, request),
+        target=project_label(db, revision.project_id),
+        version=version.label,
+        detail=payload.note or f"保存修改版本 {version.label}，作者：{version.author}",
+    )
     db.commit()
     db.refresh(new_doc)
     db.refresh(version)
@@ -182,7 +213,10 @@ def create_bid_revision_version(
 
 
 @router.get("/bid-revisions/{revision_id}/versions", response_model=list[BidRevisionVersionOut])
-def list_bid_revision_versions(revision_id: str, db: Session = Depends(get_db)) -> list[BidRevisionVersionOut]:
+def list_bid_revision_versions(
+    revision_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+) -> list[BidRevisionVersionOut]:
+    _require_revision(db, current_user, revision_id)
     versions = (
         db.query(BidRevisionVersion)
         .filter(BidRevisionVersion.revision_id == revision_id)
@@ -205,11 +239,12 @@ def list_bid_revision_versions(revision_id: str, db: Session = Depends(get_db)) 
 
 @router.post("/bid-revisions/{revision_id}/versions/{version_id}/restore", response_model=RestoreVersionOut)
 def restore_bid_revision_version(
-    revision_id: str, version_id: str, db: Session = Depends(get_db)
+    revision_id: str,
+    version_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> RestoreVersionOut:
-    revision = db.get(BidRevision, revision_id)
-    if not revision:
-        raise HTTPException(404, "修改闭环草稿不存在")
+    revision = _require_revision(db, current_user, revision_id)
     version = db.get(BidRevisionVersion, version_id)
     if not version or version.revision_id != revision_id:
         raise HTTPException(404, "版本记录不存在")
@@ -220,10 +255,10 @@ def restore_bid_revision_version(
 
 
 @router.get("/bid-revisions/{revision_id}/export")
-def export_bid_revision_docx(revision_id: str, db: Session = Depends(get_db)) -> Response:
-    revision = db.get(BidRevision, revision_id)
-    if not revision:
-        raise HTTPException(404, "修改闭环草稿不存在")
+def export_bid_revision_docx(
+    revision_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+) -> Response:
+    revision = _require_revision(db, current_user, revision_id)
 
     latest_version = (
         db.query(BidRevisionVersion)
@@ -235,16 +270,9 @@ def export_bid_revision_docx(revision_id: str, db: Session = Depends(get_db)) ->
         raise HTTPException(400, "暂无已保存的版本，请先点击「保存版本」")
 
     doc = db.get(BidDocument, latest_version.bid_document_id)
-    if not doc or not os.path.exists(doc.storage_path):
+    if not doc or not storage.exists(doc.storage_path):
         raise HTTPException(404, "导出文件不存在")
-
-    with open(doc.storage_path, "rb") as f:
-        content = f.read()
-
-    # 文件名可能含中文，Content-Disposition 头只能是 latin-1，用 RFC 5987 的 filename* 承载 UTF-8 名称
-    encoded_name = urllib.parse.quote(doc.filename)
-    return Response(
-        content=content,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f"attachment; filename=\"bid-revision.docx\"; filename*=UTF-8''{encoded_name}"},
-    )
+    try:
+        return storage.http_response(doc.storage_path, filename=doc.filename)
+    except FileNotFoundError:
+        raise HTTPException(404, "导出文件不存在")
