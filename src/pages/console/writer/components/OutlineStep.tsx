@@ -6,6 +6,7 @@ import Toast from "../../components/Toast";
 import WordViewer, { type WordViewerHandle } from "../../parse/components/WordViewer";
 import {
   createOutlineJob,
+  createProductMatchJob,
   getLatestChecklist,
   getOrCreateWriterDraft,
   getTenderParagraphs,
@@ -17,7 +18,7 @@ import {
   type ProjectDto,
   type TenderParagraph,
 } from "@/lib/api";
-import { compactOutlineTitles, displayOutlineTitle, isOriginalFormTitle, renumberOutline } from "@/lib/outlineNum";
+import { compactOutlineTitles, displayOutlineTitle, isBusinessSkipChapter, isOriginalFormTitle, isSkipAiWrite, renumberOutline } from "@/lib/outlineNum";
 import { findTenderAnchor } from "@/lib/tenderAnchor";
 
 interface OutlineStepProps {
@@ -28,9 +29,13 @@ interface OutlineStepProps {
   outline: OutlineNode[];
   onOutlineChange: (nodes: OutlineNode[]) => void;
   initialKnowledgeRefs?: Record<string, KnowledgeRef[]>;
-  onOutlineRegenerated?: (payload?: { chapterContents?: Record<string, string> }) => void;
+  onOutlineRegenerated?: (payload?: {
+    chapterContents?: Record<string, string>;
+    knowledgeRefs?: Record<string, KnowledgeRef[]>;
+  }) => void;
   onNext: () => void;
   onBack: () => void;
+  selectedProductLibraryId?: string;
 }
 
 type RightTab = "outline" | "tenderDoc" | "score" | "overview";
@@ -56,6 +61,7 @@ export default function OutlineStep({
   onOutlineRegenerated,
   onNext,
   onBack,
+  selectedProductLibraryId = "",
 }: OutlineStepProps) {
   const [activeId, setActiveId] = useState<string>(outline[0]?.id ?? "");
   const [tab, setTab] = useState<RightTab>("outline");
@@ -64,6 +70,7 @@ export default function OutlineStep({
     initialKnowledgeRefs ?? {}
   );
   const [generatingOutline, setGeneratingOutline] = useState(false);
+  const [matchingProducts, setMatchingProducts] = useState(false);
   const [scoreFilter, setScoreFilter] = useState("全部");
   const [scoreTab, setScoreTab] = useState<"rules" | "must">("rules");
   const [toast, setToast] = useState<ToastState>({ message: "", type: "success", visible: false });
@@ -158,13 +165,17 @@ export default function OutlineStep({
       updateWriterDraft(draftId, { outline: compacted }).catch(() => {
         /* 标题收短失败不阻塞目录展示，进入下一步时会再次保存 */
       });
-      setKnowledgeMap({});
+      const refs = refreshed.knowledgeRefs || {};
+      setKnowledgeMap(refs);
       setActiveId(compacted[0]?.id ?? "");
-      onOutlineRegenerated?.({ chapterContents: refreshed.chapterContents || {} });
+      onOutlineRegenerated?.({ chapterContents: refreshed.chapterContents || {}, knowledgeRefs: refs });
+      const matched = Object.values(refs).filter((list) =>
+        (list || []).some((r) => (r.source || "knowledge") === "product" && (r.chapters || []).length > 0),
+      ).length;
       showToast(
         replaceExisting
-          ? `已重新生成全部目录，共 ${compacted.length} 个节点`
-          : "已生成应标目录：短名称原样保留，需求说明已提炼为短标题",
+          ? `已重新生成全部目录，共 ${compacted.length} 个节点${matched ? `，已自动匹配 ${matched} 章产品功能` : ""}`
+          : `已生成应标目录。技术标按「原始需求 + 解决方案」撰写；已选产品库时由大模型匹配功能点。`,
       );
     } catch {
       showToast("目录生成失败，请检查网络后重试", "error");
@@ -209,6 +220,38 @@ export default function OutlineStep({
     showToast("全部章节编写思路已 AI 优化完成");
   };
 
+  const matchProductLibrary = async () => {
+    if (!selectedProductLibraryId) {
+      showToast("请先在标书设置中选择产品功能库", "error");
+      return;
+    }
+    if (outline.length === 0) {
+      showToast("请先生成应标目录", "info");
+      return;
+    }
+    setMatchingProducts(true);
+    try {
+      const job = await createProductMatchJob(draftId);
+      const result = await pollWriterJobUntilDone(job.jobId, { intervalMs: 1500, timeoutMs: 10 * 60 * 1000 });
+      if (result.status === "failed") {
+        showToast(result.error || "产品功能匹配失败，请检查模型配置后重试", "error");
+        return;
+      }
+      const refreshed = await getOrCreateWriterDraft(projectId);
+      const refs = refreshed.knowledgeRefs || {};
+      setKnowledgeMap(refs);
+      onOutlineRegenerated?.({ knowledgeRefs: refs });
+      const matched = Object.values(refs).filter((list) =>
+        (list || []).some((r) => (r.source || "knowledge") === "product" && (r.chapters || []).length > 0),
+      ).length;
+      showToast(matched > 0 ? `已用大模型为 ${matched} 个技术标章节匹配产品功能，可再手动调整` : "未匹配到产品功能点，请手动在参考资料中勾选");
+    } catch {
+      showToast("产品功能匹配失败，请稍后重试", "error");
+    } finally {
+      setMatchingProducts(false);
+    }
+  };
+
   const saveOutline = () => {
     updateWriterDraft(draftId, { outline }).catch(() => {
       /* 静默失败，用户仍可继续编辑；进入下一步时会再次尝试保存 */
@@ -220,10 +263,14 @@ export default function OutlineStep({
       const next = { ...knowledgeMap, [pickerId]: refs };
       setKnowledgeMap(next);
       setPickerId(null);
-      updateWriterDraft(draftId, { knowledgeRefs: next }).catch(() => {
+      const productRef = refs.find((r) => (r.source || "knowledge") === "product");
+      updateWriterDraft(draftId, {
+        knowledgeRefs: next,
+        ...(productRef ? { selectedProductLibraryId: productRef.docId } : {}),
+      }).catch(() => {
         /* 静默失败，用户仍可继续编辑；进入下一步时会再次尝试保存 */
       });
-      showToast(refs.length > 0 ? `已为章节绑定 ${refs.length} 篇参考知识库文档` : "已清除该章节知识库引用", refs.length > 0 ? "success" : "info");
+      showToast(refs.length > 0 ? `已为章节绑定 ${refs.length} 项参考资料` : "已清除该章节参考资料", refs.length > 0 ? "success" : "info");
     }
   };
 
@@ -286,11 +333,23 @@ export default function OutlineStep({
             <button
               type="button"
               onClick={() => generateOutline(true)}
-              disabled={generatingOutline}
+              disabled={generatingOutline || matchingProducts}
               className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-accent-200 bg-accent-50 px-3 text-xs font-medium text-accent-700 transition-colors hover:bg-accent-100 disabled:cursor-not-allowed disabled:opacity-60"
             >
               <i className={`${generatingOutline ? "ri-loader-4-line animate-spin" : "ri-refresh-line"} text-xs`}></i>
               {generatingOutline ? "正在重新生成…" : "重新生成目录"}
+            </button>
+          )}
+          {outline.length > 0 && (
+            <button
+              type="button"
+              onClick={matchProductLibrary}
+              disabled={generatingOutline || matchingProducts || !selectedProductLibraryId}
+              title={selectedProductLibraryId ? "用大模型把技术标目录对应到已选产品功能库" : "请先在标书设置中选择产品功能库"}
+              className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-primary-200 bg-primary-50 px-3 text-xs font-medium text-primary-600 transition-colors hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <i className={`${matchingProducts ? "ri-loader-4-line animate-spin" : "ri-apps-line"} text-xs`}></i>
+              {matchingProducts ? "正在匹配产品功能…" : "自动匹配产品功能库"}
             </button>
           )}
           {outline.length > 0 && (
@@ -367,7 +426,7 @@ export default function OutlineStep({
                   </span>
                   <div className="text-sm font-semibold text-foreground-900">尚未生成目录</div>
                   <p className="max-w-md text-xs text-foreground-500">
-                    将由大模型阅读招标文件全文，按招标每一条独立要求编制可逐条打勾的应标目录。生成约需 1～3 分钟。
+                    将由大模型阅读招标文件全文，按招标每一条独立要求编制可逐条打勾的应标目录。若已选产品功能库，生成后会再用大模型把技术标章节对应到功能点。生成约需 1～3 分钟。
                   </p>
                   <button
                     type="button"
@@ -418,14 +477,18 @@ export default function OutlineStep({
                           <div className="mb-2 flex items-center gap-1.5">
                             <i className="ri-lightbulb-flash-line text-sm text-accent-500"></i>
                             <span className="text-xs font-medium text-foreground-700">
-                              {isOriginalFormTitle(node.title, node.num) || node.status === "用原文"
+                              {isOriginalFormTitle(node.title, node.num) || node.part === "form"
                                 ? "使用招标书原文"
-                                : "编写思路"}
+                                : isSkipAiWrite(node) || isBusinessSkipChapter(node)
+                                  ? "商务标无需应答"
+                                  : "编写思路"}
                             </span>
                             <span className="text-[11px] text-foreground-500">
-                              {isOriginalFormTitle(node.title, node.num) || node.status === "用原文"
-                                ? "—— 固定格式件填写后打印签字，不展开目录、不撰写正文"
-                                : "—— 功能点写应实现条款；其余需求写应覆盖全文，生成正文时按此应标"}
+                              {isOriginalFormTitle(node.title, node.num) || node.part === "form"
+                                ? "—— 带入招标书原文格式，填写后打印签字"
+                                : isSkipAiWrite(node) || isBusinessSkipChapter(node)
+                                  ? "—— 带入招标书对应章节原文，无需 AI 撰写应标"
+                                  : "—— 生成正文时先列出招标原始需求全文，再按勾选产品功能撰写解决方案"}
                             </span>
                           </div>
 
@@ -500,7 +563,7 @@ export default function OutlineStep({
                             <div className="mb-3 rounded-lg border border-background-200 bg-background-50 p-3">
                               <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-foreground-700">
                                 <i className="ri-bookmark-line text-primary-500"></i>
-                                参考知识库
+                                参考资料
                               </div>
                               <div className="flex flex-wrap gap-1.5">
                                 {refs.map((ref) => (
@@ -509,9 +572,13 @@ export default function OutlineStep({
                                     className="flex items-center gap-1 rounded bg-secondary-100 px-2 py-0.5 text-[11px] text-secondary-700"
                                   >
                                     <i className={`${ref.mode === "ai" ? "ri-sparkling-2-line text-accent-500" : "ri-bookmark-3-line text-primary-500"} text-xs`}></i>
+                                    {(ref.source || "knowledge") === "product" ? "产品 · " : (ref.source || "") === "qualification" ? "资质 · " : ""}
                                     {ref.docTitle}
                                     {ref.chapters.length > 0 && (
-                                      <span className="text-secondary-500">（{ref.chapters.length}章）</span>
+                                      <span className="text-secondary-500">
+                                        （{ref.chapters.length}
+                                        {(ref.source || "knowledge") === "product" ? "项功能" : "章"}）
+                                      </span>
                                     )}
                                   </span>
                                 ))}
@@ -531,7 +598,7 @@ export default function OutlineStep({
                               }`}
                             >
                               <i className="ri-bookmark-line text-xs"></i>
-                              参考知识库 {refs.length > 0 ? `(${refs.length})` : ""}
+                              参考资料 {refs.length > 0 ? `(${refs.length})` : ""}
                             </button>
                             <button
                               type="button"
@@ -842,6 +909,14 @@ export default function OutlineStep({
           <i className="ri-loader-4-line animate-spin text-3xl text-primary-500"></i>
           <div className="text-sm font-medium text-foreground-800">正在重新生成应标目录</div>
           <div className="text-xs text-foreground-500">大模型正在阅读招标文件并编制应标目录，约需 1～3 分钟</div>
+        </div>
+      )}
+
+      {matchingProducts && (
+        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-background-100/85 backdrop-blur-[1px]">
+          <i className="ri-loader-4-line animate-spin text-3xl text-primary-500"></i>
+          <div className="text-sm font-medium text-foreground-800">正在用大模型匹配产品功能库</div>
+          <div className="text-xs text-foreground-500">按技术标章节语义对应功能点，已手动勾选的产品功能不会被覆盖</div>
         </div>
       )}
 

@@ -52,45 +52,117 @@ def list_knowledge_headings(db: Session, doc_ids: list[str], limit: int = 40) ->
 
 
 def retrieve_for_chapter(db: Session, doc_ids: list[str], query: str, top_k: int = 4) -> list[dict]:
-    """在给定文档池内，按 query 用 BM25 检索最相关的 top_k 个片段。"""
-    slices = _load_slices(db, doc_ids)
-    if not slices or not query.strip():
+    """BM25 命中标题后取其整包子树（正文+配图），避免自动选章时丢下级素材。"""
+    from sqlalchemy.orm import selectinload
+
+    if not doc_ids or not query.strip():
+        return []
+    slices = (
+        db.query(KnowledgeSlice)
+        .options(selectinload(KnowledgeSlice.images))
+        .filter(KnowledgeSlice.document_id.in_(doc_ids))
+        .order_by(KnowledgeSlice.document_id, KnowledgeSlice.seq)
+        .all()
+    )
+    if not slices:
         return []
 
     corpus = [_tokenize(s.text) for s in slices]
     bm25 = BM25Okapi(corpus)
     scores = bm25.get_scores(_tokenize(query))
+    ranked = sorted(zip(slices, scores), key=lambda x: x[1], reverse=True)
+    seeds = [s.heading for s, score in ranked[:top_k] if score > 0 and s.heading]
+    if not seeds:
+        return []
 
     titles = _doc_titles(db, doc_ids)
-    ranked = sorted(zip(slices, scores), key=lambda x: x[1], reverse=True)
-
-    results = []
-    for slice_, score in ranked[:top_k]:
-        if score <= 0:
-            continue
-        results.append(
-            {
-                "docId": slice_.document_id,
-                "docTitle": titles.get(slice_.document_id, ""),
-                "heading": slice_.heading,
-                "text": slice_.text,
-            }
-        )
-    return results
+    chosen = _subtree_slices(slices, seeds)
+    return [
+        {
+            "docId": s.document_id,
+            "docTitle": titles.get(s.document_id, ""),
+            "heading": s.heading,
+            "text": s.text or "",
+            "images": [
+                {
+                    "id": img.id,
+                    "caption": img.caption or s.heading,
+                    "storage_path": img.storage_path,
+                    "filename": img.filename or "",
+                }
+                for img in (s.images or [])
+                if img.storage_path
+            ],
+        }
+        for s in chosen
+    ]
 
 
 def retrieve_by_doc_and_headings(
-    db: Session, doc_id: str, headings: list[str], max_slices: int = 6
+    db: Session, doc_id: str, headings: list[str], max_slices: int | None = None
 ) -> list[dict]:
-    """章节级精确引用：直接取指定文档下匹配 headings 的全部片段（截断避免过长）。"""
-    query = db.query(KnowledgeSlice).filter(KnowledgeSlice.document_id == doc_id)
-    if headings:
-        query = query.filter(KnowledgeSlice.heading.in_(headings))
-    slices = query.order_by(KnowledgeSlice.seq).limit(max_slices).all()
+    """勾选章节整包：命中标题及其全部下级切片，正文与配图一并返回，不截断。"""
+    from sqlalchemy.orm import selectinload
 
+    slices = (
+        db.query(KnowledgeSlice)
+        .options(selectinload(KnowledgeSlice.images))
+        .filter(KnowledgeSlice.document_id == doc_id)
+        .order_by(KnowledgeSlice.seq.asc())
+        .all()
+    )
+    chosen = _subtree_slices(slices, headings)
+    if max_slices:
+        chosen = chosen[:max_slices]
     doc = db.get(KnowledgeDocument, doc_id)
     title = doc.title if doc else ""
-    return [{"docId": doc_id, "docTitle": title, "heading": s.heading, "text": s.text} for s in slices]
+    return [
+        {
+            "docId": doc_id,
+            "docTitle": title,
+            "heading": s.heading,
+            "text": s.text or "",
+            "images": [
+                {
+                    "id": img.id,
+                    "caption": img.caption or s.heading,
+                    "storage_path": img.storage_path,
+                    "filename": img.filename or "",
+                }
+                for img in (s.images or [])
+                if img.storage_path
+            ],
+        }
+        for s in chosen
+    ]
+
+
+def _subtree_slices(slices: list[KnowledgeSlice], headings: list[str]) -> list[KnowledgeSlice]:
+    """无勾选则整篇；有勾选则取这些标题及其子孙，按原文顺序。"""
+    if not slices:
+        return []
+    if not headings:
+        return list(slices)
+    wanted = {h for h in headings if h}
+    children: dict[str, list[KnowledgeSlice]] = {}
+    for row in slices:
+        if row.parent_id:
+            children.setdefault(row.parent_id, []).append(row)
+    picked: set[str] = set()
+
+    def walk(row: KnowledgeSlice) -> None:
+        if row.id in picked:
+            return
+        picked.add(row.id)
+        for child in children.get(row.id, []):
+            walk(child)
+
+    for row in slices:
+        if row.heading in wanted:
+            walk(row)
+    if not picked:
+        return list(slices)
+    return [row for row in slices if row.id in picked]
 
 
 def suggest_docs(

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { OutlineNode } from "@/lib/api";
-import { displayOutlineTitle, isOriginalFormTitle, renumberOutline } from "@/lib/outlineNum";
+import { displayOutlineTitle, isSkipAiWrite, renumberOutline } from "@/lib/outlineNum";
 
 interface ChapterTreeProps {
   nodes: OutlineNode[];
@@ -302,7 +302,7 @@ export default function ChapterTree({
                 <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-primary-400 to-primary-600 text-background-50">
                   <i className="ri-check-line text-[8px]"></i>
                 </span>
-              ) : node.status === "用原文" || isOriginalFormTitle(node.title, node.num) ? (
+              ) : node.status === "用原文" || isSkipAiWrite(node) ? (
                 <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-secondary-100 text-secondary-600">
                   <i className="ri-file-text-line text-[8px]"></i>
                 </span>
@@ -355,7 +355,7 @@ export default function ChapterTree({
               {/* 悬停操作 */}
               {!isEditing && (
                 <div className="hidden items-center gap-0.5 group-hover:flex">
-                  {node.status === "待生成" && !isOriginalFormTitle(node.title, node.num) && (
+                  {node.status === "待生成" && !isSkipAiWrite(node) && (
                     <button
                       type="button"
                       title="AI 生成本章"
@@ -393,7 +393,7 @@ export default function ChapterTree({
       {/* 底部说明 */}
       <div className="border-t border-background-300 px-3 py-2.5 text-[11px] text-foreground-500">
         <i className="ri-sparkling-2-line mr-1 text-primary-500"></i>
-        功能点逐条对应；其余需求用应标目录覆盖全文，不照搬招标目录
+        技术标生成「原始需求 + 解决方案」；商务标带入招标书原文格式，承诺/报价/偏差表打印签字
       </div>
 
       {/* 上下文菜单 */}

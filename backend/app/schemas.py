@@ -374,10 +374,12 @@ class OutlineNodeOut(BaseModel):
     idea: str = ""
     aiIdea: str = ""
     optimized: bool = False
-    status: Literal["待生成", "生成中", "已完成"] = "待生成"
+    status: Literal["待生成", "生成中", "已完成", "用原文"] = "待生成"
     words: int = 0
     aiRounds: int = 0
     sourceIndex: Optional[int] = None
+    part: Optional[Literal["tech", "business", "form"]] = None
+    requirement: Optional[str] = None
 
 
 class OutlineNodeIn(OutlineNodeOut):
@@ -385,6 +387,7 @@ class OutlineNodeIn(OutlineNodeOut):
 
 
 class KnowledgeRefIn(BaseModel):
+    source: Literal["knowledge", "product", "qualification"] = "knowledge"
     docId: str
     docTitle: str = ""
     chapters: list[str] = []
@@ -418,7 +421,7 @@ class UpdateWriterDraftIn(BaseModel):
 
 class WriterJobOut(BaseModel):
     jobId: str
-    kind: Literal["outline", "chapter"]
+    kind: Literal["outline", "chapter", "product-match"]
     chapterId: Optional[str] = None
     status: Literal["queued", "running", "done", "failed"]
     error: Optional[str] = None
@@ -551,15 +554,28 @@ class KnowledgeDocumentOut(BaseModel):
     updatedAt: str
 
 
+class KnowledgeSliceImageOut(BaseModel):
+    id: str
+    caption: str = ""
+    url: str
+
+
 class KnowledgeChapterOut(BaseModel):
     heading: str
     sliceCount: int
+    level: str = "一级"
+    imageCount: int = 0
+    excerpt: str = ""
+    images: list[KnowledgeSliceImageOut] = []
+    children: list["KnowledgeChapterOut"] = []
 
 
 class KnowledgeChapterDetailOut(BaseModel):
     docTitle: str
     heading: str
     paragraphs: list[str]
+    level: str = "一级"
+    images: list[KnowledgeSliceImageOut] = []
 
 
 class KnowledgeSuggestIn(BaseModel):
@@ -872,6 +888,8 @@ class ProductFeatureOut(BaseModel):
     paramsConflict: list[str] = []
     suspectedIds: list[str] = []
     images: list[ProductImageOut] = []
+    parentId: str = ""
+    children: list["ProductFeatureOut"] = []
     updatedAt: str
 
 
@@ -886,6 +904,7 @@ class ProductFeatureIn(BaseModel):
     model: str = ""
     unit: str = ""
     status: Optional[ProductStatusLit] = None
+    parentId: Optional[str] = None
 
 
 class ProductFeaturePatchIn(BaseModel):
@@ -935,3 +954,89 @@ class ProductExtractJobOut(BaseModel):
     conflicts: int = 0
     error: Optional[str] = None
     note: str = ""
+
+
+class LlmModelOut(BaseModel):
+    id: str
+    providerId: str
+    providerKind: str
+    providerName: str
+    name: str
+    apiModel: str
+    thinking: bool = False
+    enabled: bool = True
+    isDefault: bool = False
+    ctx: str = ""
+    speed: str = ""
+    vision: bool = False
+    ready: bool = False
+
+
+class LlmProviderOut(BaseModel):
+    id: str
+    name: str
+    kind: str
+    baseUrl: str = ""
+    apiKeyMasked: str = ""
+    hasKey: bool = False
+    enabled: bool = True
+    note: str = ""
+    ready: bool = False
+    models: list[LlmModelOut] = []
+
+
+class LlmProviderIn(BaseModel):
+    name: str
+    kind: str
+    baseUrl: str = ""
+    apiKey: Optional[str] = None
+    enabled: bool = True
+    note: str = ""
+
+
+class LlmProviderPatchIn(BaseModel):
+    name: Optional[str] = None
+    baseUrl: Optional[str] = None
+    apiKey: Optional[str] = None
+    enabled: Optional[bool] = None
+    note: Optional[str] = None
+    clearKey: bool = False
+
+
+class LlmModelIn(BaseModel):
+    name: str
+    apiModel: str
+    thinking: bool = False
+    enabled: bool = True
+    isDefault: bool = False
+    ctx: str = ""
+    speed: str = ""
+
+
+class LlmModelPatchIn(BaseModel):
+    name: Optional[str] = None
+    apiModel: Optional[str] = None
+    thinking: Optional[bool] = None
+    enabled: Optional[bool] = None
+    isDefault: Optional[bool] = None
+    ctx: Optional[str] = None
+    speed: Optional[str] = None
+
+
+class LlmTestOut(BaseModel):
+    ok: bool
+    message: str
+    latencyMs: int = 0
+    preview: str = ""
+
+
+class LlmPresetOut(BaseModel):
+    kind: str
+    label: str
+    defaultBaseUrl: str
+    keyRequired: bool
+    hint: str = ""
+    sampleModels: list[dict] = []
+
+
+ProductFeatureOut.model_rebuild()

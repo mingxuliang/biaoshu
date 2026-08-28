@@ -7,6 +7,7 @@ import { ContentEditable } from "@lexical/react/LexicalContentEditable";
 import { OnChangePlugin } from "@lexical/react/LexicalOnChangePlugin";
 import { ListPlugin } from "@lexical/react/LexicalListPlugin";
 import { LexicalErrorBoundary } from "@lexical/react/LexicalErrorBoundary";
+import { TablePlugin } from "@lexical/react/LexicalTablePlugin";
 import {
   $createListItemNode,
   $createListNode,
@@ -19,6 +20,18 @@ import {
 } from "@lexical/list";
 import { $patchStyleText, $setBlocksType } from "@lexical/selection";
 import { $createHeadingNode, $isHeadingNode, HeadingNode } from "@lexical/rich-text";
+import {
+  $createTableCellNode,
+  $createTableNode,
+  $createTableRowNode,
+  $isTableCellNode,
+  $isTableNode,
+  $isTableRowNode,
+  TableCellHeaderStates,
+  TableCellNode,
+  TableNode,
+  TableRowNode,
+} from "@lexical/table";
 import {
   $createParagraphNode,
   $createTextNode,
@@ -35,6 +48,7 @@ import {
   REDO_COMMAND,
   UNDO_COMMAND,
   createCommand,
+  type ElementFormatType,
   type LexicalCommand,
   type LexicalEditor,
   type LexicalNode,
@@ -54,41 +68,160 @@ const FONT_STACK: Record<string, string> = {
   黑体: '"黑体", SimHei, sans-serif',
   仿宋: '"仿宋", FangSong, serif',
   楷体: '"楷体", KaiTi, serif',
+  "Times New Roman": '"Times New Roman", Times, serif',
+  Arial: "Arial, Helvetica, sans-serif",
 };
+
+function cssFontFamily(name: string): string {
+  return FONT_STACK[name] || `"${name}"`;
+}
+
+function styleFromFont(font?: string, size?: string): string {
+  const parts: string[] = [];
+  if (font) parts.push(`font-family: ${cssFontFamily(font)}`);
+  if (size) parts.push(`font-size: ${size}`);
+  return parts.join("; ");
+}
+
+function parseNodeFont(style: string): { font?: string; size?: string } {
+  const fam = /font-family:\s*([^;]+)/i.exec(style || "");
+  const sz = /font-size:\s*([^;]+)/i.exec(style || "");
+  let font: string | undefined;
+  if (fam) {
+    const raw = fam[1].trim();
+    const quoted = /["']([^"']+)["']/.exec(raw);
+    font = (quoted ? quoted[1] : raw.split(",")[0]).trim();
+  }
+  return { font, size: sz ? sz[1].trim() : undefined };
+}
+
+const FONT_WRAP_RE = /\{\{([^|}]+)\|([^}]+)\}\}([\s\S]*?)\{\{\/\}\}/g;
 
 const FONT_SIZE_CSS: Record<string, string> = {
-  小三: "15pt",
-  小四: "12pt",
-  四号: "14pt",
+  小二: "18pt",
   三号: "16pt",
+  小三: "15pt",
+  四号: "14pt",
+  小四: "12pt",
+  五号: "10.5pt",
+  小五: "9pt",
 };
 
-function appendInline(parent: { append: (n: LexicalNode) => void }, text: string) {
+function applyAlign(node: { setFormat: (f: ElementFormatType) => void }, align: ElementFormatType | "") {
+  if (align === "center" || align === "right") node.setFormat(align);
+}
+
+function splitAlign(line: string): { align: ElementFormatType | ""; rest: string } {
+  if (line.startsWith(">>> ")) return { align: "center", rest: line.slice(4) };
+  if (line.startsWith(">>>")) return { align: "center", rest: line.slice(3) };
+  if (line.startsWith(">> ")) return { align: "right", rest: line.slice(3) };
+  return { align: "", rest: line };
+}
+
+function alignPrefix(node: { getFormatType?: () => string }): string {
+  const align = node.getFormatType?.() || "";
+  if (align === "center") return ">>> ";
+  if (align === "right") return ">> ";
+  return "";
+}
+
+function isTableSep(line: string): boolean {
+  return /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(line.trim());
+}
+
+function isTableRow(line: string): boolean {
+  const t = line.trim();
+  return t.startsWith("|") && t.split("|").length >= 3;
+}
+
+function parseTableRow(line: string): string[] {
+  let t = line.trim();
+  if (t.startsWith("|")) t = t.slice(1);
+  if (t.endsWith("|")) t = t.slice(0, -1);
+  return t.split("|").map((c) => c.trim());
+}
+
+function appendTable(root: ReturnType<typeof $getRoot>, rows: string[][]) {
+  if (!rows.length) return;
+  const width = Math.max(...rows.map((r) => r.length));
+  const table = $createTableNode();
+  rows.forEach((cells, rIdx) => {
+    const row = $createTableRowNode();
+    for (let i = 0; i < width; i += 1) {
+      const header = rIdx === 0 ? TableCellHeaderStates.ROW : TableCellHeaderStates.NO_STATUS;
+      const cell = $createTableCellNode(header);
+      const p = $createParagraphNode();
+      const text = cells[i] || "";
+      if (text) appendInline(p, text);
+      cell.append(p);
+      row.append(cell);
+    }
+    table.append(row);
+  });
+  root.append(table);
+}
+
+function appendStyledInline(
+  parent: { append: (n: LexicalNode) => void },
+  text: string,
+  font?: string,
+  size?: string,
+) {
+  const style = styleFromFont(font, size);
   const parts = text.split(INLINE_SPLIT_RE).filter(Boolean);
+  const apply = (n: TextNode) => {
+    if (style) n.setStyle(style);
+  };
   if (!parts.length) {
-    parent.append($createTextNode(""));
+    const n = $createTextNode("");
+    apply(n);
+    parent.append(n);
     return;
   }
   parts.forEach((part) => {
     if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
       const n = $createTextNode(part.slice(2, -2));
       n.toggleFormat("bold");
+      apply(n);
       parent.append(n);
       return;
     }
     if (part.startsWith("__") && part.endsWith("__") && part.length > 4) {
       const n = $createTextNode(part.slice(2, -2));
       n.toggleFormat("underline");
+      apply(n);
       parent.append(n);
       return;
     }
     if (part.startsWith("*") && part.endsWith("*") && part.length > 2) {
       const n = $createTextNode(part.slice(1, -1));
       n.toggleFormat("italic");
+      apply(n);
       parent.append(n);
       return;
     }
-    parent.append($createTextNode(part));
+    const n = $createTextNode(part);
+    apply(n);
+    parent.append(n);
+  });
+}
+
+function appendInline(parent: { append: (n: LexicalNode) => void }, text: string) {
+  FONT_WRAP_RE.lastIndex = 0;
+  const chunks: { text: string; font?: string; size?: string }[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  const re = new RegExp(FONT_WRAP_RE.source, "g");
+  while ((m = re.exec(text))) {
+    if (m.index > last) chunks.push({ text: text.slice(last, m.index) });
+    chunks.push({ text: m[3], font: m[1].trim(), size: m[2].trim() });
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) chunks.push({ text: text.slice(last) });
+  if (!chunks.length) chunks.push({ text });
+  chunks.forEach((c) => {
+    if (!c.text && !c.font && !c.size) return;
+    appendStyledInline(parent, c.text, c.font, c.size);
   });
 }
 
@@ -101,6 +234,10 @@ function serializeInline(node: LexicalNode): string {
     if (node.hasFormat("bold")) text = `**${text}**`;
     if (node.hasFormat("italic")) text = `*${text}*`;
     if (node.hasFormat("underline")) text = `__${text}__`;
+    const { font, size } = parseNodeFont(node.getStyle() || "");
+    if (font || size) {
+      text = `{{${font || "宋体"}|${size || "12pt"}}}${text}{{/}}`;
+    }
     return text;
   }
   if ($isElementNode(node)) {
@@ -132,16 +269,31 @@ function markdownToEditor(editor: LexicalEditor, markdown: string) {
         }
       };
 
-      lines.forEach((line) => {
-        const trimmed = line.trim();
+      let i = 0;
+      while (i < lines.length) {
+        const line = lines[i];
+        const { align, rest } = splitAlign(line);
+        const trimmed = rest.trim();
         if (trimmed.startsWith("```")) {
-          return;
+          i += 1;
+          continue;
+        }
+        if (isTableRow(line) || isTableSep(line)) {
+          flushList();
+          const rows: string[][] = [];
+          while (i < lines.length && (isTableRow(lines[i]) || isTableSep(lines[i]))) {
+            if (!isTableSep(lines[i])) rows.push(parseTableRow(lines[i]));
+            i += 1;
+          }
+          appendTable(root, rows);
+          continue;
         }
         const img = IMAGE_MD_RE.exec(trimmed);
         if (img) {
           flushList();
           root.append($createImageNode(img[2], img[1]));
-          return;
+          i += 1;
+          continue;
         }
         const heading = /^(#{1,6})\s+(.*)$/.exec(trimmed);
         if (heading) {
@@ -150,8 +302,10 @@ function markdownToEditor(editor: LexicalEditor, markdown: string) {
           const tag = depth <= 2 ? "h2" : "h3";
           const h = $createHeadingNode(tag);
           appendInline(h, heading[2]);
+          applyAlign(h, align);
           root.append(h);
-          return;
+          i += 1;
+          continue;
         }
         const bullet = /^[-*]\s+/.exec(trimmed);
         if (bullet) {
@@ -159,7 +313,8 @@ function markdownToEditor(editor: LexicalEditor, markdown: string) {
           const item = $createListItemNode();
           appendInline(item, trimmed.slice(bullet[0].length));
           listNode!.append(item);
-          return;
+          i += 1;
+          continue;
         }
         const numbered = /^(\d+)[.)]\s+/.exec(trimmed);
         if (numbered) {
@@ -167,13 +322,16 @@ function markdownToEditor(editor: LexicalEditor, markdown: string) {
           const item = $createListItemNode();
           appendInline(item, trimmed.slice(numbered[0].length));
           listNode!.append(item);
-          return;
+          i += 1;
+          continue;
         }
         flushList();
         const p = $createParagraphNode();
-        if (trimmed) appendInline(p, trimmed);
+        if (rest.trim()) appendInline(p, rest.replace(/\s+$/, ""));
+        applyAlign(p, align);
         root.append(p);
-      });
+        i += 1;
+      }
       flushList();
       if (root.getChildrenSize() === 0) {
         root.append($createParagraphNode());
@@ -192,10 +350,31 @@ function editorToMarkdown(editor: LexicalEditor): string {
         lines.push(`![${node.getAlt()}](${node.getSrc()})`);
         return;
       }
+      if ($isTableNode(node)) {
+        const rows = node.getChildren().filter($isTableRowNode);
+        const grid = rows.map((row) =>
+          row
+            .getChildren()
+            .filter($isTableCellNode)
+            .map((cell) => serializeInline(cell).replace(/\|/g, "\\|").trim()),
+        );
+        if (!grid.length) return;
+        const width = Math.max(...grid.map((r) => r.length), 1);
+        const pad = (r: string[]) => {
+          const next = [...r];
+          while (next.length < width) next.push("");
+          return next;
+        };
+        const fmt = (r: string[]) => `| ${pad(r).join(" | ")} |`;
+        lines.push(fmt(grid[0]));
+        lines.push(`| ${Array.from({ length: width }, () => "---").join(" | ")} |`);
+        grid.slice(1).forEach((r) => lines.push(fmt(r)));
+        return;
+      }
       if ($isHeadingNode(node)) {
         const tag = node.getTag();
         const prefix = tag === "h3" ? "### " : "## ";
-        lines.push(prefix + serializeInline(node));
+        lines.push(alignPrefix(node) + prefix + serializeInline(node));
         return;
       }
       if ($isListNode(node)) {
@@ -207,8 +386,9 @@ function editorToMarkdown(editor: LexicalEditor): string {
         });
         return;
       }
-      if ($isParagraphNode(node) || $isElementNode(node)) {
-        lines.push(serializeInline(node));
+      if ($isParagraphNode(node)) {
+        lines.push(alignPrefix(node) + serializeInline(node));
+        return;
       }
     };
     $getRoot().getChildren().forEach(walk);
@@ -493,7 +673,7 @@ export default function ChapterEditor({
   const editorConfig = useMemo(
     () => ({
       namespace: `writer-chapter-${chapterId}`,
-      nodes: [HeadingNode, ListNode, ListItemNode, ImageNode],
+      nodes: [HeadingNode, ListNode, ListItemNode, ImageNode, TableNode, TableCellNode, TableRowNode],
       theme: {
         heading: { h1: "editor-heading-h1", h2: "editor-heading-h2", h3: "editor-heading-h3" },
         paragraph: "editor-paragraph",
@@ -555,6 +735,7 @@ export default function ChapterEditor({
       <EditablePlugin enabled={editable} />
       <HistoryPlugin />
       <ListPlugin />
+      <TablePlugin />
       <ImageInsertPlugin />
       <div className="relative flex-1 overflow-y-auto bg-background-200/50 px-4 py-4">
         <RichTextPlugin

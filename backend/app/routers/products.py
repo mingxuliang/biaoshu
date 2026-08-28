@@ -6,12 +6,14 @@ import os
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, selectinload
 
 from ..audit import write_audit
 from ..auth import get_current_user
 from ..db import get_db
 from ..engines.product_dedup import mark_keep_both, merge_features, sha256_bytes
+from ..engines.product_extract import _delete_product_feature
+from ..engines.qualification_extract import looks_like_qualification
 from .. import storage
 from ..models import (
     ProductFeature,
@@ -74,9 +76,13 @@ def _size_label(size_bytes: int) -> str:
 
 
 def _library_counts(db: Session, lib: ProductLibrary) -> tuple[int, int, int, int]:
-    features = db.query(ProductFeature.id, ProductFeature.status).filter(ProductFeature.library_id == lib.id).all()
-    feature_count = len(features)
-    pending = sum(1 for f in features if f.status == "待审核")
+    roots = (
+        db.query(ProductFeature.id, ProductFeature.status)
+        .filter(ProductFeature.library_id == lib.id, ProductFeature.parent_id.is_(None))
+        .all()
+    )
+    feature_count = len(roots)
+    pending = sum(1 for f in roots if f.status == "待审核")
     image_count = (
         db.query(ProductFeatureImage.id)
         .join(ProductFeature, ProductFeatureImage.feature_id == ProductFeature.id)
@@ -114,7 +120,7 @@ def _image_to_out(img: ProductFeatureImage) -> ProductImageOut:
     )
 
 
-def _feature_to_out(feat: ProductFeature) -> ProductFeatureOut:
+def _feature_to_out(feat: ProductFeature, with_children: bool = True, with_evidence: bool = True) -> ProductFeatureOut:
     sources = []
     for row in feat.sources_json or []:
         if isinstance(row, dict):
@@ -125,6 +131,13 @@ def _feature_to_out(feat: ProductFeature) -> ProductFeatureOut:
     merge_status = feat.merge_status if feat.merge_status in ("新增", "并入已有", "疑似重复", "参数冲突") else "新增"
     kind = feat.kind if feat.kind in ("软件功能", "货物产品", "模块方案") else "软件功能"
     status = feat.status if feat.status in ("待审核", "已入库", "已停用") else "待审核"
+    children: list[ProductFeatureOut] = []
+    if with_children:
+        ordered = sorted(
+            feat.children or [],
+            key=lambda row: ((row.created_at.isoformat() if row.created_at else ""), row.name or ""),
+        )
+        children = [_feature_to_out(row, with_children=False, with_evidence=with_evidence) for row in ordered]
     return ProductFeatureOut(
         id=feat.id,
         libraryId=feat.library_id,
@@ -142,10 +155,12 @@ def _feature_to_out(feat: ProductFeature) -> ProductFeatureOut:
         mergeStatus=merge_status,  # type: ignore[arg-type]
         aliases=list(feat.aliases_json or []),
         sources=sources,
-        evidence=list(feat.evidence_json or []),
+        evidence=list(feat.evidence_json or []) if with_evidence else [],
         paramsConflict=list(feat.params_conflict_json or []),
         suspectedIds=list(feat.suspected_ids_json or []),
         images=[_image_to_out(img) for img in feat.images],
+        parentId=feat.parent_id or "",
+        children=children,
         updatedAt=_dt(feat.updated_at or feat.created_at),
     )
 
@@ -177,7 +192,10 @@ def _require_library(db: Session, library_id: str) -> ProductLibrary:
 def _require_feature(db: Session, feature_id: str) -> ProductFeature:
     feat = (
         db.query(ProductFeature)
-        .options(joinedload(ProductFeature.images))
+        .options(
+            selectinload(ProductFeature.images),
+            selectinload(ProductFeature.children).selectinload(ProductFeature.images),
+        )
         .filter(ProductFeature.id == feature_id)
         .first()
     )
@@ -300,12 +318,15 @@ def list_features(
     _require_library(db, library_id)
     rows = (
         db.query(ProductFeature)
-        .options(joinedload(ProductFeature.images))
-        .filter(ProductFeature.library_id == library_id)
+        .options(
+            selectinload(ProductFeature.images),
+            selectinload(ProductFeature.children).selectinload(ProductFeature.images),
+        )
+        .filter(ProductFeature.library_id == library_id, ProductFeature.parent_id.is_(None))
         .order_by(ProductFeature.updated_at.desc())
         .all()
     )
-    return [_feature_to_out(f) for f in rows]
+    return [_feature_to_out(f, with_evidence=False) for f in rows]
 
 
 @router.post("/product-libraries/{library_id}/features", response_model=ProductFeatureOut)
@@ -320,6 +341,15 @@ def create_feature(
     name = payload.name.strip()
     if not name:
         raise HTTPException(400, "请填写功能 / 产品名称")
+    if looks_like_qualification(name, payload.intro or ""):
+        raise HTTPException(400, "证照、合同复印件请放到资质证照库，产品库只收录功能点")
+    parent_id = (payload.parentId or "").strip() or None
+    if parent_id:
+        parent = db.get(ProductFeature, parent_id)
+        if not parent or parent.library_id != library_id:
+            raise HTTPException(400, "一级功能菜单不存在")
+        if parent.parent_id:
+            raise HTTPException(400, "只能挂在一级功能菜单下")
     feat = ProductFeature(
         library_id=library_id,
         name=name,
@@ -337,6 +367,7 @@ def create_feature(
         sources_json=[{"docId": "", "filename": "手工录入"}],
         evidence_json=[],
         locked_copy=False,
+        parent_id=parent_id,
     )
     db.add(feat)
     _touch_library(lib)
@@ -355,11 +386,18 @@ def patch_feature(
     require_perm(current_user, PERM_WRITER)
     feat = _require_feature(db, feature_id)
     data = payload.model_dump(exclude_unset=True)
+    next_name = feat.name
+    next_intro = feat.intro or ""
     if "name" in data:
-        name = (data["name"] or "").strip()
-        if not name:
+        next_name = (data["name"] or "").strip()
+        if not next_name:
             raise HTTPException(400, "请填写功能 / 产品名称")
-        feat.name = name
+    if "intro" in data:
+        next_intro = (data["intro"] or "").strip()
+    if ("name" in data or "intro" in data) and looks_like_qualification(next_name, next_intro):
+        raise HTTPException(400, "证照、合同复印件请放到资质证照库，产品库只收录功能点")
+    if "name" in data:
+        feat.name = next_name
     if "kind" in data and data["kind"]:
         feat.kind = data["kind"]
     if "module" in data:
@@ -381,6 +419,9 @@ def patch_feature(
         feat.status = data["status"]
         if data["status"] == "已入库" and feat.merge_status in ("疑似重复",):
             feat.merge_status = "新增"
+        if not feat.parent_id:
+            for child in feat.children or []:
+                child.status = data["status"]
     lib = db.get(ProductLibrary, feat.library_id)
     if lib:
         _touch_library(lib)
@@ -397,13 +438,10 @@ def delete_feature(
     require_perm(current_user, PERM_WRITER)
     feat = _require_feature(db, feature_id)
     lib = db.get(ProductLibrary, feat.library_id)
-    refs = [img.storage_path for img in feat.images]
-    db.delete(feat)
+    _delete_product_feature(db, feat)
     if lib:
         _touch_library(lib)
     db.commit()
-    for ref in refs:
-        storage.delete(ref)
     return {"ok": True}
 
 
@@ -464,8 +502,8 @@ async def upload_feature_images(
 ) -> ProductFeatureOut:
     require_perm(current_user, PERM_WRITER)
     feat = _require_feature(db, feature_id)
-    if len(feat.images) + len(files) > 8:
-        raise HTTPException(400, "最多上传 8 张附图")
+    if len(feat.images) + len(files) > 80:
+        raise HTTPException(400, "最多上传 80 张附图")
     cap_list = [c.strip() for c in captions.split("|")] if captions else []
     kind_list = [k.strip() for k in kinds.split("|")] if kinds else []
     existing = {img.sha256 for img in feat.images if img.sha256}
@@ -580,7 +618,7 @@ async def upload_source_docs(
             storage_path=key,
             size_bytes=len(content),
             status="queued",
-            note="排队抽取功能点与附图…",
+            note="排队抽取功能点；证照将同步到资质库…",
         )
         db.add(doc)
         db.flush()

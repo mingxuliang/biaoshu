@@ -1,6 +1,6 @@
 import { forwardRef, useImperativeHandle, useRef, useState } from "react";
 import type { OutlineNode } from "@/lib/api";
-import { isOriginalFormTitle } from "@/lib/outlineNum";
+import { isSkipAiWrite } from "@/lib/outlineNum";
 import StatusBadge from "../../components/StatusBadge";
 import ChapterEditor, { type ChapterEditorHandle } from "./ChapterEditor";
 
@@ -27,7 +27,7 @@ const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(function Edi
   const [fontFamily, setFontFamily] = useState("宋体");
   const chapterRef = useRef<ChapterEditorHandle | null>(null);
   const wordCount = content.trim() ? Math.round(content.replace(/\s/g, "").length) : 0;
-  const useOriginal = !!chapter && (chapter.status === "用原文" || isOriginalFormTitle(chapter.title, chapter.num));
+  const useOriginal = !!chapter && isSkipAiWrite(chapter);
 
   useImperativeHandle(
     ref,
@@ -88,7 +88,7 @@ const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(function Edi
       {useOriginal && (
         <div className="flex items-start gap-2 border-b border-background-300 bg-secondary-50 px-4 py-2 text-xs leading-relaxed text-foreground-600">
           <i className="ri-file-text-line mt-0.5 shrink-0 text-sm text-secondary-600"></i>
-          <span>本章为招标书已给出的固定格式文件，请直接使用招标书原文填写后打印签字，无需 AI 撰写。</span>
+          <span>以下为招标书原文格式，请按空填写后打印签字，无需 AI 改写。</span>
         </div>
       )}
 

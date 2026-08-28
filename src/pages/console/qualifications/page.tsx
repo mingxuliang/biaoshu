@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
 import Toast from "../components/Toast";
+import PaginationBar from "../components/PaginationBar";
 import StatusBadge from "../components/StatusBadge";
 import AuthImage from "../components/AuthImage";
 import { useAuth } from "@/context/AuthContext";
@@ -61,6 +62,7 @@ interface ToastState {
   visible: boolean;
 }
 
+const PAGE_SIZE = 9;
 const emptyForm = {
   kind: "cert" as QualificationKind,
   name: "",
@@ -79,7 +81,9 @@ export default function QualificationsPage() {
   const [pageTab, setPageTab] = useState<PageTab>("library");
   const [activeTab, setActiveTab] = useState<TabKey>("all");
   const [keyword, setKeyword] = useState("");
+  const [page, setPage] = useState(1);
   const [createOpen, setCreateOpen] = useState(false);
+  const [editing, setEditing] = useState<QualificationAsset | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [parsing, setParsing] = useState(false);
@@ -146,9 +150,23 @@ export default function QualificationsPage() {
     return list;
   }, [items, activeTab, keyword]);
 
+  useEffect(() => {
+    setPage(1);
+  }, [keyword, activeTab]);
+
+  useEffect(() => {
+    const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+    setPage((p) => Math.min(p, totalPages));
+  }, [filtered.length]);
+
+  const paged = useMemo(() => {
+    const start = (page - 1) * PAGE_SIZE;
+    return filtered.slice(start, start + PAGE_SIZE);
+  }, [filtered, page]);
+
   const expiring = items.filter((q) => q.status === "将到期");
 
-  const handleCreate = async (e: FormEvent) => {
+  const handleSave = async (e: FormEvent) => {
     e.preventDefault();
     if (!token) return;
     if (!form.name.trim()) {
@@ -157,26 +175,63 @@ export default function QualificationsPage() {
     }
     setSubmitting(true);
     try {
-      await createQualification(token, {
-        kind: form.kind,
-        name: form.name.trim(),
-        level: form.level.trim(),
-        number: form.number.trim(),
-        validUntil: form.validUntil.trim() || "长期",
-        owner: form.owner.trim(),
-        detail: form.detail.trim(),
-        file,
-      });
+      if (editing) {
+        await updateQualification(token, editing.id, {
+          kind: form.kind,
+          name: form.name.trim(),
+          level: form.level.trim(),
+          number: form.number.trim(),
+          validUntil: form.validUntil.trim() || "长期",
+          owner: form.owner.trim(),
+          detail: form.detail.trim(),
+          file,
+        });
+        showToast("已保存");
+      } else {
+        await createQualification(token, {
+          kind: form.kind,
+          name: form.name.trim(),
+          level: form.level.trim(),
+          number: form.number.trim(),
+          validUntil: form.validUntil.trim() || "长期",
+          owner: form.owner.trim(),
+          detail: form.detail.trim(),
+          file,
+        });
+        showToast("证照已录入");
+      }
       setCreateOpen(false);
+      setEditing(null);
       setForm(emptyForm);
       setFile(null);
       await reload();
-      showToast("证照已录入");
     } catch (err) {
-      showToast(err instanceof ApiError ? err.message : "录入失败", "error");
+      showToast(err instanceof ApiError ? err.message : editing ? "保存失败" : "录入失败", "error");
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const openCreate = () => {
+    setEditing(null);
+    setForm(emptyForm);
+    setFile(null);
+    setCreateOpen(true);
+  };
+
+  const openEdit = (item: QualificationAsset) => {
+    setEditing(item);
+    setForm({
+      kind: item.kind,
+      name: item.name,
+      level: item.level,
+      number: item.number,
+      validUntil: item.validUntil,
+      owner: item.owner,
+      detail: item.detail,
+    });
+    setFile(null);
+    setCreateOpen(true);
   };
 
   const handleParseUpload = async (e: FormEvent) => {
@@ -268,10 +323,10 @@ export default function QualificationsPage() {
     }
   };
 
-  const handleResolve = async (item: QualificationAsset, action: "merge" | "keep_both") => {
-    if (!token || !item.suspectedIds?.[0]) return;
+  const handleResolve = async (item: QualificationAsset, otherId: string, action: "merge" | "keep_both") => {
+    if (!token || !otherId) return;
     try {
-      await resolveQualificationPair(token, item.id, item.suspectedIds[0], action);
+      await resolveQualificationPair(token, item.id, otherId, action);
       await reload();
       showToast(action === "merge" ? "已合并为一条" : "已拆开为两条");
     } catch (err) {
@@ -309,7 +364,7 @@ export default function QualificationsPage() {
               </button>
               <button
                 type="button"
-                onClick={() => setCreateOpen(true)}
+                onClick={openCreate}
                 className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-4 text-sm font-medium text-background-50 transition-colors hover:bg-primary-600"
               >
                 <i className="ri-add-line text-sm"></i>
@@ -413,8 +468,9 @@ export default function QualificationsPage() {
       </div>
 
       {pageTab === "library" ? (
+        <>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {filtered.map((item) => (
+          {paged.map((item) => (
             <div key={item.id} className="group rounded-lg border border-background-300 bg-background-100 p-4 transition-all hover:border-primary-300/60">
               <div className="flex items-start gap-3">
                 {item.images?.[0]?.url ? (
@@ -455,7 +511,7 @@ export default function QualificationsPage() {
                 </div>
               )}
               {item.fieldConflict && item.fieldConflict.length > 0 && (
-                <p className="mt-2 text-[10px] text-accent-700">信息冲突：{item.fieldConflict[0]}</p>
+                <p className="mt-2 text-[10px] text-accent-700">信息冲突：{item.fieldConflict.join("；")}</p>
               )}
               <p className="mt-3 line-clamp-2 text-xs leading-relaxed text-foreground-600">{item.detail}</p>
               {item.images && item.images.length > 0 && (
@@ -521,24 +577,31 @@ export default function QualificationsPage() {
                   {item.validUntil === "长期" ? "长期有效" : `有效期至 ${item.validUntil}`}
                 </span>
                 <div className="flex items-center gap-1">
-                  {canEditQual && item.mergeStatus === "疑似重复" && item.suspectedIds?.[0] && (
-                    <>
-                      <button
-                        type="button"
-                        className="flex h-7 cursor-pointer items-center rounded-md px-1.5 text-[10px] font-medium text-primary-600 hover:bg-primary-50"
-                        onClick={() => void handleResolve(item, "merge")}
-                      >
-                        合并
-                      </button>
-                      <button
-                        type="button"
-                        className="flex h-7 cursor-pointer items-center rounded-md px-1.5 text-[10px] font-medium text-foreground-600 hover:bg-background-200"
-                        onClick={() => void handleResolve(item, "keep_both")}
-                      >
-                        就是两条
-                      </button>
-                    </>
-                  )}
+                  {canEditQual &&
+                    (item.suspectedIds || []).map((otherId) => {
+                      const other = items.find((q) => q.id === otherId);
+                      if (!other) return null;
+                      return (
+                        <span key={otherId} className="mr-1 inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            title={`与「${other.name}」合并`}
+                            className="flex h-7 cursor-pointer items-center rounded-md px-1.5 text-[10px] font-medium text-primary-600 hover:bg-primary-50"
+                            onClick={() => void handleResolve(item, otherId, "merge")}
+                          >
+                            合并{other.name ? `·${other.name.slice(0, 6)}` : ""}
+                          </button>
+                          <button
+                            type="button"
+                            title={`与「${other.name}」拆开`}
+                            className="flex h-7 cursor-pointer items-center rounded-md px-1.5 text-[10px] font-medium text-foreground-600 hover:bg-background-200"
+                            onClick={() => void handleResolve(item, otherId, "keep_both")}
+                          >
+                            就是两条
+                          </button>
+                        </span>
+                      );
+                    })}
                   {canEditQual && item.reviewStatus === "待审核" && (
                     <button
                       type="button"
@@ -568,6 +631,16 @@ export default function QualificationsPage() {
                   {canEditQual && (
                     <button
                       type="button"
+                      title="编辑"
+                      onClick={() => openEdit(item)}
+                      className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-foreground-500 transition-all hover:scale-110 hover:bg-primary-50 hover:text-primary-600"
+                    >
+                      <i className="ri-pencil-line text-sm"></i>
+                    </button>
+                  )}
+                  {canEditQual && (
+                    <button
+                      type="button"
                       title="删除"
                       onClick={() => void handleDelete(item)}
                       className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-foreground-500 transition-all hover:scale-110 hover:bg-red-50 hover:text-red-600"
@@ -588,6 +661,12 @@ export default function QualificationsPage() {
             </div>
           )}
         </div>
+        {filtered.length > 0 && (
+          <div className="mt-3 overflow-hidden rounded-lg border border-background-300 bg-background-100">
+            <PaginationBar total={filtered.length} page={page} pageSize={PAGE_SIZE} onPageChange={setPage} />
+          </div>
+        )}
+        </>
       ) : (
         <div className="overflow-hidden rounded-lg border border-background-300 bg-background-100">
           <div className="flex items-center justify-between border-b border-background-300 bg-background-50 px-4 py-3">
@@ -707,11 +786,18 @@ export default function QualificationsPage() {
 
       <Modal
         open={createOpen}
-        onClose={() => setCreateOpen(false)}
-        title="录入证照 / 合同 / 财务"
-        subtitle="请手工填写证号、等级与有效期。财务请注明报表截止日；过期仍可保留使用。"
+        onClose={() => {
+          setCreateOpen(false);
+          setEditing(null);
+        }}
+        title={editing ? "编辑证照 / 合同 / 财务" : "录入证照 / 合同 / 财务"}
+        subtitle={
+          editing
+            ? "可修正证号、持有人、有效期与类型。营业执照全公司只保留一条。"
+            : "请手工填写证号、等级与有效期。财务请注明报表截止日；过期仍可保留使用。"
+        }
       >
-        <form onSubmit={handleCreate} className="space-y-4">
+        <form onSubmit={handleSave} className="space-y-4">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
               <label className={labelCls} htmlFor="q-kind">
@@ -828,7 +914,10 @@ export default function QualificationsPage() {
           <div className="flex items-center justify-end gap-2 pt-2">
             <button
               type="button"
-              onClick={() => setCreateOpen(false)}
+              onClick={() => {
+                setCreateOpen(false);
+                setEditing(null);
+              }}
               className="h-9 cursor-pointer whitespace-nowrap rounded-md border border-background-300 px-4 text-sm font-medium text-foreground-600 transition-colors hover:bg-background-200"
             >
               取消

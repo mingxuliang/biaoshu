@@ -186,7 +186,7 @@ def load_review_context(db: Session, project_id: str, current_path: str | None =
         except Exception:
             ctx.tender_text = ""
 
-    for item in db.query(QualificationAsset).all():
+    for item in db.query(QualificationAsset).filter(QualificationAsset.review_status == "已入库").all():
         blob = " ".join(
             [
                 item.kind or "",

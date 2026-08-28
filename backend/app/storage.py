@@ -220,5 +220,8 @@ def http_response(
     return Response(
         content=data,
         media_type=media,
-        headers={"Content-Disposition": f"{disposition}; filename=\"file\"; filename*=UTF-8''{encoded}"},
+        headers={
+            "Content-Disposition": f"{disposition}; filename=\"file\"; filename*=UTF-8''{encoded}",
+            "Cache-Control": "private, max-age=86400",
+        },
     )

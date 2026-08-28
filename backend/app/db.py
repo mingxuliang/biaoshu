@@ -36,6 +36,16 @@ def ensure_schema() -> None:
                 "ALTER TABLE writer_drafts ADD COLUMN IF NOT EXISTS selected_product_library_id VARCHAR"
             )
         )
+        conn.execute(text("ALTER TABLE product_features ADD COLUMN IF NOT EXISTS parent_id VARCHAR"))
+        conn.execute(text("ALTER TABLE knowledge_slices ADD COLUMN IF NOT EXISTS parent_id VARCHAR"))
+        conn.execute(text("ALTER TABLE knowledge_slices ADD COLUMN IF NOT EXISTS level VARCHAR DEFAULT '一级'"))
+        conn.execute(
+            text(
+                "UPDATE qualification_assets SET kind = 'cert' "
+                "WHERE kind = 'credit' AND ("
+                "name ~ '荣誉|奖状|获奖' OR coalesce(detail, '') ~ '荣誉|奖状|获奖')"
+            )
+        )
 
 
 def get_db():

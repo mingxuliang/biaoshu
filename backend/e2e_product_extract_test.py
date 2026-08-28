@@ -63,11 +63,23 @@ def multipart(fields: dict[str, str], files: list[tuple[str, str, bytes]]) -> tu
 def make_tech_docx(title: str, extra_heading: str | None = None) -> bytes:
     document = docx.Document()
     document.add_heading(title, level=1)
-    document.add_heading("系统功能", level=1)
-    document.add_heading("证书颁发", level=2)
+    document.add_heading("3.3.4 平台核心功能响应演示", level=1)
+    document.add_heading("3.3.4.2 培训管理", level=2)
+    document.add_paragraph("培训管理覆盖签到、任务推送与导师带教，是平台一级功能菜单。")
+    document.add_heading("3.3.4.2.1 签到方式", level=3)
+    document.add_paragraph("支持扫码签到、人脸签到与补签审核，培训班可按场次配置签到规则。")
+    document.add_heading("3.3.4.2.2 任务推送", level=3)
+    document.add_paragraph("按班级推送学习任务并跟踪完成进度，逾期自动提醒。")
+    document.add_heading("3.3.4.2.5 导师带教", level=3)
+    document.add_paragraph("为新员工指定导师，记录带教计划、面谈纪要与出师评估。")
+    document.add_heading("3.3.4.3 证书颁发", level=2)
     document.add_paragraph("支持按培训班批量颁发电子证书，覆盖结业证、合格证模板。")
-    document.add_heading("组织变更数据修改", level=2)
+    document.add_heading("3.3.4.4 组织变更数据修改", level=2)
     document.add_paragraph("组织架构调整后同步修改人员与班级基础数据。")
+    document.add_heading("2023年荣誉证书", level=2)
+    document.add_paragraph("获得省级数字化培训平台优秀案例荣誉证书，颁奖单位为省教育厅。")
+    document.add_heading("合同复印件一期 (570万)", level=2)
+    document.add_paragraph("合同金额 570 万元，服务期限 2022-01-01 至 2023-12-31。")
     if extra_heading:
         document.add_heading(extra_heading, level=2)
         document.add_paragraph(f"{extra_heading}用于查询已颁发证书的状态与下载记录。")
@@ -132,9 +144,23 @@ def main() -> None:
     assert status == 200, body
     features = json.loads(body)
     names = {f["name"] for f in features}
+    train = next((f for f in features if "培训管理" in f["name"]), None)
+    assert train is not None, features
+    child_names = {c["name"] for c in train.get("children") or []}
+    assert any("签到" in n for n in child_names), train
+    assert any("任务" in n or "导师" in n or "带教" in n for n in child_names), train
+    assert not any("签到" in n for n in names), names
     assert any("证书" in n or "组织" in n for n in names), features
+    assert not any("荣誉证书" in n or "合同复印件" in n for n in names), names
     assert all(f["status"] == "待审核" for f in features), features
-    print("pending features", names)
+    print("pending menus", names, "train children", child_names)
+
+    status, body = call("GET", "/api/qualifications", token=token)
+    assert status == 200, body
+    quals = json.loads(body)
+    qual_names = {q["name"] for q in quals}
+    assert any("荣誉证书" in n or "合同复印件" in n for n in qual_names), qual_names
+    print("synced qualifications", [n for n in qual_names if "荣誉" in n or "合同" in n])
 
     second = make_tech_docx("成都地铁培训系统技术标-修订", extra_heading="证书查询")
     payload, ctype = multipart({}, [("files", "chengdu-tech-v2.docx", second)])

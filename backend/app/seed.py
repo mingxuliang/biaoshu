@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from .auth import hash_password
 from .engines import rules_data
+from .llm_catalog import seed_llm_catalog
 from .models import (
     CatalogRule,
     FillerWordRule,
@@ -210,3 +211,7 @@ def seed_rules(db: Session) -> None:
                 setattr(row, field, value)
 
     db.commit()
+
+
+def seed_llm(db: Session) -> None:
+    seed_llm_catalog(db)

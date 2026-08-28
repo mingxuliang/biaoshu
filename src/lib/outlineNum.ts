@@ -116,6 +116,20 @@ export function isOriginalFormTitle(title: string, num?: string): boolean {
   );
 }
 
+export function isBusinessSkipChapter(node: Pick<OutlineNode, "title" | "num" | "part">): boolean {
+  if (isOriginalFormTitle(node.title, node.num) || node.part === "form") return false;
+  if (node.part === "tech") return false;
+  if (node.part === "business") return true;
+  const t = stripTitleNum(node.title, node.num).replace(/\s+/g, "");
+  return /商务标|商务部分|商务文件|资格审查|资格证明|资格文件|投标函|法定代表人|企业资质|营业执照|财务报告|类似业绩|投标文件组成|响应文件组成|响应文件格式|投标文件格式/.test(
+    t,
+  );
+}
+
+export function isSkipAiWrite(node: Pick<OutlineNode, "title" | "num" | "part" | "status">): boolean {
+  return node.status === "用原文" || isOriginalFormTitle(node.title, node.num) || isBusinessSkipChapter(node);
+}
+
 export function compactOutlineTitles(nodes: OutlineNode[]): OutlineNode[] {
   const compacted = nodes.map((n) => ({
     ...n,

@@ -353,7 +353,7 @@ def _attach_following_text(paragraphs: list[dict], headings: list[dict]) -> None
         if extra:
             prev = (by_index[h_idx].get("requirement") or "").strip()
             merged = f"{prev}\n{extra}".strip() if prev else extra
-            by_index[h_idx]["requirement"] = merged[:3000]
+            by_index[h_idx]["requirement"] = merged[:50000]
 
 
 def _contains_any(title: str, needles: tuple[str, ...]) -> bool:

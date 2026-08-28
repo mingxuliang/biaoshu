@@ -12,6 +12,7 @@ from ..db import get_db
 from ..engines import e_writer
 from ..engines.ark_image import ArkImageError, generate_and_save
 from ..engines.docx_extract import extract_paragraphs
+from ..engines.tender_form import extract_forms_from_storage, needs_form_recopy
 from ..engines.writer_export import chapters_to_docx
 from .. import storage
 from ..models import (
@@ -39,7 +40,7 @@ from ..schemas import (
     WriterImageOut,
     WriterJobOut,
 )
-from ..tasks import run_chapter_generate_task, run_outline_generate_task
+from ..tasks import run_chapter_generate_task, run_outline_generate_task, run_product_match_task
 
 router = APIRouter(prefix="/api", tags=["writer"])
 
@@ -72,6 +73,67 @@ def _require_writer_draft(db: Session, user: User, draft_id: str) -> WriterDraft
     return draft
 
 
+def _project_tender_path(db: Session, project_id: str) -> str | None:
+    checklist = (
+        db.query(EvaluationChecklist)
+        .filter(EvaluationChecklist.project_id == project_id)
+        .order_by(EvaluationChecklist.version.desc())
+        .first()
+    )
+    doc = None
+    if checklist and checklist.tender_document_id:
+        doc = db.get(TenderDocument, checklist.tender_document_id)
+    if not doc:
+        doc = (
+            db.query(TenderDocument)
+            .filter(TenderDocument.project_id == project_id)
+            .order_by(TenderDocument.uploaded_at.desc())
+            .first()
+        )
+    if doc and doc.storage_path and storage.exists(doc.storage_path):
+        return doc.storage_path
+    return None
+
+
+def _backfill_business_originals(db: Session, draft: WriterDraft) -> None:
+    """已有草稿若商务标仍是占位说明，打开时补抽招标书原文。"""
+    outline = list(draft.outline_json or [])
+    if not outline:
+        return
+    contents = dict(draft.chapter_contents_json or {})
+    need = False
+    titles: list[str] = []
+    for n in outline:
+        if not isinstance(n, dict):
+            continue
+        title = str(n.get("title") or "")
+        kind = e_writer.chapter_kind(
+            title, n.get("part"), str(n.get("idea") or ""), str(n.get("requirement") or "")
+        )
+        if kind not in ("form", "business") and not e_writer.is_original_form_title(title):
+            continue
+        titles.append(title)
+        if needs_form_recopy(contents.get(n.get("id") or "") or ""):
+            need = True
+    if not need or not titles:
+        return
+    tender_path = _project_tender_path(db, draft.project_id)
+    if not tender_path:
+        return
+    try:
+        originals = extract_forms_from_storage(tender_path, titles, draft.model_id)
+    except Exception:  # noqa: BLE001 —— 补抽失败不影响打开草稿
+        return
+    if not e_writer.fill_business_originals(outline, contents, originals):
+        return
+    draft.outline_json = outline
+    flag_modified(draft, "outline_json")
+    draft.chapter_contents_json = contents
+    flag_modified(draft, "chapter_contents_json")
+    db.commit()
+    db.refresh(draft)
+
+
 @router.get("/projects/{project_id}/writer-draft", response_model=WriterDraftOut)
 def get_or_create_writer_draft(
     project_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
@@ -83,6 +145,8 @@ def get_or_create_writer_draft(
         db.add(draft)
         db.commit()
         db.refresh(draft)
+    else:
+        _backfill_business_originals(db, draft)
     return _draft_to_out(draft)
 
 
@@ -148,6 +212,25 @@ def create_outline_job(
 
     run_outline_generate_task.delay(job.id)
 
+    return _job_to_out(job)
+
+
+@router.post("/writer-drafts/{draft_id}/product-match-jobs", response_model=WriterJobOut)
+def create_product_match_job(
+    draft_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> WriterJobOut:
+    draft = _require_writer_draft(db, current_user, draft_id)
+    if not draft.selected_product_library_id:
+        raise HTTPException(400, "请先在标书设置中选择产品功能库")
+    if not (draft.outline_json or []):
+        raise HTTPException(400, "请先生成应标目录")
+    job = WriterJob(draft_id=draft_id, kind="product-match", status="queued")
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    run_product_match_task.delay(job.id)
     return _job_to_out(job)
 
 

@@ -8,7 +8,7 @@ import json
 import logging
 import re
 
-from .llm import LlmError, chat_complete
+from .llm import LlmError, chat_complete, is_vision_model
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +141,10 @@ ORIGINAL_FORM_NOTE = (
     "系统不展开目录、不撰写正文。"
 )
 ORIGINAL_FORM_IDEA_PREFIX = "【按招标书原文格式填写后打印签字，不展开目录、不撰写正文】"
+BUSINESS_SKIP_NOTE = (
+    "商务标本章无需撰写应标正文。承诺书、报价文件、偏差表等固定格式件请直接使用招标书原文填写后打印签字。"
+)
+BUSINESS_SKIP_IDEA_PREFIX = "【商务标无需应答，不撰写应标正文】"
 
 # 按「文件类别」识别，不用某份招标书的具体章节名。
 _ORIGINAL_FORM_TITLE = re.compile(
@@ -149,6 +153,18 @@ _ORIGINAL_FORM_TITLE = re.compile(
     r"报价文件|报价表|开标一览|分项报价|投标报价|报价部分|"
     r"商务.{0,8}技术.{0,6}偏差|商务偏差|技术偏差|偏差表)"
 )
+_BUSINESS_SKIP_TITLE = re.compile(
+    r"商务标|商务部分|商务文件|商务响应|"
+    r"资格审查|资格预审|资格证明|资格文件|"
+    r"投标函|法定代表人|"
+    r"企业资质|资质证书|营业执照|资质文件|"
+    r"财务报告|财务报表|审计报告|财务状况|"
+    r"类似业绩|业绩证明|"
+    r"投标文件组成|响应文件组成|投标文件的组成|响应文件的组成|"
+    r"响应文件格式|投标文件格式"
+)
+_TECH_VOLUME_TITLE = re.compile(r"技术方案$|技术部分$|技术标$|技术文件$|技术响应$")
+_FORMAT_DIR_HINT = re.compile(r"按.{0,40}目录编制|逐条进行描述|逐条描述|逐条响应")
 
 
 def is_original_form_title(title: str) -> bool:
@@ -173,13 +189,92 @@ def original_form_idea(title: str, existing: str = "", tender_req: str = "") -> 
     return f"{head}请直接使用招标书中「{title}」的固定格式原文填写、打印并签字。"
 
 
-def original_form_markdown(title: str, idea: str = "") -> str:
-    body = (idea or "").strip()
-    body = re.sub(rf"^{re.escape(ORIGINAL_FORM_IDEA_PREFIX)}\s*", "", body).strip()
-    parts = [f"## {title or '固定格式文件'}", "", ORIGINAL_FORM_NOTE]
-    if body:
-        parts.extend(["", body])
-    return "\n".join(parts)
+def original_form_markdown(title: str, idea: str = "", original: str = "") -> str:
+    text = (original or "").strip()
+    if text:
+        return text
+    extra = _requirement_from_idea(idea)
+    if extra and extra not in {title or "", ""}:
+        from .tender_toc import strip_heading_prefix
+
+        if extra != strip_heading_prefix(title or ""):
+            return extra
+    return f"{title or '固定格式文件'}\n\n{ORIGINAL_FORM_NOTE}"
+
+
+def business_skip_markdown(title: str, original: str = "") -> str:
+    text = (original or "").strip()
+    if text:
+        return text
+    return f"{title or '商务标'}\n\n{BUSINESS_SKIP_NOTE}"
+
+
+def fill_business_originals(
+    outline: list[dict],
+    contents: dict[str, str],
+    originals_by_title: dict[str, str],
+) -> bool:
+    """把招标书原文写入商务标/固定格式章。已有非占位正文时不覆盖。"""
+    from .tender_form import needs_form_recopy
+
+    changed = False
+    for n in outline:
+        if not isinstance(n, dict):
+            continue
+        title = str(n.get("title") or "")
+        kind = chapter_kind(title, n.get("part"), str(n.get("idea") or ""), str(n.get("requirement") or ""))
+        if kind not in ("form", "business") and not is_original_form_title(title):
+            continue
+        original = (originals_by_title.get(title) or "").strip()
+        existing = contents.get(n["id"]) or ""
+        if existing and not needs_form_recopy(existing):
+            continue
+        if kind == "business" and not is_original_form_title(title):
+            body = business_skip_markdown(title, original)
+        else:
+            body = original_form_markdown(title, str(n.get("idea") or ""), original)
+        if not body or body == existing:
+            continue
+        contents[n["id"]] = body
+        n["status"] = "用原文"
+        n["part"] = "form" if (kind == "form" or is_original_form_title(title)) else "business"
+        n["words"] = len(body.replace(" ", "").replace("\n", ""))
+        changed = True
+    return changed
+
+
+def chapter_kind(
+    title: str,
+    part: str | None = None,
+    idea: str = "",
+    requirement: str = "",
+) -> str:
+    """form=签字件原文；business=商务标不应答；tech=先列原始需求再写解决方案。"""
+    if is_original_form_title(title) or part == "form":
+        return "form"
+    from .tender_toc import strip_heading_prefix
+
+    t = re.sub(r"\s+", "", strip_heading_prefix(title or ""))
+    blob = f"{idea or ''}\n{requirement or ''}"
+    if _BUSINESS_SKIP_TITLE.search(t):
+        return "business"
+    if _TECH_VOLUME_TITLE.search(t) and (
+        _FORMAT_DIR_HINT.search(blob) or not (requirement or "").strip()
+    ):
+        return "business"
+    if part in ("business", "tech"):
+        return part
+    if (requirement or "").strip() or (idea or "").startswith("应实现：") or "应完整响应" in (idea or ""):
+        return "tech"
+    return "tech"
+
+
+def _requirement_from_idea(idea: str) -> str:
+    text = (idea or "").strip()
+    for prefix in ("应实现：", "不得漏项：", "招标书原文："):
+        if prefix in text:
+            return text.split(prefix, 1)[-1].strip()
+    return ""
 
 
 def _collapse_original_form_chapters(nodes: list[dict], tender_toc: dict | None = None) -> None:
@@ -204,9 +299,21 @@ CHAPTER_SYSTEM_PROMPT = """你是资深投标文件撰写专家，请围绕给�
 3. 语言正式、专业，符合中国大陆招投标文件的行文习惯；
 4. 编写思路里列出的「应实现」功能点必须逐条响应；标注「应覆盖招标需求全文」的条款必须全部写入正文，不得合并漏项或改成空泛描述；
 5. 若提供了关联评分点或必响应条款，正文应体现针对性响应，但不要逐字复制原文；
-6. 若提供了参考知识库资料，应借鉴其思路、结构与做法并结合本项目改写；需要架构图/流程图处写一行【此处插入图：简述】，不要编造图片 URL；
-7. 若提供了「本公司已审核产品能力」，正文必须据此组句，只能写已列出的能力与参数，禁止编造未列出的功能、指标或截图；无匹配能力时必须写一行【能力缺口：本章招标需求在产品库中无对应功能点】，不要用套话填满；
-8. 只返回正文内容本身，不要包含任何解释说明，也不要用 JSON 包装。
+6. 若提供了知识库/产品功能库/资质证照库整包素材：必须通读全部正文、参数、表格与原图，禁止只看摘要或丢掉任一张图、任一段文字；应借鉴其结构与信息并结合本项目改写。原图已按编号给出，请在对应位置写【此处插入图：1】【此处插入图：2】，不要编造图片 URL；未用到的图也要在章末按编号补齐，不允许丢失。
+7. 若提供了「本公司已审核产品能力」，正文必须据此组句，只能写已列出的能力与参数，禁止编造未列出的功能、指标或截图；配图必须按附图清单编号全部插入；无匹配能力时必须写一行【能力缺口：本章招标需求在产品库中无对应功能点】，不要用套话填满；
+8. 若提供了「本公司已入库资质材料」，只能引用列出的证号、持有人与有效期，禁止编造未入库的证书；扫描件必须按附图清单编号全部插入，不要编造图片 URL；
+9. 只返回正文内容本身，不要包含任何解释说明，也不要用 JSON 包装。
+"""
+
+TECH_SOLUTION_SYSTEM = """你是资深投标文件撰写专家。本章是技术标对标条款：招标「原始需求」由系统插入，你只写「解决方案」。
+写作要求：
+1. 只输出解决方案正文，不要写「原始需求」标题或抄录招标原文；不要输出代码围栏；标题只用 ## 和 ###；
+2. 必须针对本章招标需求逐条应答，不得漏项、不得改成空泛描述；
+3. 解决方案必须使用用户勾选的产品功能库素材（参数、应标原文、原图），只能写已列出的能力，禁止编造未列出的功能、指标或截图；
+4. 原图按附图清单编号在对应位置写【此处插入图：1】【此处插入图：2】，不要编造图片 URL；未用到的图也要在方案末按编号补齐，不允许丢失；
+5. 无匹配产品能力时写一行【能力缺口：本章招标需求在产品库中无对应功能点】，不要用套话填满；
+6. 若同时提供了知识库整包，可借鉴其结构但以产品能力为准；
+7. 只返回解决方案本身，不要解释。
 """
 
 
@@ -615,9 +722,19 @@ def _ensure_children(node: dict) -> list:
     return kids
 
 
+def _mark_tree_part(node: dict, part: str) -> None:
+    node["part"] = part
+    kids = node.get("children")
+    if isinstance(kids, list):
+        for child in kids:
+            if isinstance(child, dict):
+                _mark_tree_part(child, part)
+
+
 def _attach_source_node(host: dict, source: dict) -> None:
     from .tender_toc import strip_heading_prefix
 
+    _mark_tree_part(source, "tech")
     kids = _ensure_children(host)
     title = strip_heading_prefix(str(source.get("title") or ""))
     existing = {strip_heading_prefix(str(c.get("title") or "")) for c in kids if isinstance(c, dict)}
@@ -698,6 +815,7 @@ def _heading_index_items(toc: dict | None) -> list[dict]:
                     "core": re.sub(r"\s+", "", title),
                     "index": h.get("index"),
                     "req": (h.get("requirement") or "").strip(),
+                    "part": "tech" if key == "tech" else "business",
                 }
             )
     return items
@@ -757,7 +875,15 @@ def _attach_tender_refs(nodes: list[dict], toc: dict | None, score_rules: list[d
             if hit:
                 if isinstance(hit.get("index"), int):
                     n["sourceIndex"] = hit["index"]
-                req = hit.get("req") or ""
+                req = (hit.get("req") or "").strip()
+                existing_req = (n.get("requirement") or "").strip()
+                if len(req) > len(existing_req):
+                    n["requirement"] = req
+                elif not existing_req:
+                    n["requirement"] = req
+                hit_part = hit.get("part")
+                if n.get("part") != "tech" and hit_part:
+                    n["part"] = hit_part
                 if req:
                     n["idea"] = f"【对应招标「{hit['title']}」】应完整响应，不得漏项：{req}"[:8000]
                 else:
@@ -776,6 +902,36 @@ def _attach_tender_refs(nodes: list[dict], toc: dict | None, score_rules: list[d
     walk(nodes)
 
 
+def _user_content_with_images(text: str, knowledge_images: list[dict] | None, model_id: str | None):
+    """豆包可读原图；DeepSeek 仍用全文+附图清单。原图均来自 MinIO。"""
+    images = knowledge_images or []
+    if not images or not is_vision_model(model_id):
+        return text
+    parts: list[dict] = [{"type": "text", "text": text}]
+    for i, img in enumerate(images, start=1):
+        b64 = img.get("b64") or ""
+        mime = img.get("mime") or "image/png"
+        if not b64:
+            continue
+        caption = img.get("caption") or img.get("heading") or "原文附图"
+        parts.append({"type": "text", "text": f"\n原图{i}「{caption}」："})
+        parts.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"},
+            }
+        )
+    return parts
+
+
+def _wrap_tech_chapter(requirement: str, solution: str) -> str:
+    body = sanitize_chapter_markdown(solution)
+    body = re.sub(r"^##\s*原始需求[\s\S]*?(?=^##\s*解决方案|\Z)", "", body, flags=re.M).strip()
+    body = re.sub(r"^##\s*解决方案\s*", "", body, flags=re.M).strip()
+    req = (requirement or "").strip() or "（本章未抽取到招标原文，请对照招标文件补充。）"
+    return f"## 原始需求\n\n{req}\n\n## 解决方案\n\n{body}".strip()
+
+
 def generate_chapter_content(
     project_name: str,
     chapter_title: str,
@@ -787,40 +943,77 @@ def generate_chapter_content(
     model_id: str | None = None,
     product_features: list[dict] | None = None,
     product_library_name: str | None = None,
+    qualification_assets: list[dict] | None = None,
+    knowledge_images: list[dict] | None = None,
+    part: str | None = None,
+    requirement: str | None = None,
 ) -> str:
     """生成单章正文。失败或未配置 Key 时返回提示性占位文本，不抛错。"""
-    if is_original_form_title(chapter_title):
+    kind = chapter_kind(chapter_title, part, chapter_idea, requirement or "")
+    if kind == "form":
         return original_form_markdown(chapter_title, chapter_idea)
+    if kind == "business":
+        return business_skip_markdown(chapter_title)
+
+    req_text = (requirement or "").strip() or _requirement_from_idea(chapter_idea)
+    prompt = _build_chapter_context(
+        project_name,
+        chapter_title,
+        chapter_idea,
+        dimension_detail,
+        must_respond_context,
+        knowledge_snippets,
+        writing_prefs,
+        product_features,
+        product_library_name,
+        qualification_assets,
+        knowledge_images,
+        req_text,
+        tech_mode=True,
+    )
+    timeout = 180 if (knowledge_snippets or knowledge_images or product_features or qualification_assets) else 90
+    system = TECH_SOLUTION_SYSTEM
     try:
         text = chat_complete(
             model_id=model_id,
             messages=[
-                {"role": "system", "content": CHAPTER_SYSTEM_PROMPT},
+                {"role": "system", "content": system},
                 {
                     "role": "user",
-                    "content": _build_chapter_context(
-                        project_name,
-                        chapter_title,
-                        chapter_idea,
-                        dimension_detail,
-                        must_respond_context,
-                        knowledge_snippets,
-                        writing_prefs,
-                        product_features,
-                        product_library_name,
-                    ),
+                    "content": _user_content_with_images(prompt, knowledge_images, model_id),
                 },
             ],
             temperature=0.5,
-            timeout=90,
+            timeout=timeout,
         )
-        return sanitize_chapter_markdown(text) or _fallback_chapter_content(
+        solution = sanitize_chapter_markdown(text) or _fallback_chapter_content(
             chapter_title, chapter_idea, "AI 返回内容为空"
         )
+        return _wrap_tech_chapter(req_text, solution)
     except LlmError as exc:
-        return _fallback_chapter_content(chapter_title, chapter_idea, str(exc))
+        if knowledge_images and is_vision_model(model_id):
+            try:
+                text = chat_complete(
+                    model_id=model_id,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.5,
+                    timeout=timeout,
+                )
+                solution = sanitize_chapter_markdown(text) or _fallback_chapter_content(
+                    chapter_title, chapter_idea, "AI 返回内容为空"
+                )
+                return _wrap_tech_chapter(req_text, solution)
+            except Exception:
+                logger.exception("chapter generate retry without images failed")
+        return _wrap_tech_chapter(req_text, _fallback_chapter_content(chapter_title, chapter_idea, str(exc)))
     except Exception as exc:  # noqa: BLE001 —— 任何网络/解析异常都应降级为占位正文，而不是让任务失败
-        return _fallback_chapter_content(chapter_title, chapter_idea, f"调用大模型失败（{exc.__class__.__name__}）")
+        return _wrap_tech_chapter(
+            req_text,
+            _fallback_chapter_content(chapter_title, chapter_idea, f"调用大模型失败（{exc.__class__.__name__}）"),
+        )
 
 
 _HEADING_LINE_RE = re.compile(r"^(#{1,6})\s+(.*)$")
@@ -856,12 +1049,22 @@ def _build_chapter_context(
     writing_prefs: dict | None = None,
     product_features: list[dict] | None = None,
     product_library_name: str | None = None,
+    qualification_assets: list[dict] | None = None,
+    knowledge_images: list[dict] | None = None,
+    tender_requirement: str | None = None,
+    tech_mode: bool = False,
 ) -> str:
     lines = [
         f"项目名称：{project_name or '（未命名项目）'}",
         f"章节标题：{chapter_title}",
         f"编写思路：{chapter_idea or '（无特别说明，请自行组织内容）'}",
     ]
+    if tech_mode:
+        lines.append("")
+        lines.append(
+            "本章招标原始需求全文如下（必须逐条覆盖，但不要在输出中重复这段原文；系统会单独插入「原始需求」）："
+        )
+        lines.append((tender_requirement or "").strip() or "（未抽取到招标原文）")
     if dimension_detail:
         lines.append("")
         lines.append(
@@ -877,25 +1080,87 @@ def _build_chapter_context(
         lines.append("")
         if product_features:
             lines.append(
-                f"本公司已审核产品能力（来自产品库「{product_library_name or '未命名'}」，必须据此写，禁止编造未列出的能力）："
+                f"本公司已审核产品能力（来自产品库「{product_library_name or '未命名'}」，"
+                f"共 {len(product_features)} 项，必须通读全部参数与应标原文，禁止编造未列出的能力）："
             )
-            for i, feat in enumerate(product_features[:8], start=1):
-                lines.append(
-                    f"{i}. 【{feat.get('name', '')}】模块：{feat.get('module') or '未分模块'}；"
-                    f"参数：{(feat.get('params') or '无')[:200]}；"
-                    f"应标：{(feat.get('bidCopy') or feat.get('intro') or '')[:400]}"
-                )
+            for i, feat in enumerate(product_features, start=1):
+                lines.append("")
+                lines.append(f"{i}. 【{feat.get('name', '')}】模块：{feat.get('module') or '未分模块'}")
+                params = (feat.get("params") or "").strip()
+                lines.append(f"参数：{params or '无'}")
+                copy = (feat.get("bidCopy") or feat.get("intro") or "").strip()
+                if copy:
+                    lines.append("应标原文：")
+                    lines.append(copy)
+                n_img = len(feat.get("images") or [])
+                if n_img:
+                    lines.append(f"（本功能原图 {n_img} 张，见下方附图清单，不允许丢失）")
         else:
             lines.append(
                 f"已选择产品库「{product_library_name or '未命名'}」，但本章没有匹配到已入库功能点。"
                 "正文必须写【能力缺口：本章招标需求在产品库中无对应功能点】，禁止编造本公司能力。"
             )
+    if qualification_assets:
+        lines.append("")
+        lines.append(
+            f"本公司已入库资质材料（共 {len(qualification_assets)} 条，必须据此写证号与有效期，"
+            "禁止编造未列出的证书；扫描件见附图清单，必须全部插入）："
+        )
+        for i, asset in enumerate(qualification_assets, start=1):
+            lines.append("")
+            lines.append(
+                f"{i}. 【{asset.get('name', '')}】类型：{asset.get('kind') or ''}；"
+                f"编号：{asset.get('number') or '无'}；持有人：{asset.get('owner') or '无'}；"
+                f"有效期：{asset.get('validUntil') or '长期'}"
+            )
+            detail = (asset.get("detail") or "").strip()
+            if detail:
+                lines.append(detail)
+            ocr = (asset.get("ocrText") or "").strip()
+            if ocr:
+                lines.append(f"OCR：{ocr}")
+            n_img = len(asset.get("images") or [])
+            if n_img:
+                lines.append(f"（本条扫描件 {n_img} 张，见下方附图清单，不允许丢失）")
     if knowledge_snippets:
         lines.append("")
-        lines.append("参考知识库资料（仅供参考，禁止逐字抄录，请结合本项目实际改写）：")
-        for i, s in enumerate(knowledge_snippets[:4], start=1):
-            text = (s.get("text") or "")[:300]
-            lines.append(f"{i}. 《{s.get('docTitle', '')}》· {s.get('heading', '')}：{text}")
+        lines.append(
+            "知识库整包素材（用户勾选章节及其全部下级，含正文、表格与原图。"
+            "必须通读，禁止截取摘要代替，禁止丢失任意图表或段落）："
+        )
+        for s in knowledge_snippets:
+            heading = s.get("heading") or ""
+            doc_title = s.get("docTitle") or ""
+            text = s.get("text") or ""
+            lines.append("")
+            lines.append(f"## 《{doc_title}》· {heading}")
+            if text:
+                lines.append(text)
+            else:
+                lines.append("（本节无正文，请结合原图）")
+            n_img = len(s.get("images") or [])
+            if n_img:
+                lines.append(f"（本节原图 {n_img} 张，见下方附图清单）")
+    if knowledge_images:
+        lines.append("")
+        lines.append(
+            f"附图清单（共 {len(knowledge_images)} 张，含知识库、产品功能库、资质证照库对象存储原图，"
+            "撰写时用【此处插入图：序号】引用，不允许丢失）："
+        )
+        vision_n = sum(1 for img in knowledge_images if img.get("b64"))
+        if vision_n and vision_n < len(knowledge_images):
+            lines.append(
+                f"说明：已内嵌原图 {vision_n} 张供阅读；其余 {len(knowledge_images) - vision_n} 张"
+                "仍须按编号全部插入正文，不允许丢失。"
+            )
+        source_label = {"knowledge": "知识库", "product": "产品", "qualification": "资质"}
+        for i, img in enumerate(knowledge_images, start=1):
+            src = source_label.get(str(img.get("source") or ""), "")
+            prefix = f"[{src}] " if src else ""
+            lines.append(
+                f"{i}. {prefix}{img.get('caption') or img.get('heading') or '原文附图'}"
+                f"（所属：{img.get('heading') or ''}）"
+            )
     style = (writing_prefs or {}).get("style") or {}
     if isinstance(style, dict) and any(style.get(k) for k in ("tone", "length", "firmName", "strictness")):
         lines.append("")
@@ -909,7 +1174,7 @@ def _build_chapter_context(
         if style.get("strictness"):
             lines.append(f"- 格式规范：{style['strictness']}")
     lines.append("")
-    lines.append("请撰写本章正文。")
+    lines.append("请只撰写本章「解决方案」。")
     return "\n".join(lines)
 
 
@@ -936,6 +1201,15 @@ def _new_node(node_id: str, num: str, title: str, parent_id: str | None, item: d
     form = is_original_form_title(clean_title or title)
     if form:
         idea = original_form_idea(clean_title or title, idea)
+    part = item.get("part") if item.get("part") in ("tech", "business", "form") else None
+    if form:
+        part = "form"
+    kind = chapter_kind(clean_title or title, part, idea, str(item.get("requirement") or ""))
+    if kind == "business":
+        part = "business"
+        if not form:
+            idea = BUSINESS_SKIP_IDEA_PREFIX
+    skip_write = kind in ("form", "business")
     return {
         "id": node_id,
         "num": num,
@@ -947,10 +1221,12 @@ def _new_node(node_id: str, num: str, title: str, parent_id: str | None, item: d
         "idea": idea,
         "aiIdea": _as_str(item.get("aiIdea"), idea),
         "optimized": False,
-        "status": "用原文" if form else "待生成",
+        "status": "用原文" if skip_write else "待生成",
         "words": 0,
         "aiRounds": 0,
         "sourceIndex": item.get("sourceIndex") if isinstance(item.get("sourceIndex"), int) else None,
+        "part": part,
+        "requirement": item.get("requirement") if isinstance(item.get("requirement"), str) else "",
     }
 
 

@@ -13,7 +13,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import backref, relationship
 
 from .db import Base
 
@@ -172,7 +172,7 @@ class WriterJob(Base):
 
     id = Column(String, primary_key=True, default=lambda: gen_id("wjob"))
     draft_id = Column(String, ForeignKey("writer_drafts.id"), nullable=False)
-    kind = Column(String, nullable=False)  # outline | chapter
+    kind = Column(String, nullable=False)  # outline | chapter | product-match
     chapter_id = Column(String, nullable=True)
     status = Column(String, default="queued")  # queued | running | done | failed
     error = Column(Text, nullable=True)
@@ -271,17 +271,45 @@ class KnowledgeDocument(Base):
 
 
 class KnowledgeSlice(Base):
-    """知识文档按标题分组、再按字数切片后的正文片段，供检索与「章节详情预览」使用。"""
+    """知识文档按标题分组的章节切片，可挂二级、三级子节与配图。"""
 
     __tablename__ = "knowledge_slices"
 
     id = Column(String, primary_key=True, default=lambda: gen_id("kslice"))
-    document_id = Column(String, ForeignKey("knowledge_documents.id"), nullable=False)
+    document_id = Column(String, ForeignKey("knowledge_documents.id"), nullable=False, index=True)
     heading = Column(String, default="全文")
     seq = Column(Integer, default=0)
     text = Column(Text, nullable=False)
+    level = Column(String, default="一级")  # 一级 | 二级 | 三级
+    parent_id = Column(String, ForeignKey("knowledge_slices.id"), nullable=True, index=True)
 
     document = relationship("KnowledgeDocument", back_populates="slices")
+    images = relationship(
+        "KnowledgeSliceImage", back_populates="slice", cascade="all, delete-orphan"
+    )
+    children = relationship(
+        "KnowledgeSlice",
+        backref=backref("parent", remote_side="KnowledgeSlice.id"),
+        cascade="all, delete-orphan",
+        foreign_keys="KnowledgeSlice.parent_id",
+        single_parent=True,
+    )
+
+
+class KnowledgeSliceImage(Base):
+    """章节配图，随切片入库，写标时按章节插入，避免整篇文档丢图。"""
+
+    __tablename__ = "knowledge_slice_images"
+
+    id = Column(String, primary_key=True, default=lambda: gen_id("kimg"))
+    slice_id = Column(String, ForeignKey("knowledge_slices.id"), nullable=False, index=True)
+    caption = Column(String, default="")
+    filename = Column(String, nullable=False)
+    storage_path = Column(String, nullable=False)
+    sha256 = Column(String, default="", index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    slice = relationship("KnowledgeSlice", back_populates="images")
 
 
 class BidRevisionVersion(Base):
@@ -545,12 +573,20 @@ class ProductFeature(Base):
     params_conflict_json = Column(JSON, default=list)
     suspected_ids_json = Column(JSON, default=list)
     locked_copy = Column(Boolean, default=False)
+    parent_id = Column(String, ForeignKey("product_features.id"), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     library = relationship("ProductLibrary", back_populates="features")
     images = relationship(
         "ProductFeatureImage", back_populates="feature", cascade="all, delete-orphan"
+    )
+    children = relationship(
+        "ProductFeature",
+        backref=backref("parent", remote_side="ProductFeature.id"),
+        cascade="all, delete-orphan",
+        foreign_keys="ProductFeature.parent_id",
+        single_parent=True,
     )
 
 
@@ -607,3 +643,40 @@ class ExportRecord(Base):
     file_size = Column(Integer, default=0)
     file_hash = Column(String, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class LlmProvider(Base):
+    """大模型接入凭据：平台秘钥 + Base URL。通义千问 / 硅基 / 自定义 / 本地共用 OpenAI 兼容协议。"""
+
+    __tablename__ = "llm_providers"
+
+    id = Column(String, primary_key=True, default=lambda: gen_id("lp"))
+    name = Column(String, nullable=False)
+    kind = Column(String, nullable=False)  # deepseek | doubao | qwen | siliconflow | openai | custom | local
+    base_url = Column(String, default="")
+    api_key = Column(Text, default="")
+    enabled = Column(Boolean, default=True)
+    note = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    models = relationship("LlmModel", back_populates="provider", cascade="all, delete-orphan")
+
+
+class LlmModel(Base):
+    """可在撰写工作台选用的具体模型；thinking 控制是否开启思维链。"""
+
+    __tablename__ = "llm_models"
+
+    id = Column(String, primary_key=True, default=lambda: gen_id("llm"))
+    provider_id = Column(String, ForeignKey("llm_providers.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    api_model = Column(String, nullable=False)
+    thinking = Column(Boolean, default=False)
+    enabled = Column(Boolean, default=True)
+    is_default = Column(Boolean, default=False)
+    ctx = Column(String, default="")
+    speed = Column(String, default="")
+    sort_order = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    provider = relationship("LlmProvider", back_populates="models")

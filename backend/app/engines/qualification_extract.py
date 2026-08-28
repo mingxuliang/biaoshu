@@ -31,7 +31,21 @@ logger = logging.getLogger(__name__)
 
 TARGET_HEADING = re.compile(
     r"资格|资质|证照|证书|执照|许可|ISO|业绩|合同|中标通知|协议|"
-    r"财务|审计|资产负|利润|纳税|社保|人员|建造师|职称|信用"
+    r"财务|审计|资产负|利润|纳税|社保|人员|建造师|职称|信用|"
+    r"荣誉|奖状|证明材料|复印件"
+)
+# 扫描件/证照材料，排除「证书颁发」这类产品功能名
+QUAL_DOC = re.compile(
+    r"营业执照|统一社会信用代码|资质证书|资质文件|资格审查|"
+    r"荣誉证书|获奖证书|奖状|合同复印件|合同扫描|中标通知|"
+    r"证明材料|资格证明|资质证明|业绩证明|"
+    r"ISO\s*9001|ISO\s*27001|质量管理体系认证|信息安全管理体系|"
+    r"高新(技术)?企业|软件企业认定|"
+    r"财务报表|审计报告|纳税证明|社保证明|"
+    r"建造师证|职称证|信用中国|许可证"
+)
+PRODUCT_CAPABILITY = re.compile(
+    r"(管理|模块|功能|平台|系统|能力|颁发|模板|查询|配置|接口|同步|下载)"
 )
 SKIP_HEADING = re.compile(
     r"封面|目录|投标函|授权委托|报价一览|报价表|偏离表|技术规格|功能模块|"
@@ -51,16 +65,37 @@ EXTRACT_SYSTEM = """你从本公司过往商务标中抽取企业资质材料。
 {"name":"短名称","kind":"cert|people|achievement|equipment|credit|contract|financial","number":"证号或合同号","level":"等级","validUntil":"YYYY-MM-DD或长期","owner":"持有人/主体","detail":"原文要点","low_confidence":false}
 规则：
 - 营业执照全公司只有一套，名称用「营业执照」，kind=cert。
+- 荣誉证书、奖状、获奖证明 kind=cert，不要写成 credit。
+- 人员证书必须写 owner（持证人姓名），有证号则填 number；同名证书不同人要分开。
 - 合同 kind=contract，写清合同编号与金额。
 - 财务（审计报告、报表、纳税）kind=financial，必须写 validUntil（报表截止日或年度，如 2024-12-31）；过期也要抽取，不要丢弃。
 - 看不清则 low_confidence=true，不要编造证号。只返回 JSON 数组。"""
 
 
 def _extract_model_id() -> str:
-    settings = get_settings()
-    if settings.ark_api_key:
-        return "doubao"
-    return "deepseek-v4-flash"
+    from .llm import get_default_model_id
+
+    return get_default_model_id()
+
+
+def looks_like_qualification(name: str, text: str = "") -> bool:
+    """是否为证照/合同/财务扫描材料，而不是产品功能名。"""
+    title = (name or "").strip()
+    if not title:
+        return False
+    blob = f"{title} {(text or '')[:160]}"
+    if QUAL_DOC.search(blob):
+        return True
+    if PRODUCT_CAPABILITY.search(title):
+        return False
+    return bool(re.search(r"(证书|执照|合同复印件)$", title))
+
+
+def _looks_product_capability(heading: str) -> bool:
+    title = heading or ""
+    if looks_like_qualification(title):
+        return False
+    return bool(PRODUCT_CAPABILITY.search(title))
 
 
 def _looks_boilerplate(heading: str) -> bool:
@@ -68,8 +103,10 @@ def _looks_boilerplate(heading: str) -> bool:
 
 
 def _looks_target(heading: str, text: str = "") -> bool:
+    if _looks_product_capability(heading):
+        return False
     blob = f"{heading} {text[:80]}"
-    return bool(TARGET_HEADING.search(blob))
+    return bool(TARGET_HEADING.search(blob)) or looks_like_qualification(heading, text)
 
 
 def _guess_kind(heading: str, text: str = "") -> str:
@@ -77,6 +114,10 @@ def _guess_kind(heading: str, text: str = "") -> str:
     if is_business_license(heading, "", text) or re.search(r"资质|许可|ISO|认证", blob):
         if re.search(r"建造师|安全员|职称|人员", blob):
             return "people"
+        return "cert"
+    if re.search(r"信用中国|失信|信用报告", blob):
+        return "credit"
+    if re.search(r"荣誉|奖状|获奖", blob):
         return "cert"
     if re.search(r"财务|审计|资产负|利润|纳税", blob):
         return "financial"
@@ -237,7 +278,7 @@ def extract_pdf_qual_blocks(path: str) -> tuple[list[dict], list[dict], list[dic
                         line = line.strip()
                         if 4 <= len(line) <= 40 and _looks_target(line):
                             expected.append({"heading": line, "text": line, "kind": "heading"})
-            for img in page.get_images(full=True)[:12]:
+            for img in page.get_images(full=True):
                 xref = img[0]
                 try:
                     extracted = doc.extract_image(xref)
@@ -350,6 +391,8 @@ def _llm_fill_block(block: dict) -> list[dict]:
         if _looks_boilerplate(name):
             continue
         kind = row.get("kind") if row.get("kind") in VALID_KINDS else _guess_kind(name, text)
+        if re.search(r"荣誉|奖状|获奖", name) and kind == "credit":
+            kind = "cert"
         valid_until = (row.get("validUntil") or "").strip() or "长期"
         if kind == "financial" and valid_until in ("", "长期"):
             year = re.search(r"(20\d{2})", name + text)
@@ -410,7 +453,7 @@ def _attach_images(candidates: list[dict], images: list[dict]) -> list[dict]:
                 matched.append(img)
             else:
                 rest.append(img)
-        cand["images"] = (cand.get("images") or []) + matched[:8]
+        cand["images"] = (cand.get("images") or []) + matched
         unused = rest
     return unused
 
@@ -432,10 +475,15 @@ def _candidates_from_orphan_images(images: list[dict]) -> list[dict]:
         is_page = bool(page_re.match(heading))
         if not _looks_target(heading) and not is_page and heading != "全文":
             continue
-        ocr_text = ""
-        first_blob = imgs[0].get("blob") if imgs else b""
-        if first_blob:
-            ocr_text, _status = ocr_image_bytes(first_blob)
+        ocr_parts: list[str] = []
+        for img in imgs[:3]:
+            blob = img.get("blob") or b""
+            if not blob:
+                continue
+            text, _status = ocr_image_bytes(blob)
+            if text:
+                ocr_parts.append(text)
+        ocr_text = "\n".join(ocr_parts)
         name = heading[:40] if heading not in ("全文",) else "证照扫描件"
         if ocr_text:
             if is_business_license(ocr_text, "", ocr_text):
@@ -458,7 +506,7 @@ def _candidates_from_orphan_images(images: list[dict]) -> list[dict]:
                 "owner": "",
                 "detail": (ocr_text or heading)[:800],
                 "evidence": [{"heading": heading, "excerpt": (ocr_text or "扫描件")[:300]}],
-                "images": imgs[:8],
+                "images": imgs,
                 "low_confidence": True,
             }
         )

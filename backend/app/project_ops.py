@@ -11,6 +11,7 @@ from .models import (
     ExportRecord,
     KnowledgeDocument,
     KnowledgeSlice,
+    KnowledgeSliceImage,
     Project,
     ProjectMember,
     ReviewFinding,
@@ -65,6 +66,19 @@ def delete_project_cascade(db: Session, project_id: str) -> None:
     db.query(TenderDocument).filter(TenderDocument.project_id == project_id).delete(synchronize_session=False)
 
     if kdoc_ids:
+        slice_ids = [
+            row[0]
+            for row in db.query(KnowledgeSlice.id).filter(KnowledgeSlice.document_id.in_(kdoc_ids)).all()
+        ]
+        if slice_ids:
+            for img in db.query(KnowledgeSliceImage).filter(KnowledgeSliceImage.slice_id.in_(slice_ids)).all():
+                refs.append(img.storage_path)
+            db.query(KnowledgeSliceImage).filter(KnowledgeSliceImage.slice_id.in_(slice_ids)).delete(
+                synchronize_session=False
+            )
+        db.query(KnowledgeSlice).filter(KnowledgeSlice.document_id.in_(kdoc_ids)).update(
+            {KnowledgeSlice.parent_id: None}, synchronize_session=False
+        )
         db.query(KnowledgeSlice).filter(KnowledgeSlice.document_id.in_(kdoc_ids)).delete(synchronize_session=False)
         db.query(KnowledgeDocument).filter(KnowledgeDocument.id.in_(kdoc_ids)).delete(synchronize_session=False)
 

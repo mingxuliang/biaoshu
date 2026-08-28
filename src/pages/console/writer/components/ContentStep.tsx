@@ -14,7 +14,7 @@ import {
   type OutlineNode,
   type WriterImageItem,
 } from "@/lib/api";
-import { isOriginalFormTitle } from "@/lib/outlineNum";
+import { isOriginalFormTitle, isSkipAiWrite } from "@/lib/outlineNum";
 
 interface ToastState {
   message: string;
@@ -70,8 +70,13 @@ export default function ContentStep({
     if (generatingRef.current) return;
     const node = outline.find((c) => c.id === chapterId);
     if (!node) return;
-    if (node.status === "用原文" || isOriginalFormTitle(node.title, node.num)) {
-      showToast("本章请直接使用招标书原文填写后打印签字，无需 AI 撰写", "info");
+    if (isSkipAiWrite(node)) {
+      showToast(
+        isOriginalFormTitle(node.title, node.num)
+          ? "本章请直接使用招标书原文填写后打印签字，无需 AI 撰写"
+          : "商务标本章无需应答，无需 AI 撰写",
+        "info",
+      );
       return;
     }
 
@@ -156,7 +161,7 @@ export default function ContentStep({
         </span>
         <div>
           <div className="font-heading text-sm font-semibold tracking-wide text-foreground-900">第四步 · 正文生成</div>
-          <div className="text-xs text-foreground-500">按目录逐章 AI 撰写；承诺/授权/报价/偏差表等固定格式件直接用招标书原文</div>
+          <div className="text-xs text-foreground-500">按目录逐章 AI 撰写；承诺/授权/报价/偏差表等固定格式件带入招标书原文</div>
         </div>
         <div className="ml-auto flex items-center gap-2">
           <button

@@ -1,8 +1,9 @@
-import { useMemo, useState, type FormEvent, type MouseEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type MouseEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
 import Toast from "../components/Toast";
+import PaginationBar from "../components/PaginationBar";
 import { useAuth } from "@/context/AuthContext";
 import { useProductCatalog } from "@/context/ProductCatalogContext";
 import { hasPerm } from "@/lib/permissions";
@@ -34,6 +35,7 @@ const inputCls =
   "h-9 w-full rounded-md border border-background-300 bg-background-50 px-3 text-sm text-foreground-900 outline-none transition-all focus:border-primary-400 focus:ring-1 focus:ring-primary-400/20 placeholder:text-foreground-500";
 const labelCls = "mb-1.5 block text-xs font-medium text-foreground-600";
 
+const PAGE_SIZE = 9;
 const emptyForm = {
   name: "",
   category: "软件系统" as ProductLibraryCategory,
@@ -53,6 +55,7 @@ export default function ProductsPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<ProductLibrary | null>(null);
   const [form, setForm] = useState(emptyForm);
+  const [page, setPage] = useState(1);
 
   const showToast = (message: string, type: ToastState["type"] = "success") => {
     setToast({ message, type, visible: true });
@@ -73,6 +76,20 @@ export default function ProductsPage() {
     }
     return list;
   }, [libraries, categoryFilter, keyword]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [keyword, categoryFilter]);
+
+  useEffect(() => {
+    const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+    setPage((p) => Math.min(p, totalPages));
+  }, [filtered.length]);
+
+  const paged = useMemo(() => {
+    const start = (page - 1) * PAGE_SIZE;
+    return filtered.slice(start, start + PAGE_SIZE);
+  }, [filtered, page]);
 
   const stats = useMemo(() => {
     return {
@@ -163,7 +180,7 @@ export default function ProductsPage() {
     <div>
       <PageHeader
         title="产品功能库"
-        description="企业可建立多个产品库（如培训平台、调度系统）。每个库独立上传技术标、抽取功能点与附图，撰写时按所选产品匹配。"
+        description="企业可建立多个产品库。每个库独立抽取功能点与附图；文档中的资质证照会同步到资质证照库并查重，不进入产品库。"
         actions={
           canEdit ? (
             <button
@@ -232,7 +249,7 @@ export default function ProductsPage() {
       </div>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-        {filtered.map((lib) => {
+        {paged.map((lib) => {
           const counts = countsOf(lib);
           return (
             <div
@@ -310,6 +327,11 @@ export default function ProductsPage() {
           </div>
         )}
       </div>
+      {filtered.length > 0 && (
+        <div className="mt-3 overflow-hidden rounded-lg border border-background-300 bg-background-100">
+          <PaginationBar total={filtered.length} page={page} pageSize={PAGE_SIZE} onPageChange={setPage} />
+        </div>
+      )}
 
       <Modal
         open={modalOpen}

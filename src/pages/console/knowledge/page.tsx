@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from "react";
+import { useNavigate } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
 import Toast from "../components/Toast";
+import PaginationBar from "../components/PaginationBar";
 import { useAuth } from "@/context/AuthContext";
 import { hasPerm } from "@/lib/permissions";
 import {
@@ -35,7 +37,10 @@ interface ToastState {
   visible: boolean;
 }
 
+const PAGE_SIZE = 9;
+
 export default function KnowledgePage() {
+  const navigate = useNavigate();
   const { token, user } = useAuth();
   const canUpload = hasPerm(user?.role, "writer");
   const [docs, setDocs] = useState<KnowledgeDoc[]>([]);
@@ -52,6 +57,7 @@ export default function KnowledgePage() {
   const [uploadTitle, setUploadTitle] = useState("");
   const [uploadTags, setUploadTags] = useState("");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [page, setPage] = useState(1);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const showToast = (message: string, type: ToastState["type"] = "success") => {
@@ -88,6 +94,14 @@ export default function KnowledgePage() {
     return list;
   }, [docs, scope, typeFilter, keyword]);
 
+  useEffect(() => {
+    setPage(1);
+  }, [scope, typeFilter, keyword]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const paged = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+
   const resetUploadForm = () => {
     setUploadScope("企业库");
     setUploadType(KNOWLEDGE_TYPES[0]);
@@ -122,7 +136,7 @@ export default function KnowledgePage() {
       });
       setUploadOpen(false);
       resetUploadForm();
-      showToast("文档已入库，正在按标题切片…", "success");
+      showToast("文档已入库，已按章节切片并保留配图", "success");
       loadDocs();
     } catch (err) {
       showToast(err instanceof ApiError ? err.message : "上传失败，请稍后重试", "error");
@@ -131,7 +145,8 @@ export default function KnowledgePage() {
     }
   };
 
-  const handleDelete = async (doc: KnowledgeDoc) => {
+  const handleDelete = async (e: MouseEvent, doc: KnowledgeDoc) => {
+    e.stopPropagation();
     try {
       await deleteKnowledgeDocument(doc.id);
       setDocs((prev) => prev.filter((d) => d.id !== doc.id));
@@ -149,7 +164,7 @@ export default function KnowledgePage() {
     <div>
       <PageHeader
         title="文档知识库"
-        description="沉淀企业可复用的技术方案、历史标书片段、规范条文与图表，供撰写时检索引用；内置虚词表与高危句式规则知识。"
+        description="沉淀企业可复用的技术方案、历史标书片段、规范条文与图表。入库后按章节切片并保留配图，写法同产品功能库，供撰写时按节引用。"
         actions={
           canUpload ? (
           <button
@@ -220,9 +235,22 @@ export default function KnowledgePage() {
           <p className="mt-3 text-sm text-foreground-500">正在加载知识库…</p>
         </div>
       ) : (
+        <>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {filtered.map((doc) => (
-            <div key={doc.id} className="group flex flex-col rounded-lg border border-background-300 bg-background-100 p-4 transition-all hover:border-primary-300/60">
+          {paged.map((doc) => (
+            <div
+              key={doc.id}
+              role="button"
+              tabIndex={0}
+              onClick={() => navigate(`/console/knowledge/${doc.id}`)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  navigate(`/console/knowledge/${doc.id}`);
+                }
+              }}
+              className="group flex cursor-pointer flex-col rounded-lg border border-background-300 bg-background-100 p-4 text-left transition-all hover:border-primary-300/60"
+            >
               <div className="flex items-start gap-3">
                 <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-secondary-400 to-secondary-500 text-background-50">
                   <i className={`${typeIcon[doc.type] ?? "ri-file-text-line"} text-lg`}></i>
@@ -255,14 +283,14 @@ export default function KnowledgePage() {
               )}
               <div className="mt-auto flex items-center justify-between border-t border-background-200 pt-3" style={{ marginTop: "auto" }}>
                 <span className="font-label text-xs text-foreground-500">
-                  {doc.sliceCount} 个切片 · {doc.source}
+                  {doc.sliceCount} 个章节切片 · {doc.source}
                 </span>
                 <div className="flex items-center gap-1">
                   {canUpload && (
                   <button
                     type="button"
                     title="删除"
-                    onClick={() => handleDelete(doc)}
+                    onClick={(e) => handleDelete(e, doc)}
                     className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-foreground-500 transition-all hover:scale-110 hover:bg-red-50 hover:text-red-600"
                   >
                     <i className="ri-delete-bin-line text-sm"></i>
@@ -279,6 +307,12 @@ export default function KnowledgePage() {
             </div>
           )}
         </div>
+        {filtered.length > 0 && (
+          <div className="mt-3 rounded-lg border border-background-300 bg-background-100">
+            <PaginationBar total={filtered.length} page={safePage} pageSize={PAGE_SIZE} onPageChange={setPage} />
+          </div>
+        )}
+        </>
       )}
 
       {/* 上传弹窗 */}
@@ -289,7 +323,7 @@ export default function KnowledgePage() {
           resetUploadForm();
         }}
         title="上传知识文档"
-        subtitle="Word/PDF 入库后按标题自动切片，保留来源便于溯源"
+        subtitle="Word/PDF 入库后按标题树切片，配图挂到对应章节，不丢表格与附图"
       >
         <form onSubmit={handleUpload} className="space-y-4">
           <div>
@@ -386,7 +420,7 @@ export default function KnowledgePage() {
               className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-4 text-sm font-medium text-background-50 transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-60"
             >
               <i className={`${uploading ? "ri-loader-4-line animate-spin" : "ri-upload-2-line"} text-sm`}></i>
-              {uploading ? "正在上传并切片…" : "上传并切片"}
+              {uploading ? "正在分析章节并保留配图…" : "上传并切片"}
             </button>
           </div>
         </form>

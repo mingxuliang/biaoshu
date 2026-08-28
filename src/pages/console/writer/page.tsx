@@ -11,7 +11,7 @@ import BidInterpret from "./components/BidInterpret";
 import OutlineStep from "./components/OutlineStep";
 import ContentStep from "./components/ContentStep";
 import { getOrCreateWriterDraft, updateWriterDraft, type OutlineNode, type WriterDraft } from "@/lib/api";
-import { compactOutlineTitles } from "@/lib/outlineNum";
+import { compactOutlineTitles, isOriginalFormTitle } from "@/lib/outlineNum";
 import type { InterpretSource } from "@/mocks/writerSteps";
 
 interface ToastState {
@@ -77,8 +77,9 @@ export default function WriterPage() {
         const nextContents = { ...(d.chapterContents || {}) };
         for (const n of compacted) {
           if (n.status === "用原文" && !nextContents[n.id]) {
-            nextContents[n.id] =
-              `## ${n.title}\n\n本章为招标书已给出的固定格式文件，请直接使用招标书原文填写后打印签字，系统不展开目录、不撰写正文。`;
+            nextContents[n.id] = isOriginalFormTitle(n.title, n.num)
+              ? `## ${n.title}\n\n本章为招标书已给出的固定格式文件，请直接使用招标书原文填写后打印签字，系统不展开目录、不撰写正文。`
+              : `## ${n.title}\n\n商务标本章无需撰写应标正文。承诺书、报价文件、偏差表等固定格式件请直接使用招标书原文填写后打印签字。`;
           }
         }
         setChapterContents(nextContents);
@@ -343,13 +344,20 @@ export default function WriterPage() {
             onOutlineChange={setOutline}
             initialKnowledgeRefs={draft.knowledgeRefs}
             onOutlineRegenerated={(payload) => {
-              setChapterContents(payload?.chapterContents || {});
+              if (payload?.chapterContents) setChapterContents(payload.chapterContents);
               setDraft((d) =>
-                d ? { ...d, knowledgeRefs: {}, chapterContents: payload?.chapterContents || {} } : d,
+                d
+                  ? {
+                      ...d,
+                      knowledgeRefs: payload?.knowledgeRefs ?? d.knowledgeRefs,
+                      chapterContents: payload?.chapterContents ?? d.chapterContents,
+                    }
+                  : d,
               );
             }}
             onNext={handleOutlineNext}
             onBack={goBack}
+            selectedProductLibraryId={selectedProductLibraryId}
           />
         )}
         {step === 4 && (

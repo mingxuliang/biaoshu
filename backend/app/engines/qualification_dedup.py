@@ -65,12 +65,13 @@ def name_jaccard(a: str, b: str) -> float:
 
 def identity_key(item: dict | QualificationAsset) -> str | None:
     if isinstance(item, QualificationAsset):
-        name, number, kind, valid_until, detail = (
+        name, number, kind, valid_until, detail, owner = (
             item.name or "",
             item.number or "",
             item.kind or "",
             item.valid_until or "",
             item.detail or "",
+            item.owner or "",
         )
     else:
         name = item.get("name") or ""
@@ -78,9 +79,20 @@ def identity_key(item: dict | QualificationAsset) -> str | None:
         kind = item.get("kind") or ""
         valid_until = item.get("validUntil") or ""
         detail = item.get("detail") or ""
+        owner = item.get("owner") or ""
     if is_business_license(name, number, detail):
         return "cert|__biz_license__"
     num = normalize_number(number)
+    if kind == "people":
+        owner_n = normalize_name(owner)
+        name_n = normalize_name(name)
+        if num and owner_n:
+            return f"people|{owner_n}|{num}"
+        if num:
+            return f"people|{num}"
+        if owner_n and name_n:
+            return f"people|{owner_n}|{name_n}"
+        return None
     if kind == "financial":
         year = _year_hint(valid_until, name, detail)
         if num:
@@ -161,9 +173,12 @@ def _extract_model_id() -> str:
 def _llm_same_asset(a: dict, b: QualificationAsset) -> str:
     prompt = (
         "判断下面两条是否为同一份企业资质/合同/财务材料。只回复三个词之一：相同、应分开、不同。\n"
-        "营业执照全公司只有一套，名称相近即相同。财务报表按年度区分。合同按合同号区分。\n\n"
-        f"A 名称：{a.get('name')} 类型：{a.get('kind')} 编号：{a.get('number') or '无'} 有效期：{a.get('validUntil') or '无'}\n"
-        f"B 名称：{b.name} 类型：{b.kind} 编号：{b.number or '无'} 有效期：{b.valid_until or '无'}\n"
+        "营业执照全公司只有一套，名称相近即相同。财务报表按年度区分。合同按合同号区分。"
+        "人员证书按持有人+证号区分，同名证书不同人必须应分开。\n\n"
+        f"A 名称：{a.get('name')} 类型：{a.get('kind')} 编号：{a.get('number') or '无'} "
+        f"持有人：{a.get('owner') or '无'} 有效期：{a.get('validUntil') or '无'}\n"
+        f"B 名称：{b.name} 类型：{b.kind} 编号：{b.number or '无'} "
+        f"持有人：{b.owner or '无'} 有效期：{b.valid_until or '无'}\n"
     )
     try:
         text = chat_complete(
@@ -194,7 +209,12 @@ def apply_to_library(
     source_doc: QualificationSourceDoc,
     candidates: list[dict],
 ) -> dict[str, int]:
-    existing = db.query(QualificationAsset).options(joinedload(QualificationAsset.images)).all()
+    existing = (
+        db.query(QualificationAsset)
+        .options(joinedload(QualificationAsset.images))
+        .with_for_update()
+        .all()
+    )
     stats = {"extracted": 0, "merged": 0, "suspected": 0, "conflicts": 0}
     gray_used = 0
     source_row = {"docId": source_doc.id, "filename": source_doc.filename}
@@ -258,11 +278,20 @@ def _best_match(
     best: QualificationAsset | None = None
     best_score = 0.0
     cand_kind = cand.get("kind") or ""
+    cand_owner = normalize_name(cand.get("owner") or "")
+    cand_num = normalize_number(cand.get("number") or "")
     for item in existing:
         if cand_kind and item.kind and cand_kind != item.kind and not (
             is_business_license(cand.get("name") or "") and is_business_license(item.name)
         ):
             continue
+        if cand_kind == "people" and item.kind == "people":
+            item_owner = normalize_name(item.owner or "")
+            item_num = normalize_number(item.number or "")
+            if cand_owner and item_owner and cand_owner != item_owner:
+                continue
+            if not cand_owner and not item_owner and not cand_num and not item_num:
+                continue
         score = name_jaccard(cand.get("name") or "", item.name)
         for alias in item.aliases_json or []:
             score = max(score, name_jaccard(cand.get("name") or "", alias))
@@ -338,6 +367,8 @@ def _merge_into_asset(item: QualificationAsset, cand: dict, source_row: dict) ->
 def _insert_asset(db: Session, cand: dict, source_row: dict, merge_status: str) -> QualificationAsset:
     kind = cand.get("kind") if cand.get("kind") in VALID_KINDS else "cert"
     if is_business_license(cand.get("name") or "", cand.get("number") or "", cand.get("detail") or ""):
+        kind = "cert"
+    if re.search(r"荣誉|奖状|获奖", cand.get("name") or "") and kind == "credit":
         kind = "cert"
     item = QualificationAsset(
         kind=kind,

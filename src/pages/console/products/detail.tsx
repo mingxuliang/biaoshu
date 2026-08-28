@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
 import Toast from "../components/Toast";
+import PaginationBar from "../components/PaginationBar";
 import StatusBadge from "../components/StatusBadge";
 import AuthImage from "../components/AuthImage";
 import { useAuth } from "@/context/AuthContext";
@@ -38,8 +39,9 @@ const kindIcon: Record<ProductKind, string> = {
 };
 
 const IMAGE_KINDS: ProductImage["kind"][] = ["界面", "架构", "流程", "实物"];
-const MAX_FEATURE_IMAGES = 8;
+const MAX_FEATURE_IMAGES = 80;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const PAGE_SIZE = 15;
 
 function guessImageKind(filename: string): ProductImage["kind"] {
   const n = filename.toLowerCase();
@@ -59,10 +61,61 @@ const inputCls =
   "h-9 w-full rounded-md border border-background-300 bg-background-50 px-3 text-sm text-foreground-900 outline-none transition-all focus:border-primary-400 focus:ring-1 focus:ring-primary-400/20 placeholder:text-foreground-500";
 const labelCls = "mb-1.5 block text-xs font-medium text-foreground-600";
 
+function imageCountOf(item: ProductItem): number {
+  return item.images.length + (item.children || []).reduce((sum, child) => sum + child.images.length, 0);
+}
+
 function formatBidCopy(item: ProductItem): string {
-  return [`【${item.name}】`, item.module ? `所属：${item.module}` : "", item.params ? `参数：${item.params}` : "", item.bidCopy]
+  const childDir =
+    item.children && item.children.length > 0
+      ? `二级目录：${item.children.map((c) => c.name).join("、")}`
+      : "";
+  return [`【${item.name}】`, item.module ? `所属：${item.module}` : "", childDir, item.params ? `参数：${item.params}` : "", item.bidCopy]
     .filter(Boolean)
     .join("\n");
+}
+
+function FeatureDetailBody({ item }: { item: ProductItem }) {
+  return (
+    <div className="space-y-4">
+      {item.params ? (
+        <div>
+          <div className={labelCls}>技术参数</div>
+          <p className="text-sm leading-relaxed text-foreground-700">{item.params}</p>
+        </div>
+      ) : null}
+      <div>
+        <div className={labelCls}>写标可用说明</div>
+        <div className="rounded-lg border border-background-300 bg-background-50 px-3 py-2.5 text-sm leading-relaxed text-foreground-800">
+          {item.bidCopy || item.intro || "尚未生成写标说明"}
+        </div>
+      </div>
+      <div>
+        <div className={labelCls}>附图</div>
+        {item.images.length === 0 ? (
+          <p className="text-xs text-foreground-500">该功能点尚未绑定附图。</p>
+        ) : (
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {item.images.map((img) => (
+              <div key={img.id} className="overflow-hidden rounded-lg border border-background-300 bg-background-50">
+                {img.url ? (
+                  <AuthImage src={img.url} alt={img.caption} eager className="h-24 w-full object-cover" />
+                ) : (
+                  <div className="flex h-24 items-center justify-center bg-gradient-to-br from-secondary-100 to-secondary-200 text-secondary-500">
+                    <i className={`${imageKindIcon[img.kind]} text-2xl`}></i>
+                  </div>
+                )}
+                <div className="px-2 py-1.5">
+                  <div className="truncate text-[11px] font-medium text-foreground-800">{img.caption}</div>
+                  <div className="text-[10px] text-foreground-500">{img.kind}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default function ProductLibraryDetailPage() {
@@ -78,6 +131,7 @@ export default function ProductLibraryDetailPage() {
   const [tab, setTab] = useState<MainTab>("products");
   const [kindFilter, setKindFilter] = useState<"全部" | ProductKind>("全部");
   const [keyword, setKeyword] = useState("");
+  const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
   const [toast, setToast] = useState<ToastState>({ message: "", type: "success", visible: false });
   const [editOpen, setEditOpen] = useState(false);
@@ -86,6 +140,7 @@ export default function ProductLibraryDetailPage() {
   const [draftImages, setDraftImages] = useState<ProductImage[]>([]);
   const [addingImages, setAddingImages] = useState(false);
   const [detailItem, setDetailItem] = useState<ProductItem | null>(null);
+  const [detailChildId, setDetailChildId] = useState("");
   const [previewOpen, setPreviewOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadFiles, setUploadFiles] = useState<File[]>([]);
@@ -118,28 +173,54 @@ export default function ProductLibraryDetailPage() {
     window.setTimeout(() => setToast((t) => ({ ...t, visible: false })), 3000);
   };
 
+  const openDetail = (item: ProductItem) => {
+    setDetailItem(item);
+    setDetailChildId(item.children?.[0]?.id || "");
+  };
+
   const filtered = useMemo(() => {
     let list = items;
     if (kindFilter !== "全部") list = list.filter((p) => p.kind === kindFilter);
     if (keyword.trim()) {
       const kw = keyword.trim().toLowerCase();
-      list = list.filter(
-        (p) =>
+      list = list.filter((p) => {
+        const hitSelf =
           p.name.toLowerCase().includes(kw) ||
           p.module.toLowerCase().includes(kw) ||
           p.params.toLowerCase().includes(kw) ||
           p.intro.toLowerCase().includes(kw) ||
-          p.sourceDoc.toLowerCase().includes(kw),
-      );
+          p.sourceDoc.toLowerCase().includes(kw);
+        const hitChild = (p.children || []).some(
+          (c) =>
+            c.name.toLowerCase().includes(kw) ||
+            (c.intro || "").toLowerCase().includes(kw) ||
+            (c.params || "").toLowerCase().includes(kw),
+        );
+        return hitSelf || hitChild;
+      });
     }
     return list;
   }, [items, kindFilter, keyword]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [keyword, kindFilter]);
+
+  useEffect(() => {
+    const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+    setPage((p) => Math.min(p, totalPages));
+  }, [filtered.length]);
+
+  const paged = useMemo(() => {
+    const start = (page - 1) * PAGE_SIZE;
+    return filtered.slice(start, start + PAGE_SIZE);
+  }, [filtered, page]);
 
   const stats = useMemo(
     () => ({
       total: items.length,
       pending: items.filter((p) => p.status === "待审核").length,
-      withImage: items.filter((p) => p.images.length > 0).length,
+      withImage: items.filter((p) => imageCountOf(p) > 0).length,
       docs: new Set(items.map((p) => p.sourceDoc).filter(Boolean)).size,
     }),
     [items],
@@ -152,11 +233,11 @@ export default function ProductLibraryDetailPage() {
   };
 
   const toggleSelectAll = () => {
-    if (filtered.every((p) => selected.includes(p.id))) {
-      setSelected((prev) => prev.filter((id) => !filtered.some((p) => p.id === id)));
+    if (paged.length > 0 && paged.every((p) => selected.includes(p.id))) {
+      setSelected((prev) => prev.filter((id) => !paged.some((p) => p.id === id)));
       return;
     }
-    setSelected((prev) => [...new Set([...prev, ...filtered.map((p) => p.id)])]);
+    setSelected((prev) => [...new Set([...prev, ...paged.map((p) => p.id)])]);
   };
 
   const openCreate = () => {
@@ -261,7 +342,7 @@ export default function ProductLibraryDetailPage() {
   };
 
   const handleDelete = async (item: ProductItem) => {
-    if (!window.confirm(`确定删除「${item.name}」？删除后撰写将无法匹配该条目。`)) return;
+    if (!window.confirm(`确定删除「${item.name}」？其下二级功能点也会一并删除，撰写将无法再匹配。`)) return;
     try {
       await catalog.deleteItem(item.id);
       setSelected((prev) => prev.filter((id) => id !== item.id));
@@ -340,7 +421,7 @@ export default function ProductLibraryDetailPage() {
   }
 
   const statCards = [
-    { key: "total", label: "功能点总数", value: stats.total, icon: "ri-box-3-line", gradient: "from-primary-400 to-primary-600", bar: "from-primary-500 to-primary-400" },
+    { key: "total", label: "一级功能菜单", value: stats.total, icon: "ri-box-3-line", gradient: "from-primary-400 to-primary-600", bar: "from-primary-500 to-primary-400" },
     { key: "pending", label: "待审核", value: stats.pending, icon: "ri-error-warning-line", gradient: "from-accent-400 to-accent-500", bar: "from-accent-500 to-accent-400" },
     { key: "withImage", label: "已配图", value: stats.withImage, icon: "ri-image-line", gradient: "from-secondary-400 to-secondary-500", bar: "from-secondary-400 to-secondary-300" },
     { key: "docs", label: "来源技术标", value: stats.docs, icon: "ri-file-text-line", gradient: "from-primary-400 to-primary-600", bar: "from-primary-500 to-primary-400" },
@@ -450,7 +531,7 @@ export default function ProductLibraryDetailPage() {
                 type="text"
                 value={keyword}
                 onChange={(e) => setKeyword(e.target.value)}
-                placeholder="搜索本产品库内功能点…"
+                placeholder="搜索一级菜单或二级功能点…"
                 className={`${inputCls} pl-9`}
               />
             </div>
@@ -467,13 +548,13 @@ export default function ProductLibraryDetailPage() {
                   <th className="w-10 px-4 py-3 font-medium">
                     <input
                       type="checkbox"
-                      checked={filtered.length > 0 && filtered.every((p) => selected.includes(p.id))}
+                      checked={paged.length > 0 && paged.every((p) => selected.includes(p.id))}
                       onChange={toggleSelectAll}
                       className="h-3.5 w-3.5 cursor-pointer accent-primary-500"
-                      aria-label="全选"
+                      aria-label="全选本页"
                     />
                   </th>
-                  <th className="px-3 py-3 font-medium">功能 / 产品名称</th>
+                  <th className="px-3 py-3 font-medium">一级功能菜单</th>
                   <th className="px-3 py-3 font-medium">类型</th>
                   <th className="px-3 py-3 font-medium">技术参数</th>
                   <th className="px-3 py-3 font-medium">详细介绍</th>
@@ -483,7 +564,7 @@ export default function ProductLibraryDetailPage() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((item) => (
+                {paged.map((item) => (
                   <tr key={item.id} className="group border-b border-background-200 transition-colors last:border-0 hover:bg-primary-50/30">
                     <td className="px-4 py-3">
                       <input
@@ -502,16 +583,23 @@ export default function ProductLibraryDetailPage() {
                         <div className="min-w-0">
                           <button
                             type="button"
-                            onClick={() => setDetailItem(item)}
+                            onClick={() => openDetail(item)}
                             className="cursor-pointer truncate text-left text-sm font-medium text-foreground-900 hover:text-primary-600"
                           >
                             {item.name}
                           </button>
                           <div className="mt-0.5 text-xs text-foreground-500">
-                            {item.module || "未分模块"}
+                            {item.module && item.module !== item.name ? item.module : "一级功能菜单"}
                             {item.brand ? ` · ${item.brand}${item.model ? ` ${item.model}` : ""}` : ""}
                             {item.aliases && item.aliases.length > 0 ? ` · 别名 ${item.aliases.slice(0, 2).join("、")}` : ""}
                           </div>
+                          {(item.children || []).length > 0 && (
+                            <div className="mt-1 text-[11px] leading-relaxed text-foreground-600">
+                              <span className="text-foreground-500">二级目录 {item.children!.length} 项：</span>
+                              {item.children!.slice(0, 8).map((c) => c.name).join("、")}
+                              {item.children!.length > 8 ? "…" : ""}
+                            </div>
+                          )}
                           {item.mergeStatus && item.mergeStatus !== "新增" && (
                             <div className="mt-1">
                               <StatusBadge status={item.mergeStatus} />
@@ -535,17 +623,12 @@ export default function ProductLibraryDetailPage() {
                       <div className="line-clamp-2 text-xs leading-relaxed text-foreground-600">{item.intro || "—"}</div>
                     </td>
                     <td className="px-3 py-3">
-                      {item.images.length === 0 ? (
+                      {imageCountOf(item) === 0 ? (
                         <span className="text-xs text-foreground-400">无图</span>
-                      ) : item.images[0]?.url ? (
-                        <div className="flex items-center gap-1.5">
-                          <AuthImage src={item.images[0].url} className="h-8 w-8 rounded border border-background-300 object-cover" />
-                          <span className="text-[10px] text-foreground-500">{item.images.length} 张</span>
-                        </div>
                       ) : (
                         <span className="inline-flex items-center gap-1 rounded bg-primary-50 px-1.5 py-0.5 text-[10px] font-medium text-primary-600">
                           <i className="ri-image-line"></i>
-                          {item.images.length} 张
+                          {imageCountOf(item)} 张
                         </span>
                       )}
                     </td>
@@ -557,8 +640,8 @@ export default function ProductLibraryDetailPage() {
                         <button
                           type="button"
                           title="查看图文说明"
-                          onClick={() => setDetailItem(item)}
-                          className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-foreground-500 transition-all hover:scale-110 hover:bg-background-200 hover:text-foreground-800"
+                          onClick={() => openDetail(item)}
+                          className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-foreground-500 transition-colors hover:bg-background-200 hover:text-foreground-800"
                         >
                           <i className="ri-eye-line text-sm"></i>
                         </button>
@@ -568,7 +651,7 @@ export default function ProductLibraryDetailPage() {
                               type="button"
                               title="编辑"
                               onClick={() => openEdit(item)}
-                              className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-foreground-500 transition-all hover:scale-110 hover:bg-primary-50 hover:text-primary-600"
+                              className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-foreground-500 transition-colors hover:bg-primary-50 hover:text-primary-600"
                             >
                               <i className="ri-pencil-line text-sm"></i>
                             </button>
@@ -577,7 +660,7 @@ export default function ProductLibraryDetailPage() {
                                 type="button"
                                 title="审核入库"
                                 onClick={() => handleStatus(item, "已入库")}
-                                className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-foreground-500 transition-all hover:scale-110 hover:bg-primary-50 hover:text-primary-600"
+                                className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-foreground-500 transition-colors hover:bg-primary-50 hover:text-primary-600"
                               >
                                 <i className="ri-check-line text-sm"></i>
                               </button>
@@ -606,7 +689,7 @@ export default function ProductLibraryDetailPage() {
                               type="button"
                               title="删除"
                               onClick={() => handleDelete(item)}
-                              className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-foreground-500 transition-all hover:scale-110 hover:bg-red-50 hover:text-red-600"
+                              className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-foreground-500 transition-colors hover:bg-red-50 hover:text-red-600"
                             >
                               <i className="ri-delete-bin-line text-sm"></i>
                             </button>
@@ -621,7 +704,7 @@ export default function ProductLibraryDetailPage() {
                     <td colSpan={8} className="px-4 py-16 text-center">
                       <i className="ri-inbox-line text-3xl text-foreground-400"></i>
                       <p className="mt-3 text-sm text-foreground-500">
-                        {items.length === 0 ? "本产品库暂无功能点，请上传该产品的技术标" : "没有找到匹配的功能点"}
+        {items.length === 0 ? "本产品库暂无一级功能菜单，请上传该产品的技术标" : "没有找到匹配的功能菜单"}
                       </p>
                     </td>
                   </tr>
@@ -653,6 +736,9 @@ export default function ProductLibraryDetailPage() {
               </div>
             </div>
           )}
+          <div className="border-t border-background-300 bg-background-50">
+            <PaginationBar total={filtered.length} page={page} pageSize={PAGE_SIZE} onPageChange={setPage} />
+          </div>
         </div>
       ) : (
         <div className="overflow-hidden rounded-lg border border-background-300 bg-background-100">
@@ -661,7 +747,7 @@ export default function ProductLibraryDetailPage() {
               <i className="ri-file-search-line text-primary-500"></i>
               本产品技术标解析
             </div>
-            <span className="font-label text-xs text-foreground-500">共 {jobs.length} 份 · 抽取结果只进入「{library.name}」</span>
+            <span className="font-label text-xs text-foreground-500">共 {jobs.length} 份 · 功能点只进入「{library.name}」，证照同步到资质库</span>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[880px] text-left">
@@ -825,7 +911,7 @@ export default function ProductLibraryDetailPage() {
                 {draftImages.map((img) => (
                   <div key={img.id} className="overflow-hidden rounded-lg border border-background-300 bg-background-50">
                     {img.url ? (
-                      <AuthImage src={img.url} alt={img.caption} className="h-24 w-full object-cover" />
+                      <AuthImage src={img.url} alt={img.caption} eager className="h-24 w-full object-cover" />
                     ) : (
                       <div className="flex h-24 items-center justify-center bg-gradient-to-br from-secondary-100 to-secondary-200 text-secondary-500">
                         <i className={`${imageKindIcon[img.kind]} text-2xl`}></i>
@@ -915,78 +1001,79 @@ export default function ProductLibraryDetailPage() {
 
       <Modal
         open={!!detailItem}
-        onClose={() => setDetailItem(null)}
+        onClose={() => {
+          setDetailItem(null);
+          setDetailChildId("");
+        }}
         title={detailItem ? detailItem.name : "图文说明"}
-        subtitle={detailItem ? `${library.name} · ${detailItem.module || "未分模块"} · 来源 ${detailItem.sourceDoc}` : undefined}
-        width="max-w-2xl"
+        subtitle={detailItem ? `${library.name} · 一级功能菜单 · 来源 ${detailItem.sourceDoc}` : undefined}
+        width="max-w-3xl"
       >
-        {detailItem && (
-          <div className="space-y-4">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="inline-flex items-center rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700">{detailItem.kind}</span>
-              <StatusBadge status={detailItem.status} />
-            </div>
-            {detailItem.params && (
-              <div>
-                <div className={labelCls}>技术参数</div>
-                <p className="text-sm leading-relaxed text-foreground-700">{detailItem.params}</p>
+        {detailItem && (() => {
+          const children = detailItem.children || [];
+          const viewing =
+            children.find((child) => child.id === detailChildId) || children[0] || detailItem;
+          return (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="inline-flex items-center rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700">{viewing.kind}</span>
+                <StatusBadge status={viewing.status} />
+                {children.length > 0 && viewing.id !== detailItem.id ? (
+                  <span className="text-[10px] text-foreground-500">二级功能 · {viewing.name}</span>
+                ) : null}
               </div>
-            )}
-            <div>
-              <div className={labelCls}>写标可用说明</div>
-              <div className="rounded-lg border border-background-300 bg-background-50 px-3 py-2.5 text-sm leading-relaxed text-foreground-800">
-                {detailItem.bidCopy || detailItem.intro || "尚未生成写标说明"}
-              </div>
-            </div>
-            <div>
-              <div className={labelCls}>附图</div>
-              {detailItem.images.length === 0 ? (
-                <p className="text-xs text-foreground-500">该条目尚未绑定附图。</p>
-              ) : (
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                  {detailItem.images.map((img) => (
-                    <div key={img.id} className="overflow-hidden rounded-lg border border-background-300 bg-background-50">
-                      {img.url ? (
-                        <AuthImage src={img.url} alt={img.caption} className="h-24 w-full object-cover" />
-                      ) : (
-                      <div className="flex h-24 items-center justify-center bg-gradient-to-br from-secondary-100 to-secondary-200 text-secondary-500">
-                        <i className={`${imageKindIcon[img.kind]} text-2xl`}></i>
-                      </div>
-                      )}
-                      <div className="px-2 py-1.5">
-                        <div className="truncate text-[11px] font-medium text-foreground-800">{img.caption}</div>
-                        <div className="text-[10px] text-foreground-500">{img.kind}</div>
-                      </div>
-                    </div>
-                  ))}
+              {children.length > 0 && (
+                <div>
+                  <div className={labelCls}>二级功能目录</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {children.map((child) => (
+                      <button
+                        key={child.id}
+                        type="button"
+                        onClick={() => setDetailChildId(child.id)}
+                        className={`cursor-pointer whitespace-nowrap rounded-md border px-2.5 py-1 text-xs font-medium transition-all ${
+                          viewing.id === child.id
+                            ? "border-primary-200 bg-primary-50 text-primary-600"
+                            : "border-background-300 bg-transparent text-foreground-600 hover:border-background-400 hover:text-foreground-700"
+                        }`}
+                      >
+                        {child.name}
+                        {child.images.length > 0 ? (
+                          <span className="ml-1 text-[10px] opacity-70">{child.images.length}</span>
+                        ) : null}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
-            </div>
-            <div className="flex items-center justify-end gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => void copyText(formatBidCopy(detailItem), "已复制写标说明")}
-                className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-background-300 px-4 text-sm font-medium text-foreground-600 transition-colors hover:bg-background-200"
-              >
-                <i className="ri-file-copy-line text-sm"></i>
-                复制说明
-              </button>
-              {canEdit && (
+              <FeatureDetailBody item={viewing} />
+              <div className="flex items-center justify-end gap-2 pt-1">
                 <button
                   type="button"
-                  onClick={() => {
-                    openEdit(detailItem);
-                    setDetailItem(null);
-                  }}
-                  className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-4 text-sm font-medium text-background-50 transition-colors hover:bg-primary-600"
+                  onClick={() => void copyText(formatBidCopy(viewing), "已复制写标说明")}
+                  className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-background-300 px-4 text-sm font-medium text-foreground-600 transition-colors hover:bg-background-200"
                 >
-                  <i className="ri-pencil-line text-sm"></i>
-                  编辑
+                  <i className="ri-file-copy-line text-sm"></i>
+                  复制说明
                 </button>
-              )}
+                {canEdit && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      openEdit(viewing);
+                      setDetailItem(null);
+                      setDetailChildId("");
+                    }}
+                    className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-4 text-sm font-medium text-background-50 transition-colors hover:bg-primary-600"
+                  >
+                    <i className="ri-pencil-line text-sm"></i>
+                    编辑
+                  </button>
+                )}
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
       </Modal>
 
       <Modal open={previewOpen} onClose={() => setPreviewOpen(false)} title="写标素材预览" subtitle={`来自产品库「${library.name}」，不会串入其他产品`} width="max-w-2xl">
@@ -1038,13 +1125,13 @@ export default function ProductLibraryDetailPage() {
           setUploadOpen(false);
         }}
         title="上传本产品技术标"
-        subtitle={`抽取结果只会进入「${library.name}」，不会写入其他产品库。`}
+        subtitle={`功能点只进入「${library.name}」。文档里的营业执照、荣誉证书、合同复印件等会同步到资质证照库并查重合并，不写入本产品库。`}
       >
         <form onSubmit={handleParseUpload} className="space-y-4">
           <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-background-300 bg-background-50 px-4 py-6 text-center">
             <i className="ri-upload-cloud-2-line text-2xl text-primary-500"></i>
             <p className="text-xs text-foreground-500">
-              {uploadFiles.length ? uploadFiles.map((f) => f.name).join("、") : "可同时选择多份该产品对应的过往技术标 / 响应文件"}
+              {uploadFiles.length ? uploadFiles.map((f) => f.name).join("、") : "可同时选择多份过往技术标 / 响应文件；其中的资质证照会自动进入资质证照库"}
             </p>
             <input
               ref={fileRef}

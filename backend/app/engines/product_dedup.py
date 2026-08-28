@@ -1,4 +1,4 @@
-"""产品库功能点去重：规范化名称 + token Jaccard，灰区少量 LLM 对判。"""
+"""产品库功能点去重：大模型判断是否同一功能；合并时优先保留有配图的条目。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import os
 import re
 
 import jieba
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from ..config import get_settings
 from ..models import ProductFeature, ProductFeatureImage, ProductSourceDoc, gen_id
@@ -20,9 +20,8 @@ logger = logging.getLogger(__name__)
 STRIP_SUFFIX = re.compile(r"(系统|功能模块|功能点|功能|模块|支持|提供)+$")
 SPACE_RE = re.compile(r"[\s\u3000]+")
 PUNCT_RE = re.compile(r"[“”\"'（）()【】\[\]《》,，.。:：;；、]")
-AUTO_JACCARD = 0.72
-GRAY_JACCARD = 0.45
-MAX_LLM_PAIRS = 20
+GRAY_JACCARD = 0.32
+MAX_LLM_PAIRS = 80
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -53,36 +52,70 @@ def name_jaccard(a: str, b: str) -> float:
     return len(ta & tb) / len(ta | tb)
 
 
-def modules_compatible(a: str, b: str) -> bool:
-    left, right = (a or "").strip(), (b or "").strip()
-    if not left or not right:
-        return True
-    return normalize_name(left) == normalize_name(right)
-
-
 def goods_key(item: dict | ProductFeature) -> str:
     if isinstance(item, ProductFeature):
         return f"{(item.brand or '').strip()}|{(item.model or '').strip()}"
     return f"{(item.get('brand') or '').strip()}|{(item.get('model') or '').strip()}"
 
 
+def _image_count(item: dict | ProductFeature) -> int:
+    if isinstance(item, ProductFeature):
+        return len(item.images or [])
+    return len(item.get("images") or [])
+
+
 def merge_candidates_in_doc(candidates: list[dict]) -> list[dict]:
-    """同一份技术标内按规范化名称合并。"""
+    """同一份技术标内去重：名称相同或大模型判定相同则合并，保留配图更多的那条。"""
     merged: list[dict] = []
-    index: dict[str, int] = {}
+    llm_used = 0
     for cand in candidates:
-        key = normalize_name(cand.get("name") or "")
-        if not key:
-            merged.append(cand)
-            continue
-        goods = goods_key(cand)
-        lookup = f"{key}|{goods}"
-        if lookup in index:
-            _union_candidate(merged[index[lookup]], cand)
-            continue
-        index[lookup] = len(merged)
-        merged.append(cand)
+        children = list(cand.get("children") or [])
+        parent = dict(cand)
+        parent["children"] = []
+        host, llm_used = _merge_into_list(merged, parent, llm_used)
+        host.setdefault("children", [])
+        for child in children:
+            child = dict(child)
+            child["children"] = []
+            _, llm_used = _merge_into_list(host["children"], child, llm_used)
     return merged
+
+
+def _merge_into_list(pool: list[dict], cand: dict, llm_used: int) -> tuple[dict, int]:
+    key = normalize_name(cand.get("name") or "")
+    if not key:
+        pool.append(cand)
+        return cand, llm_used
+    hit, score = _best_match_dict(cand, pool)
+    same = False
+    if hit and normalize_name(hit.get("name") or "") == key and goods_key(cand) == goods_key(hit):
+        same = True
+    elif hit and score >= GRAY_JACCARD and llm_used < MAX_LLM_PAIRS:
+        llm_used += 1
+        same = _llm_same_pair(cand, hit) == "相同"
+    if same and hit:
+        prefer_incoming = _image_count(cand) > _image_count(hit)
+        if prefer_incoming:
+            idx = pool.index(hit)
+            _union_candidate(cand, hit)
+            pool[idx] = cand
+            return cand, llm_used
+        _union_candidate(hit, cand)
+        return hit, llm_used
+    pool.append(cand)
+    return cand, llm_used
+
+
+def _best_match_dict(cand: dict, existing: list[dict]) -> tuple[dict | None, float]:
+    best: dict | None = None
+    best_score = 0.0
+    for feat in existing:
+        score = name_jaccard(cand.get("name") or "", feat.get("name") or "")
+        for alias in feat.get("aliases") or []:
+            score = max(score, name_jaccard(cand.get("name") or "", alias))
+        if score > best_score:
+            best, best_score = feat, score
+    return best, best_score
 
 
 def _union_candidate(base: dict, extra: dict) -> None:
@@ -93,15 +126,28 @@ def _union_candidate(base: dict, extra: dict) -> None:
     base["aliases"] = alias
     if extra.get("params") and extra["params"] not in (base.get("params") or ""):
         base["params"] = _join_params(base.get("params") or "", extra["params"])
-    if extra.get("intro") and len(extra["intro"]) > len(base.get("intro") or ""):
-        if not base.get("intro"):
+    prefer_extra_text = _image_count(extra) > _image_count(base) or (
+        _image_count(extra) > 0 and _image_count(base) == 0
+    )
+    if prefer_extra_text:
+        if extra.get("name"):
+            if base.get("name") and extra["name"] != base["name"] and base["name"] not in alias:
+                alias.append(base["name"])
+                base["aliases"] = alias
+            base["name"] = extra["name"]
+        if extra.get("intro"):
             base["intro"] = extra["intro"]
-        else:
-            base["intro"] = base["intro"]
-    if extra.get("bidCopy") and not base.get("bidCopy"):
-        base["bidCopy"] = extra["bidCopy"]
-    if extra.get("module") and not base.get("module"):
-        base["module"] = extra["module"]
+        if extra.get("bidCopy"):
+            base["bidCopy"] = extra["bidCopy"]
+        if extra.get("module"):
+            base["module"] = extra["module"]
+    else:
+        if extra.get("intro") and not base.get("intro"):
+            base["intro"] = extra["intro"]
+        if extra.get("bidCopy") and not base.get("bidCopy"):
+            base["bidCopy"] = extra["bidCopy"]
+        if extra.get("module") and not base.get("module"):
+            base["module"] = extra["module"]
     ev = list(base.get("evidence") or [])
     for row in extra.get("evidence") or []:
         if row not in ev:
@@ -148,19 +194,39 @@ def _conflict_clauses(existing: str, incoming: str) -> list[str]:
 
 
 def _extract_model_id() -> str:
-    settings = get_settings()
-    if settings.ark_api_key:
-        return "doubao"
-    return "deepseek-v4-flash"
+    from .llm import get_default_model_id
+
+    return get_default_model_id()
 
 
-def _llm_same_feature(a: dict, b: ProductFeature) -> str:
+def _llm_same_pair(a: dict | ProductFeature, b: dict | ProductFeature) -> str:
     """返回 相同 / 应分开 / 不同。失败时视为不同。"""
+
+    def pack(item: dict | ProductFeature) -> tuple[str, str, str, str, int]:
+        if isinstance(item, ProductFeature):
+            return (
+                item.name or "",
+                item.module or "",
+                (item.intro or "")[:180],
+                (item.params or "")[:180],
+                _image_count(item),
+            )
+        return (
+            item.get("name") or "",
+            item.get("module") or "",
+            (item.get("intro") or "")[:180],
+            (item.get("params") or "")[:180],
+            _image_count(item),
+        )
+
+    an, am, ai, ap, aimg = pack(a)
+    bn, bm, bi, bp, bimg = pack(b)
     prompt = (
         "判断下面两条是否为同一产品能力。只回复三个词之一：相同、应分开、不同。\n"
-        "相同=名称与能力实质一样，可合并；应分开=相关但写标时要两条；不同=无关。\n\n"
-        f"A 名称：{a.get('name')} 模块：{a.get('module') or '无'} 参数：{(a.get('params') or '')[:200]}\n"
-        f"B 名称：{b.name} 模块：{b.module or '无'} 参数：{(b.params or '')[:200]}\n"
+        "相同=实质同一功能，应合并成一条；应分开=相关但写标时要两条；不同=无关。\n"
+        "名称相近但能力不同不要判相同。\n\n"
+        f"A 名称：{an} 菜单：{am or '无'} 有配图：{'是' if aimg else '否'} 说明：{ai or '无'} 参数：{ap or '无'}\n"
+        f"B 名称：{bn} 菜单：{bm or '无'} 有配图：{'是' if bimg else '否'} 说明：{bi or '无'} 参数：{bp or '无'}\n"
     )
     try:
         text = chat_complete(
@@ -194,6 +260,7 @@ def apply_to_library(
     """把本份候选并入产品库。返回 extracted/merged/suspected/conflicts 计数。"""
     existing = (
         db.query(ProductFeature)
+        .options(selectinload(ProductFeature.images))
         .filter(ProductFeature.library_id == source_doc.library_id)
         .all()
     )
@@ -201,20 +268,22 @@ def apply_to_library(
     gray_used = 0
     source_row = {"docId": source_doc.id, "filename": source_doc.filename}
 
-    for cand in candidates:
+    def apply_one(cand: dict, pool: list[ProductFeature], parent_id: str | None) -> ProductFeature | None:
+        nonlocal gray_used
         name = (cand.get("name") or "").strip()
         if not name:
-            continue
-        hit, score = _best_match(cand, existing)
+            return None
+        hit, score = _best_match(cand, pool)
         action = "new"
-        if hit and score >= AUTO_JACCARD and modules_compatible(cand.get("module") or "", hit.module or ""):
+        exact = bool(hit and normalize_name(hit.name) == normalize_name(name))
+        if hit and exact:
             if (cand.get("kind") == "货物产品" or hit.kind == "货物产品") and goods_key(cand) != goods_key(hit) and goods_key(cand) != "|" and goods_key(hit) != "|":
                 action = "new"
             else:
                 action = "merge"
-        elif hit and GRAY_JACCARD <= score < AUTO_JACCARD and gray_used < MAX_LLM_PAIRS:
+        elif hit and score >= GRAY_JACCARD and gray_used < MAX_LLM_PAIRS:
             gray_used += 1
-            verdict = _llm_same_feature(cand, hit)
+            verdict = _llm_same_pair(cand, hit)
             if verdict == "相同":
                 action = "merge"
             elif verdict == "应分开":
@@ -227,10 +296,18 @@ def apply_to_library(
             stats["merged"] += 1
             if hit.merge_status == "参数冲突":
                 stats["conflicts"] += 1
-            continue
+            return hit
 
-        feature = _insert_feature(db, source_doc.library_id, cand, source_row, "疑似重复" if action == "suspect" else "新增")
+        feature = _insert_feature(
+            db,
+            source_doc.library_id,
+            cand,
+            source_row,
+            "疑似重复" if action == "suspect" else "新增",
+            parent_id=parent_id,
+        )
         existing.append(feature)
+        pool.append(feature)
         stats["extracted"] += 1
         if action == "suspect" and hit:
             ids = list(feature.suspected_ids_json or [])
@@ -244,6 +321,16 @@ def apply_to_library(
             hit.merge_status = "疑似重复" if hit.status != "已入库" else hit.merge_status
             stats["suspected"] += 1
         _save_candidate_images(db, feature, cand.get("images") or [])
+        return feature
+
+    roots = [feat for feat in existing if not feat.parent_id]
+    for cand in candidates:
+        parent = apply_one(cand, roots, None)
+        if parent is None:
+            continue
+        siblings = [feat for feat in existing if feat.parent_id == parent.id]
+        for child in cand.get("children") or []:
+            apply_one(child, siblings, parent.id)
 
     return stats
 
@@ -278,10 +365,17 @@ def _merge_into_feature(db: Session, feat: ProductFeature, cand: dict, source_ro
             evidence.append(row)
     feat.evidence_json = evidence
 
+    prefer_incoming = _image_count(cand) > _image_count(feat) or (
+        _image_count(cand) > 0 and _image_count(feat) == 0
+    )
     incoming_params = (cand.get("params") or "").strip()
     conflicts = _conflict_clauses(feat.params or "", incoming_params)
     if incoming_params:
-        feat.params = _join_params(feat.params or "", incoming_params)
+        feat.params = (
+            _join_params(incoming_params, feat.params or "")
+            if prefer_incoming
+            else _join_params(feat.params or "", incoming_params)
+        )
     if conflicts:
         feat.params_conflict_json = list(dict.fromkeys((feat.params_conflict_json or []) + conflicts))
         feat.merge_status = "参数冲突"
@@ -291,12 +385,25 @@ def _merge_into_feature(db: Session, feat: ProductFeature, cand: dict, source_ro
         if feat.status == "已入库":
             feat.status = "待审核"
 
-    if cand.get("module") and not feat.module:
-        feat.module = cand["module"]
-    if cand.get("intro") and not feat.intro:
-        feat.intro = cand["intro"]
-    if cand.get("bidCopy") and not feat.locked_copy and not feat.bid_copy:
-        feat.bid_copy = cand["bidCopy"]
+    if prefer_incoming:
+        if extra_name:
+            if feat.name and extra_name != feat.name and feat.name not in aliases:
+                aliases.append(feat.name)
+                feat.aliases_json = aliases
+            feat.name = extra_name
+        if cand.get("intro"):
+            feat.intro = cand["intro"]
+        if cand.get("bidCopy") and not feat.locked_copy:
+            feat.bid_copy = cand["bidCopy"]
+        if cand.get("module"):
+            feat.module = cand["module"]
+    else:
+        if cand.get("module") and not feat.module:
+            feat.module = cand["module"]
+        if cand.get("intro") and not feat.intro:
+            feat.intro = cand["intro"]
+        if cand.get("bidCopy") and not feat.locked_copy and not feat.bid_copy:
+            feat.bid_copy = cand["bidCopy"]
     if cand.get("brand") and not feat.brand:
         feat.brand = cand["brand"]
     if cand.get("model") and not feat.model:
@@ -307,7 +414,14 @@ def _merge_into_feature(db: Session, feat: ProductFeature, cand: dict, source_ro
     _save_candidate_images(db, feat, cand.get("images") or [])
 
 
-def _insert_feature(db: Session, library_id: str, cand: dict, source_row: dict, merge_status: str) -> ProductFeature:
+def _insert_feature(
+    db: Session,
+    library_id: str,
+    cand: dict,
+    source_row: dict,
+    merge_status: str,
+    parent_id: str | None = None,
+) -> ProductFeature:
     feat = ProductFeature(
         library_id=library_id,
         name=(cand.get("name") or "").strip()[:80],
@@ -326,6 +440,7 @@ def _insert_feature(db: Session, library_id: str, cand: dict, source_row: dict, 
         evidence_json=list(cand.get("evidence") or []),
         params_conflict_json=[],
         suspected_ids_json=[],
+        parent_id=parent_id,
     )
     db.add(feat)
     db.flush()
@@ -372,7 +487,33 @@ def _safe_image_kind(kind: str | None) -> str:
 
 
 def merge_features(db: Session, keep: ProductFeature, drop: ProductFeature) -> ProductFeature:
-    """人工确认把 drop 并入 keep。"""
+    """人工确认把 drop 并入 keep；有配图的名称与说明优先保留。"""
+    if _image_count(drop) > _image_count(keep) or (_image_count(drop) > 0 and _image_count(keep) == 0):
+        keep, drop = drop, keep
+
+    drop_children = (
+        db.query(ProductFeature)
+        .filter(ProductFeature.parent_id == drop.id)
+        .all()
+    )
+    keep_children = (
+        db.query(ProductFeature)
+        .filter(ProductFeature.parent_id == keep.id)
+        .all()
+    )
+    for child in drop_children:
+        hit = next(
+            (row for row in keep_children if normalize_name(row.name) == normalize_name(child.name)),
+            None,
+        )
+        if hit:
+            merge_features(db, hit, child)
+            keep_children = [row for row in keep_children if row.id != child.id]
+        else:
+            child.parent_id = keep.id
+            child.module = keep.name
+            keep_children.append(child)
+
     dummy = {
         "name": drop.name,
         "module": drop.module,
@@ -415,6 +556,7 @@ def merge_features(db: Session, keep: ProductFeature, drop: ProductFeature) -> P
                 storage.delete(old_ref)
         img.feature_id = keep.id
         seen.add(img.sha256)
+    db.expire(drop, ["children"])
     db.delete(drop)
     db.flush()
     return keep
@@ -430,18 +572,31 @@ def mark_keep_both(keep: ProductFeature, other: ProductFeature) -> None:
 
 
 def match_ingested_features(db: Session, library_id: str, query: str, top_k: int = 6) -> list[ProductFeature]:
-    """在已入库功能点上按章节标题/思路做 BM25 匹配。"""
+    """在已入库一级功能菜单上按章节标题/思路做 BM25 匹配，检索文本含二级目录。"""
     from rank_bm25 import BM25Okapi
+    from sqlalchemy.orm import selectinload
 
     features = (
         db.query(ProductFeature)
-        .filter(ProductFeature.library_id == library_id, ProductFeature.status == "已入库")
+        .options(
+            selectinload(ProductFeature.children).selectinload(ProductFeature.images),
+            selectinload(ProductFeature.images),
+        )
+        .filter(
+            ProductFeature.library_id == library_id,
+            ProductFeature.status == "已入库",
+            ProductFeature.parent_id.is_(None),
+        )
         .all()
     )
     if not features or not (query or "").strip():
         return []
     corpus = []
     for feat in features:
+        child_blob = " ".join(
+            " ".join([child.name, child.intro or "", child.params or "", child.bid_copy or ""])
+            for child in (feat.children or [])
+        )
         blob = " ".join(
             [
                 feat.name,
@@ -450,6 +605,7 @@ def match_ingested_features(db: Session, library_id: str, query: str, top_k: int
                 feat.params or "",
                 feat.intro or "",
                 feat.bid_copy or "",
+                child_blob,
             ]
         )
         corpus.append([t for t in jieba.lcut(blob) if t.strip()])

@@ -11,6 +11,7 @@ import TeamPage from "../pages/console/team/page";
 import ParsePage from "../pages/console/parse/page";
 import QualificationsPage from "../pages/console/qualifications/page";
 import KnowledgePage from "../pages/console/knowledge/page";
+import KnowledgeDocumentDetailPage from "../pages/console/knowledge/detail";
 import ProductsPage from "../pages/console/products/page";
 import ProductLibraryDetailPage from "../pages/console/products/detail";
 import AuditPage from "../pages/console/audit/page";
@@ -18,6 +19,7 @@ import ReviewPage from "../pages/console/review/page";
 import ExportPage from "../pages/console/export/page";
 import RulesPage from "../pages/console/rules/page";
 import AuditLogPage from "../pages/console/auditlog/page";
+import ModelsPage from "../pages/console/models/page";
 import LoginPage from "../pages/login/page";
 
 const routes: RouteObject[] = [
@@ -58,6 +60,7 @@ const routes: RouteObject[] = [
       },
       { path: "qualifications", element: <QualificationsPage /> },
       { path: "knowledge", element: <KnowledgePage /> },
+      { path: "knowledge/:docId", element: <KnowledgeDocumentDetailPage /> },
       { path: "products", element: <ProductsPage /> },
       { path: "products/:libraryId", element: <ProductLibraryDetailPage /> },
       {
@@ -97,6 +100,14 @@ const routes: RouteObject[] = [
         element: (
           <RequirePerm anyOf={["members"]}>
             <TeamPage />
+          </RequirePerm>
+        ),
+      },
+      {
+        path: "models",
+        element: (
+          <RequirePerm anyOf={["settings"]}>
+            <ModelsPage />
           </RequirePerm>
         ),
       },

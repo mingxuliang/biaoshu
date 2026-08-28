@@ -51,8 +51,10 @@ export interface ProductItem {
   evidence?: { heading?: string; excerpt?: string }[];
   paramsConflict?: string[];
   suspectedIds?: string[];
-  images: ProductImage[];
-  updatedAt: string;
+    images: ProductImage[];
+    parentId?: string;
+    children?: ProductItem[];
+    updatedAt: string;
 }
 
 export interface ProductParseJob {

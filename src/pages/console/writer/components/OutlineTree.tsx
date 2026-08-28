@@ -288,7 +288,7 @@ export default function OutlineTree({
                   )}
                   <button
                     type="button"
-                    title="设置参考知识库"
+                    title="设置参考资料"
                     onClick={(e) => {
                       e.stopPropagation();
                       onKnowledge(node.id);
@@ -336,7 +336,7 @@ export default function OutlineTree({
             <i className="ri-edit-line text-xs text-foreground-500"></i>修改节点名称
           </button>
           <button type="button" className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-xs text-foreground-700 transition-colors hover:bg-background-100" onClick={() => onKnowledge(contextMenu.nodeId)}>
-            <i className="ri-bookmark-line text-xs text-primary-500"></i>设置参考知识库
+            <i className="ri-bookmark-line text-xs text-primary-500"></i>设置参考资料
           </button>
           <div className="mx-2 my-1 border-t border-background-200"></div>
           <button type="button" className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-xs text-foreground-700 transition-colors hover:bg-background-100" onClick={() => handleAction("moveUp")}>

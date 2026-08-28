@@ -436,12 +436,17 @@ export interface OutlineNode {
   words: number;
   aiRounds: number;
   sourceIndex?: number | null;
+  part?: "tech" | "business" | "form" | null;
+  requirement?: string;
 }
 
+export type KnowledgeRefSource = "knowledge" | "product" | "qualification";
+
 export interface KnowledgeRef {
+  source?: KnowledgeRefSource;
   docId: string;
   docTitle: string;
-  chapters: string[]; // 选中的知识文档章节（heading）
+  chapters: string[];
   mode: "manual" | "ai";
 }
 
@@ -472,7 +477,7 @@ export interface UpdateWriterDraftPayload {
 
 export interface WriterJob {
   jobId: string;
-  kind: "outline" | "chapter";
+  kind: "outline" | "chapter" | "product-match";
   chapterId?: string | null;
   status: "queued" | "running" | "done" | "failed";
   error?: string | null;
@@ -502,6 +507,10 @@ export async function updateWriterDraft(
 
 export async function createOutlineJob(draftId: string): Promise<WriterJob> {
   return request<WriterJob>(`/api/writer-drafts/${draftId}/outline-jobs`, { method: "POST" });
+}
+
+export async function createProductMatchJob(draftId: string): Promise<WriterJob> {
+  return request<WriterJob>(`/api/writer-drafts/${draftId}/product-match-jobs`, { method: "POST" });
 }
 
 export async function getWriterJobStatus(jobId: string): Promise<WriterJob> {
@@ -664,15 +673,28 @@ export interface KnowledgeDoc {
   updatedAt: string;
 }
 
+export interface KnowledgeSliceImage {
+  id: string;
+  caption: string;
+  url: string;
+}
+
 export interface KnowledgeChapter {
   heading: string;
   sliceCount: number;
+  level?: "一级" | "二级" | "三级" | string;
+  imageCount?: number;
+  excerpt?: string;
+  images?: KnowledgeSliceImage[];
+  children?: KnowledgeChapter[];
 }
 
 export interface KnowledgeChapterDetail {
   docTitle: string;
   heading: string;
   paragraphs: string[];
+  level?: string;
+  images?: KnowledgeSliceImage[];
 }
 
 export interface KnowledgeSuggestion {
@@ -725,6 +747,10 @@ export async function uploadKnowledgeDocument(
 
 export async function deleteKnowledgeDocument(id: string): Promise<void> {
   await request(`/api/knowledge-documents/${id}`, { method: "DELETE" });
+}
+
+export async function rechunkKnowledgeDocument(id: string): Promise<KnowledgeDoc> {
+  return request<KnowledgeDoc>(`/api/knowledge-documents/${id}/rechunk`, { method: "POST" });
 }
 
 export async function getKnowledgeChapters(docId: string): Promise<KnowledgeChapter[]> {
@@ -1089,10 +1115,28 @@ export async function createQualification(
 export async function updateQualification(
   token: string,
   id: string,
-  payload: { reviewStatus?: "待审核" | "已入库" },
+  payload: {
+    kind?: QualificationKind;
+    name?: string;
+    level?: string;
+    number?: string;
+    validUntil?: string;
+    owner?: string;
+    detail?: string;
+    reviewStatus?: "待审核" | "已入库";
+    file?: File | null;
+  },
 ): Promise<QualificationAsset> {
   const form = new FormData();
+  if (payload.kind) form.append("kind", payload.kind);
+  if (payload.name != null) form.append("name", payload.name);
+  if (payload.level != null) form.append("level", payload.level);
+  if (payload.number != null) form.append("number", payload.number);
+  if (payload.validUntil != null) form.append("valid_until", payload.validUntil);
+  if (payload.owner != null) form.append("owner", payload.owner);
+  if (payload.detail != null) form.append("detail", payload.detail);
   if (payload.reviewStatus) form.append("review_status", payload.reviewStatus);
+  if (payload.file) form.append("file", payload.file);
   return request<QualificationAsset>(`/api/qualifications/${id}`, {
     method: "PATCH",
     headers: { Authorization: `Bearer ${token}` },
@@ -1491,6 +1535,7 @@ export interface ProductFeatureIn {
   model: string;
   unit: string;
   status?: ProductStatus;
+  parentId?: string;
 }
 
 export interface ProductExtractJob {
@@ -1624,3 +1669,129 @@ export async function pollProductExtractJobUntilDone(
 }
 
 export { ApiError };
+
+export type LlmProviderKind = "deepseek" | "doubao" | "qwen" | "siliconflow" | "openai" | "custom" | "local";
+
+export interface WriterLlmModel {
+  id: string;
+  providerId: string;
+  providerKind: LlmProviderKind;
+  providerName: string;
+  name: string;
+  apiModel: string;
+  thinking: boolean;
+  enabled: boolean;
+  isDefault: boolean;
+  ctx: string;
+  speed: string;
+  vision: boolean;
+  ready: boolean;
+}
+
+export interface LlmProvider {
+  id: string;
+  name: string;
+  kind: LlmProviderKind;
+  baseUrl: string;
+  apiKeyMasked: string;
+  hasKey: boolean;
+  enabled: boolean;
+  note: string;
+  ready: boolean;
+  models: WriterLlmModel[];
+}
+
+export interface LlmPreset {
+  kind: LlmProviderKind;
+  label: string;
+  defaultBaseUrl: string;
+  keyRequired: boolean;
+  hint: string;
+  sampleModels: { name: string; api_model?: string; thinking?: boolean; ctx?: string; speed?: string }[];
+}
+
+export interface LlmTestResult {
+  ok: boolean;
+  message: string;
+  latencyMs: number;
+  preview: string;
+}
+
+export async function listWriterModels(): Promise<WriterLlmModel[]> {
+  return request<WriterLlmModel[]>("/api/llm-models");
+}
+
+export async function listLlmPresets(): Promise<LlmPreset[]> {
+  return request<LlmPreset[]>("/api/llm-presets");
+}
+
+export async function listLlmProviders(): Promise<LlmProvider[]> {
+  return request<LlmProvider[]>("/api/llm-providers");
+}
+
+export async function createLlmProvider(payload: {
+  name: string;
+  kind: LlmProviderKind;
+  baseUrl?: string;
+  apiKey?: string;
+  note?: string;
+}): Promise<LlmProvider> {
+  return request<LlmProvider>("/api/llm-providers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function patchLlmProvider(
+  id: string,
+  payload: { name?: string; baseUrl?: string; apiKey?: string; enabled?: boolean; note?: string; clearKey?: boolean },
+): Promise<LlmProvider> {
+  return request<LlmProvider>(`/api/llm-providers/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteLlmProvider(id: string): Promise<void> {
+  await request(`/api/llm-providers/${id}`, { method: "DELETE" });
+}
+
+export async function createLlmModel(
+  providerId: string,
+  payload: { name: string; apiModel: string; thinking?: boolean; enabled?: boolean; isDefault?: boolean; ctx?: string; speed?: string },
+): Promise<WriterLlmModel> {
+  return request<WriterLlmModel>(`/api/llm-providers/${providerId}/models`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function patchLlmModel(
+  id: string,
+  payload: {
+    name?: string;
+    apiModel?: string;
+    thinking?: boolean;
+    enabled?: boolean;
+    isDefault?: boolean;
+    ctx?: string;
+    speed?: string;
+  },
+): Promise<WriterLlmModel> {
+  return request<WriterLlmModel>(`/api/llm-models/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteLlmModel(id: string): Promise<void> {
+  await request(`/api/llm-models/${id}`, { method: "DELETE" });
+}
+
+export async function testLlmModel(id: string): Promise<LlmTestResult> {
+  return request<LlmTestResult>(`/api/llm-models/${id}/test`, { method: "POST" });
+}

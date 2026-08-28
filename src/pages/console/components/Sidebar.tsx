@@ -29,6 +29,7 @@ const navGroups: {
     label: "系统模块",
     items: [
       { to: "/console/rules", label: "预审规则", icon: "ri-tools-line", anyOf: ["settings"] },
+      { to: "/console/models", label: "模型配置", icon: "ri-cpu-line", anyOf: ["settings"] },
       { to: "/console/team", label: "团队管理", icon: "ri-team-line", anyOf: ["members"] },
       { to: "/console/auditlog", label: "审计日志", icon: "ri-file-history-line", anyOf: ["settings"] },
     ],

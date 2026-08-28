@@ -12,6 +12,7 @@ function getTitle(pathname: string): string {
   if (pathname.startsWith("/console/writer")) return "撰写工作台";
   if (pathname.startsWith("/console/parse")) return "招标解析";
   if (pathname.startsWith("/console/qualifications")) return "资质证照库";
+  if (pathname.match(/^\/console\/knowledge\/[^/]+$/)) return "知识文档切片";
   if (pathname.startsWith("/console/knowledge")) return "文档知识库";
   if (pathname.match(/^\/console\/products\/[^/]+$/)) return "产品库详情";
   if (pathname.startsWith("/console/products")) return "产品功能库";
@@ -19,6 +20,7 @@ function getTitle(pathname: string): string {
   if (pathname.startsWith("/console/review")) return "修改闭环";
   if (pathname.startsWith("/console/export")) return "Word 导出";
   if (pathname.startsWith("/console/rules")) return "预审规则";
+  if (pathname.startsWith("/console/models")) return "模型配置";
   if (pathname.startsWith("/console/team")) return "团队管理";
   if (pathname.startsWith("/console/auditlog")) return "审计日志";
   return "工作台";

@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  modelOptions, defaultStyle, pageSliderTicks, defaultPage, defaultLayout,
+  defaultStyle, pageSliderTicks, defaultPage, defaultLayout,
   layoutFontSizes, layoutLineSpacings, defaultImage, normalImageOptions,
   archImageOptions, aiImageStyles,
   type StyleConfig, type PageConfig, type LayoutConfig, type ImageConfig,
 } from "@/mocks/writerSteps";
-import { KNOWLEDGE_SCOPES, KNOWLEDGE_TYPES, listKnowledgeDocuments, listProductLibraries, type KnowledgeDoc, type ProductLibrary } from "@/lib/api";
+import { KNOWLEDGE_SCOPES, KNOWLEDGE_TYPES, listKnowledgeDocuments, listProductLibraries, listWriterModels, type KnowledgeDoc, type ProductLibrary, type WriterLlmModel } from "@/lib/api";
 
 export interface WriterSettingsPayload {
   style: StyleConfig;
@@ -48,6 +48,7 @@ export default function BidSettings({
 
   const [knowledgeDocs, setKnowledgeDocs] = useState<KnowledgeDoc[]>([]);
   const [productLibraries, setProductLibraries] = useState<ProductLibrary[]>([]);
+  const [models, setModels] = useState<WriterLlmModel[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -64,6 +65,13 @@ export default function BidSettings({
       })
       .catch(() => {
         /* 产品库拉取失败不阻塞设置流程 */
+      });
+    listWriterModels()
+      .then((rows) => {
+        if (!cancelled) setModels(rows);
+      })
+      .catch(() => {
+        /* 模型列表失败时仍可用草稿已选模型 */
       });
     return () => {
       cancelled = true;
@@ -118,7 +126,12 @@ export default function BidSettings({
             <span className="text-[11px] text-foreground-500">目录与章节正文均由该模型生成</span>
           </div>
           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
-            {modelOptions.map((m) => {
+            {models.length === 0 ? (
+              <p className="col-span-full text-xs text-foreground-500">
+                暂无可用模型。请管理员在「系统模块 · 模型配置」填写秘钥并启用模型。
+              </p>
+            ) : (
+              models.map((m) => {
               const active = m.id === modelId;
               return (
                 <button
@@ -133,18 +146,23 @@ export default function BidSettings({
                     <span className={`flex h-6 w-6 items-center justify-center rounded-full border text-[10px] ${active ? "border-primary-500 bg-primary-500 text-background-50" : "border-background-300 text-foreground-400"}`}>
                       {active ? <i className="ri-check-line"></i> : <i className="ri-robot-2-line"></i>}
                     </span>
-                    {m.tag && <span className="rounded bg-accent-100 px-1.5 py-0.5 text-[10px] font-medium text-accent-700">{m.tag}</span>}
+                    <span className="flex gap-1">
+                      {m.isDefault && <span className="rounded bg-accent-100 px-1.5 py-0.5 text-[10px] font-medium text-accent-700">默认</span>}
+                      {m.thinking && <span className="rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700">思维链</span>}
+                      {!m.ready && <span className="rounded bg-accent-50 px-1.5 py-0.5 text-[10px] text-accent-700">未配秘钥</span>}
+                    </span>
                   </div>
                   <div className="text-sm font-semibold text-foreground-900">{m.name}</div>
-                  <div className="text-[11px] text-foreground-500">{m.provider}</div>
-                  <p className="text-[11px] leading-relaxed text-foreground-600">{m.desc}</p>
+                  <div className="text-[11px] text-foreground-500">{m.providerName}</div>
+                  <p className="text-[11px] leading-relaxed text-foreground-600">{m.apiModel}</p>
                   <div className="mt-0.5 flex gap-1.5">
-                    <span className="rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700">上下文 {m.ctx}</span>
-                    <span className="rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700">速度 {m.speed}</span>
+                    {m.ctx ? <span className="rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700">上下文 {m.ctx}</span> : null}
+                    {m.speed ? <span className="rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700">速度 {m.speed}</span> : null}
                   </div>
                 </button>
               );
-            })}
+              })
+            )}
           </div>
         </section>
 

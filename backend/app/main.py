@@ -9,6 +9,7 @@ from .routers import (
     documents,
     export,
     knowledge,
+    llm_config,
     prereview,
     products,
     projects,
@@ -19,7 +20,7 @@ from .routers import (
     users,
     writer,
 )
-from .seed import purge_demo_data, seed_defaults, seed_rules
+from .seed import purge_demo_data, seed_defaults, seed_llm, seed_rules
 
 settings = get_settings()
 
@@ -30,6 +31,7 @@ with SessionLocal() as _seed_db:
     purge_demo_data(_seed_db)
     seed_defaults(_seed_db)
     seed_rules(_seed_db)
+    seed_llm(_seed_db)
 
 app = FastAPI(title="智标云 AI 预审引擎")
 
@@ -52,6 +54,7 @@ app.include_router(knowledge.router)
 app.include_router(products.router)
 app.include_router(export.router)
 app.include_router(rules.router)
+app.include_router(llm_config.router)
 app.include_router(users.router)
 app.include_router(qualifications.router)
 app.include_router(auditlog.router)

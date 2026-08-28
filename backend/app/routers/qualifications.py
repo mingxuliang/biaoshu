@@ -11,7 +11,7 @@ from ..auth import get_current_user
 from ..db import get_db
 from ..engines.ocr import ocr_file
 from ..engines.qualification_dedup import VALID_KINDS as DEDUP_KINDS
-from ..engines.qualification_dedup import mark_keep_both, merge_assets
+from ..engines.qualification_dedup import is_business_license, mark_keep_both, merge_assets
 from ..models import QualificationAsset, QualificationAssetImage, QualificationSourceDoc, User
 from ..permissions import PERM_QUAL_EDIT, require_perm
 from ..schemas import (
@@ -164,6 +164,16 @@ def _require_asset(db: Session, qual_id: str) -> QualificationAsset:
     return item
 
 
+def _existing_business_license(db: Session, exclude_id: str | None = None) -> QualificationAsset | None:
+    rows = db.query(QualificationAsset).all()
+    for row in rows:
+        if exclude_id and row.id == exclude_id:
+            continue
+        if is_business_license(row.name or "", row.number or "", row.detail or ""):
+            return row
+    return None
+
+
 @router.get("/qualifications", response_model=list[QualificationOut])
 def list_qualifications(
     db: Session = Depends(get_db),
@@ -198,6 +208,8 @@ async def create_qualification(
     title = name.strip()
     if not title:
         raise HTTPException(400, "请填写名称")
+    if is_business_license(title, number, detail) and _existing_business_license(db):
+        raise HTTPException(400, "营业执照全公司只需一条，请编辑已有条目")
 
     filename = ""
     storage_path = ""
@@ -264,6 +276,8 @@ async def update_qualification(
         item.owner = owner.strip()
     if detail != "":
         item.detail = detail.strip()
+    if is_business_license(item.name, item.number, item.detail) and _existing_business_license(db, exclude_id=item.id):
+        raise HTTPException(400, "营业执照全公司只需一条，请编辑已有条目")
     if review_status:
         if review_status not in REVIEW_STATUSES:
             raise HTTPException(400, "审核状态不合法")
