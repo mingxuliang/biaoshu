@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import AuthImage from "../../components/AuthImage";
 import { useAuth } from "@/context/AuthContext";
 import {
@@ -70,6 +70,31 @@ function sourceOf(ref: KnowledgeRef): SourceTab {
   return ref.source || "knowledge";
 }
 
+function firstBoundTab(refs: KnowledgeRef[]): SourceTab {
+  const order: SourceTab[] = ["product", "qualification", "knowledge"];
+  for (const t of order) {
+    if (refs.some((r) => sourceOf(r) === t && (r.chapters || []).length > 0)) return t;
+  }
+  return "product";
+}
+
+function walkProducts(items: ProductItem[], visit: (item: ProductItem, ancestors: ProductItem[]) => void, ancestors: ProductItem[] = []) {
+  items.forEach((item) => {
+    visit(item, ancestors);
+    if (item.children?.length) walkProducts(item.children, visit, [...ancestors, item]);
+  });
+}
+
+function findHeadingPath(nodes: HeadingNode[], target: string, path: HeadingNode[] = []): HeadingNode[] | null {
+  for (const n of nodes) {
+    const next = [...path, n];
+    if (n.heading === target) return next;
+    const hit = findHeadingPath(n.children, target, next);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 export default function KnowledgePicker({
   projectId,
   nodeNum,
@@ -80,13 +105,19 @@ export default function KnowledgePicker({
   onSave,
 }: KnowledgePickerProps) {
   const { token } = useAuth();
-  const [tab, setTab] = useState<SourceTab>("product");
+  const [tab, setTab] = useState<SourceTab>(() => firstBoundTab(initialRefs));
   const [refs, setRefs] = useState<KnowledgeRef[]>(
     initialRefs.map((r) => ({ ...r, source: r.source || "knowledge" })),
   );
   const [aiThinking, setAiThinking] = useState(false);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [keyword, setKeyword] = useState("");
+  const [anchorId, setAnchorId] = useState<string | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const productAnchored = useRef(false);
+  const qualAnchored = useRef(false);
+  const knowledgeAnchored = useRef(false);
+  const scrolledAnchor = useRef("");
 
   const [libraries, setLibraries] = useState<ProductLibrary[]>([]);
   const [libFeatures, setLibFeatures] = useState<Record<string, ProductItem[]>>({});
@@ -144,6 +175,184 @@ export default function KnowledgePicker({
       .then((chapters) => setDocChapters((prev) => ({ ...prev, [docId]: chapters })))
       .catch(() => setDocChapters((prev) => ({ ...prev, [docId]: [] })));
   };
+
+  const scrollToAnchor = (id: string | null) => {
+    if (!id) return false;
+    const root = listRef.current;
+    if (!root) return false;
+    const el = root.querySelector(`[data-anchor="${id}"]`);
+    if (!(el instanceof HTMLElement)) return false;
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    return true;
+  };
+
+  const jumpToBound = () => {
+    if (!anchorId) return;
+    const tabOf: SourceTab = anchorId.startsWith("product:")
+      ? "product"
+      : anchorId.startsWith("qual:")
+        ? "qualification"
+        : "knowledge";
+    if (tab !== tabOf) setTab(tabOf);
+    scrolledAnchor.current = "";
+    window.setTimeout(() => {
+      if (scrollToAnchor(anchorId)) scrolledAnchor.current = anchorId;
+    }, 80);
+  };
+
+  useEffect(() => {
+    const bound = initialRefs.filter((r) => sourceOf(r) === "product" && (r.chapters || []).length > 0);
+    bound.forEach((r) => {
+      setExpandedLibs((p) => ({ ...p, [r.docId]: true }));
+      listProductFeatures(r.docId)
+        .then((items) => setLibFeatures((prev) => (prev[r.docId] ? prev : { ...prev, [r.docId]: items })))
+        .catch(() => setLibFeatures((prev) => ({ ...prev, [r.docId]: prev[r.docId] || [] })));
+    });
+    const qualBound = initialRefs.find((r) => sourceOf(r) === "qualification" && (r.chapters || []).length > 0);
+    if (qualBound) {
+      /* kinds expand after quals load */
+    }
+    initialRefs
+      .filter((r) => sourceOf(r) === "knowledge" && (r.chapters || []).length > 0)
+      .forEach((r) => {
+        setExpandedDocs((p) => ({ ...p, [r.docId]: true }));
+        getKnowledgeChapters(r.docId)
+          .then((chapters) => setDocChapters((prev) => (prev[r.docId] ? prev : { ...prev, [r.docId]: chapters })))
+          .catch(() => setDocChapters((prev) => ({ ...prev, [r.docId]: prev[r.docId] || [] })));
+      });
+    // 仅打开时定位一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (productAnchored.current) return;
+    const bound = refs.filter((r) => sourceOf(r) === "product" && (r.chapters || []).length > 0);
+    if (!bound.length) return;
+    if (bound.some((r) => !libFeatures[r.docId])) return;
+
+    const expandFeats: Record<string, boolean> = {};
+    let firstItem: ProductItem | null = null;
+    let firstLib = "";
+    let firstId = "";
+    bound.forEach((r) => {
+      const selected = new Set(r.chapters);
+      const features = libFeatures[r.docId] || [];
+      features.forEach((feat) => {
+        expandFeats[feat.id] = false;
+      });
+      walkProducts(features, (item, ancestors) => {
+        if (!selected.has(item.id)) return;
+        ancestors.forEach((a) => {
+          expandFeats[a.id] = true;
+        });
+        if ((item.children || []).length) expandFeats[item.id] = true;
+        if (!firstItem) {
+          firstItem = item;
+          firstLib = r.docTitle;
+          firstId = `product:${item.id}`;
+        }
+      });
+      features.forEach((feat) => {
+        const hit =
+          selected.has(feat.id) || (feat.children || []).some((c) => selected.has(c.id));
+        if (hit) expandFeats[feat.id] = true;
+      });
+    });
+    productAnchored.current = true;
+    setExpandedFeats((p) => ({ ...p, ...expandFeats }));
+    if (firstItem) {
+      const found = firstItem;
+      setAnchorId(firstId);
+      setPreview({ kind: "product", item: found, libraryName: firstLib });
+    }
+  }, [libFeatures, refs]);
+
+  useEffect(() => {
+    if (qualAnchored.current || !quals.length) return;
+    const bound = refs.find((r) => sourceOf(r) === "qualification" && (r.chapters || []).length > 0);
+    if (!bound) return;
+    const selected = new Set(bound.chapters);
+    const kinds: Record<string, boolean> = {};
+    QUAL_KIND_ORDER.forEach((kind) => {
+      kinds[kind] = quals.some((q) => q.kind === kind && selected.has(q.id));
+    });
+    const first = quals.find((q) => selected.has(q.id));
+    qualAnchored.current = true;
+    setExpandedKinds(kinds);
+    if (first) {
+      setAnchorId((prev) => prev || `qual:${first.id}`);
+      setPreview((prev) => prev || { kind: "qualification", item: first });
+    }
+  }, [quals, refs]);
+
+  useEffect(() => {
+    if (knowledgeAnchored.current) return;
+    const bound = refs.filter((r) => sourceOf(r) === "knowledge" && (r.chapters || []).length > 0);
+    if (!bound.length) return;
+    if (bound.some((r) => !docChapters[r.docId])) return;
+    const expandHeadings: Record<string, boolean> = {};
+    let firstHeading = "";
+    let firstDoc: KnowledgeDoc | undefined;
+    bound.forEach((r) => {
+      const tree = nestHeadings(docChapters[r.docId] || []);
+      (r.chapters || []).forEach((heading) => {
+        const path = findHeadingPath(tree, heading);
+        if (!path) return;
+        path.forEach((node) => {
+          expandHeadings[`${r.docId}:${node.heading}`] = true;
+        });
+        if (!firstHeading) {
+          firstHeading = heading;
+          firstDoc =
+            docs.find((d) => d.id === r.docId) ||
+            ({ id: r.docId, title: r.docTitle } as KnowledgeDoc);
+        }
+      });
+    });
+    knowledgeAnchored.current = true;
+    setExpandedHeadings((p) => ({ ...p, ...expandHeadings }));
+    if (firstHeading && firstDoc) {
+      const doc = firstDoc;
+      const heading = firstHeading;
+      setAnchorId((prev) => prev || `knowledge:${doc.id}:${heading}`);
+      setPreview((prev) =>
+        prev
+          ? prev
+          : { kind: "knowledge", title: doc.title, heading, paragraphs: [], images: [], loading: true },
+      );
+      getKnowledgeChapterDetail(doc.id, heading)
+        .then((detail) =>
+          setPreview((prev) =>
+            prev?.kind === "knowledge" && prev.heading === heading
+              ? {
+                  kind: "knowledge",
+                  title: detail.docTitle || doc.title,
+                  heading: detail.heading,
+                  paragraphs: detail.paragraphs,
+                  images: detail.images || [],
+                  loading: false,
+                }
+              : prev,
+          ),
+        )
+        .catch(() => undefined);
+    }
+  }, [docChapters, docs, refs]);
+
+  useEffect(() => {
+    if (!anchorId) return;
+    const tabOf = anchorId.startsWith("product:")
+      ? "product"
+      : anchorId.startsWith("qual:")
+        ? "qualification"
+        : "knowledge";
+    if (tab !== tabOf) return;
+    if (scrolledAnchor.current === anchorId) return;
+    const timer = window.setTimeout(() => {
+      if (scrollToAnchor(anchorId)) scrolledAnchor.current = anchorId;
+    }, 160);
+    return () => window.clearTimeout(timer);
+  }, [anchorId, tab, expandedLibs, expandedFeats, expandedKinds, expandedDocs, expandedHeadings, libFeatures, docChapters]);
 
   const toggleIds = (source: SourceTab, docId: string, docTitle: string, ids: string[], on: boolean) => {
     setRefs((prev) => {
@@ -330,17 +539,30 @@ export default function KnowledgePicker({
               ))}
             </div>
             <div className="border-b border-background-200 px-3 py-2">
-              <div className="relative">
-                <i className="ri-search-line absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-foreground-400"></i>
-                <input
-                  value={keyword}
-                  onChange={(e) => setKeyword(e.target.value)}
-                  placeholder={tab === "product" ? "搜索产品或功能…" : tab === "qualification" ? "搜索证照 / 证号…" : "搜索文档…"}
-                  className="h-8 w-full rounded-md border border-background-300 bg-background-50 pl-8 pr-3 text-xs outline-none focus:border-primary-400"
-                />
+              <div className="flex items-center gap-1.5">
+                <div className="relative min-w-0 flex-1">
+                  <i className="ri-search-line absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-foreground-400"></i>
+                  <input
+                    value={keyword}
+                    onChange={(e) => setKeyword(e.target.value)}
+                    placeholder={tab === "product" ? "搜索产品或功能…" : tab === "qualification" ? "搜索证照 / 证号…" : "搜索文档…"}
+                    className="h-8 w-full rounded-md border border-background-300 bg-background-50 pl-8 pr-3 text-xs outline-none focus:border-primary-400"
+                  />
+                </div>
+                {anchorId && (
+                  <button
+                    type="button"
+                    onClick={jumpToBound}
+                    className="flex h-8 shrink-0 cursor-pointer items-center gap-1 whitespace-nowrap rounded-md border border-primary-200 bg-primary-50 px-2 text-[11px] font-medium text-primary-600 hover:bg-primary-100"
+                    title="滚动到本章已绑定的目录"
+                  >
+                    <i className="ri-anchor-line"></i>
+                    定位已绑定
+                  </button>
+                )}
               </div>
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+            <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
               {tab === "product" && (
                 <ProductTree
                   libraries={visibleLibs}
@@ -348,6 +570,7 @@ export default function KnowledgePicker({
                   expandedLibs={expandedLibs}
                   expandedFeats={expandedFeats}
                   selectedOf={(id) => selectedSet("product", id)}
+                  anchorId={anchorId}
                   onToggleLib={(lib, open) => {
                     setExpandedLibs((p) => ({ ...p, [lib.id]: open }));
                     if (open) ensureFeatures(lib.id);
@@ -362,6 +585,7 @@ export default function KnowledgePicker({
                   items={visibleQuals}
                   expandedKinds={expandedKinds}
                   selected={selectedSet("qualification", QUAL_DOC_ID)}
+                  anchorId={anchorId}
                   onToggleKind={(kind, open) => setExpandedKinds((p) => ({ ...p, [kind]: open }))}
                   onToggleIds={(ids, on) => toggleIds("qualification", QUAL_DOC_ID, "资质证照库", ids, on)}
                   onPreview={(item) => setPreview({ kind: "qualification", item })}
@@ -374,6 +598,7 @@ export default function KnowledgePicker({
                   expandedDocs={expandedDocs}
                   expandedHeadings={expandedHeadings}
                   selectedOf={(id) => selectedSet("knowledge", id)}
+                  anchorId={anchorId}
                   onToggleDoc={(doc, open) => {
                     setExpandedDocs((p) => ({ ...p, [doc.id]: open }));
                     if (open) ensureChapters(doc.id);
@@ -480,6 +705,7 @@ function ProductTree({
   expandedLibs,
   expandedFeats,
   selectedOf,
+  anchorId,
   onToggleLib,
   onToggleFeat,
   onToggleIds,
@@ -490,6 +716,7 @@ function ProductTree({
   expandedLibs: Record<string, boolean>;
   expandedFeats: Record<string, boolean>;
   selectedOf: (libraryId: string) => Set<string>;
+  anchorId?: string | null;
   onToggleLib: (lib: ProductLibrary, open: boolean) => void;
   onToggleFeat: (id: string, open: boolean) => void;
   onToggleIds: (lib: ProductLibrary, ids: string[], on: boolean) => void;
@@ -532,6 +759,8 @@ function ProductTree({
                       indeterminate={!allOn && ids.some((id) => selected.has(id))}
                       expanded={featOpen}
                       hasChildren={kids.length > 0}
+                      rowId={`product:${feat.id}`}
+                      highlight={anchorId === `product:${feat.id}`}
                       onToggleExpand={() => onToggleFeat(feat.id, !featOpen)}
                       onCheck={(on) => onToggleIds(lib, on ? ids : ids, on)}
                       onPreview={() => onPreview(feat, lib)}
@@ -545,6 +774,8 @@ function ProductTree({
                           label={child.name}
                           meta="二级功能"
                           checked={selected.has(child.id)}
+                          rowId={`product:${child.id}`}
+                          highlight={anchorId === `product:${child.id}`}
                           onCheck={(on) => onToggleIds(lib, [child.id], on)}
                           onPreview={() => onPreview(child, lib)}
                         />
@@ -564,6 +795,7 @@ function QualTree({
   items,
   expandedKinds,
   selected,
+  anchorId,
   onToggleKind,
   onToggleIds,
   onPreview,
@@ -571,6 +803,7 @@ function QualTree({
   items: QualificationAsset[];
   expandedKinds: Record<string, boolean>;
   selected: Set<string>;
+  anchorId?: string | null;
   onToggleKind: (kind: string, open: boolean) => void;
   onToggleIds: (ids: string[], on: boolean) => void;
   onPreview: (item: QualificationAsset) => void;
@@ -609,6 +842,8 @@ function QualTree({
                   label={item.name}
                   meta={[item.number, item.owner].filter(Boolean).join(" · ") || QUAL_KIND_LABEL[item.kind]}
                   checked={selected.has(item.id)}
+                  rowId={`qual:${item.id}`}
+                  highlight={anchorId === `qual:${item.id}`}
                   onCheck={(on) => onToggleIds([item.id], on)}
                   onPreview={() => onPreview(item)}
                 />
@@ -626,6 +861,7 @@ function DocTree({
   expandedDocs,
   expandedHeadings,
   selectedOf,
+  anchorId,
   onToggleDoc,
   onToggleHeading,
   onToggleIds,
@@ -636,6 +872,7 @@ function DocTree({
   expandedDocs: Record<string, boolean>;
   expandedHeadings: Record<string, boolean>;
   selectedOf: (docId: string) => Set<string>;
+  anchorId?: string | null;
   onToggleDoc: (doc: KnowledgeDoc, open: boolean) => void;
   onToggleHeading: (key: string, open: boolean) => void;
   onToggleIds: (doc: KnowledgeDoc, ids: string[], on: boolean) => void;
@@ -671,6 +908,7 @@ function DocTree({
                   node={node}
                   selected={selected}
                   expandedHeadings={expandedHeadings}
+                  anchorId={anchorId}
                   onToggleHeading={onToggleHeading}
                   onToggleIds={onToggleIds}
                   onPreview={onPreview}
@@ -688,6 +926,7 @@ function HeadingBranch({
   node,
   selected,
   expandedHeadings,
+  anchorId,
   onToggleHeading,
   onToggleIds,
   onPreview,
@@ -696,11 +935,13 @@ function HeadingBranch({
   node: HeadingNode;
   selected: Set<string>;
   expandedHeadings: Record<string, boolean>;
+  anchorId?: string | null;
   onToggleHeading: (key: string, open: boolean) => void;
   onToggleIds: (doc: KnowledgeDoc, ids: string[], on: boolean) => void;
   onPreview: (doc: KnowledgeDoc, heading: string) => void;
 }) {
   const key = `${doc.id}:${node.heading}`;
+  const rowId = `knowledge:${doc.id}:${node.heading}`;
   const open = expandedHeadings[key] ?? node.depth < 3;
   const ids = collectHeadings(node);
   const allOn = ids.every((id) => selected.has(id));
@@ -720,6 +961,8 @@ function HeadingBranch({
         indeterminate={!allOn && someOn}
         expanded={open}
         hasChildren={node.children.length > 0}
+        rowId={rowId}
+        highlight={anchorId === rowId}
         onToggleExpand={() => onToggleHeading(key, !open)}
         onCheck={(on) => onToggleIds(doc, ids, on)}
         onPreview={() => onPreview(doc, node.heading)}
@@ -732,6 +975,7 @@ function HeadingBranch({
             node={child}
             selected={selected}
             expandedHeadings={expandedHeadings}
+            anchorId={anchorId}
             onToggleHeading={onToggleHeading}
             onToggleIds={onToggleIds}
             onPreview={onPreview}
@@ -750,6 +994,8 @@ function TreeRow({
   indeterminate,
   expanded,
   hasChildren,
+  rowId,
+  highlight,
   onToggleExpand,
   onCheck,
   onPreview,
@@ -762,13 +1008,18 @@ function TreeRow({
   indeterminate?: boolean;
   expanded?: boolean;
   hasChildren?: boolean;
+  rowId?: string;
+  highlight?: boolean;
   onToggleExpand?: () => void;
   onCheck?: (on: boolean) => void;
   onPreview?: () => void;
 }) {
   return (
     <div
-      className="group flex items-center gap-1 rounded-md py-1 pr-1 hover:bg-primary-50/60"
+      data-anchor={rowId}
+      className={`group flex items-center gap-1 rounded-md py-1 pr-1 hover:bg-primary-50/60 ${
+        highlight ? "bg-primary-50 ring-1 ring-primary-300" : ""
+      }`}
       style={{ paddingLeft: 8 + depth * 14 }}
     >
       {hasChildren ? (

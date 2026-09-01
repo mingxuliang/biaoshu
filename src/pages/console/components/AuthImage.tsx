@@ -6,6 +6,7 @@ interface AuthImageProps {
   alt?: string;
   className?: string;
   eager?: boolean;
+  fallbackText?: string;
 }
 
 const blobCache = new Map<string, string>();
@@ -37,10 +38,11 @@ function loadAuthBlob(src: string, token: string | null): Promise<string> {
   return req;
 }
 
-function AuthImage({ src, alt = "", className, eager = false }: AuthImageProps) {
+function AuthImage({ src, alt = "", className, eager = false, fallbackText }: AuthImageProps) {
   const { token } = useAuth();
   const hostRef = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(eager);
+  const [failed, setFailed] = useState(false);
   const [blobUrl, setBlobUrl] = useState(() => (src && blobCache.get(src)) || "");
 
   useEffect(() => {
@@ -63,25 +65,36 @@ function AuthImage({ src, alt = "", className, eager = false }: AuthImageProps) 
   useEffect(() => {
     if (!src) {
       setBlobUrl("");
+      setFailed(false);
       return;
     }
     if (src.startsWith("blob:") || src.startsWith("data:")) {
       setBlobUrl(src);
+      setFailed(false);
       return;
     }
     const hit = blobCache.get(src);
     if (hit) {
       setBlobUrl(hit);
+      setFailed(false);
       return;
     }
     if (!visible) return;
+    if (!token && (src.startsWith("/api/") || src.includes("/api/"))) return;
     let cancelled = false;
+    setFailed(false);
     loadAuthBlob(src, token)
       .then((url) => {
-        if (!cancelled) setBlobUrl(url);
+        if (!cancelled) {
+          setBlobUrl(url);
+          setFailed(false);
+        }
       })
       .catch(() => {
-        if (!cancelled) setBlobUrl("");
+        if (!cancelled) {
+          setBlobUrl("");
+          setFailed(true);
+        }
       });
     return () => {
       cancelled = true;
@@ -92,9 +105,10 @@ function AuthImage({ src, alt = "", className, eager = false }: AuthImageProps) 
     return (
       <div
         ref={hostRef}
-        className={`flex items-center justify-center bg-background-200 text-foreground-400 ${className || ""}`}
+        className={`flex min-h-24 flex-col items-center justify-center gap-1 bg-background-200 px-3 text-foreground-400 ${className || ""}`}
       >
-        <i className="ri-image-line"></i>
+        <i className={`${failed ? "ri-image-off-line" : "ri-loader-4-line animate-spin"} text-lg`}></i>
+        {failed && fallbackText ? <span className="text-[11px]">{fallbackText}</span> : null}
       </div>
     );
   }

@@ -54,6 +54,7 @@ class PreReviewIssueOut(BaseModel):
     rule: str
     tenderQuote: str
     suggestion: str
+    resolved: bool = False
 
 
 class DimensionOut(BaseModel):
@@ -486,6 +487,10 @@ class BidParagraphOut(BaseModel):
     id: str
     text: str
     problem: Optional[BidProblemOut] = None
+    align: Optional[str] = ""
+    font: Optional[str] = ""
+    fontSizePt: Optional[float] = None
+    bold: Optional[bool] = False
 
 
 class BidSectionOut(BaseModel):
@@ -493,6 +498,10 @@ class BidSectionOut(BaseModel):
     heading: str
     level: Literal[1, 2, 3]
     paragraphs: list[BidParagraphOut] = []
+    align: Optional[str] = ""
+    font: Optional[str] = ""
+    fontSizePt: Optional[float] = None
+    bold: Optional[bool] = False
 
 
 class BidRevisionOut(BaseModel):
@@ -500,9 +509,13 @@ class BidRevisionOut(BaseModel):
     projectId: str
     bidDocumentId: str
     reviewRunId: str
+    reviewRound: Optional[int] = None
     sections: list[BidSectionOut] = []
     issues: list[PreReviewIssueOut] = []
     contentState: Optional[dict] = None
+    layout: Optional[dict] = None
+    resolvedIds: list[str] = []
+    runSwitched: bool = False
 
 
 class PatchRevisionContentIn(BaseModel):
@@ -516,11 +529,15 @@ class RevisionBlockIn(BaseModel):
 
 
 class CreateVersionIn(BaseModel):
-    blocks: list[RevisionBlockIn]
-    contentState: dict
+    blocks: list[RevisionBlockIn] = []
+    contentState: dict = {}
     note: str = ""
     wordCount: int = 0
     author: str = ""
+
+
+class PatchIssueResolvedIn(BaseModel):
+    resolved: bool = True
 
 
 class BidRevisionVersionOut(BaseModel):
@@ -738,6 +755,11 @@ class VetoRuleOut(BaseModel):
     wiredNote: str = ""
     engine: str = ""
     seq: int = 0
+    enabled: bool = True
+
+
+class UpdateVetoRuleIn(BaseModel):
+    enabled: Optional[bool] = None
 
 
 class CatalogRuleOut(BaseModel):
@@ -751,6 +773,11 @@ class CatalogRuleOut(BaseModel):
     wiredNote: str = ""
     engine: str = ""
     seq: int = 0
+    enabled: bool = True
+
+
+class UpdateCatalogRuleIn(BaseModel):
+    enabled: Optional[bool] = None
 
 
 # 以下模型对应「项目中心补全」：团队分配 / 文件归档 / 进度时间线 / 招标文件真实落库。

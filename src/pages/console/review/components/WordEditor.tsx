@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
 } from "react";
 import { LexicalComposer } from "@lexical/react/LexicalComposer";
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
@@ -43,8 +44,9 @@ import {
   type TextFormatType,
 } from "lexical";
 import { $createHeadingNode, $isHeadingNode, HeadingNode } from "@lexical/rich-text";
-import type { BidSection } from "@/lib/api";
+import type { BidLayout, BidParagraph, BidParagraphAlign, BidSection } from "@/lib/api";
 import type { PreReviewIssue } from "@/mocks/preReview";
+import { writerLayoutCssVars } from "@/mocks/writerSteps";
 import { LexicalErrorBoundary } from "@lexical/react/LexicalErrorBoundary";
 
 export interface RevisionBlock {
@@ -60,8 +62,8 @@ export interface SerializedRevisionContent {
 }
 
 export interface WordEditorHandle {
-  scrollToSection: (sectionId: string) => void;
-  scrollToIssue: (issueId: string) => void;
+  scrollToSection: (sectionId: string) => boolean;
+  scrollToIssue: (issueId: string) => boolean;
   getSerializedContent: () => SerializedRevisionContent | null;
 }
 
@@ -72,6 +74,7 @@ interface WordEditorProps {
   onIssueClick: (issueId: string) => void;
   initialContentState?: Record<string, unknown> | null;
   onAutosave?: (content: SerializedRevisionContent) => void;
+  layout?: BidLayout | null;
 }
 
 const severityInline: Record<string, { bg: string; color: string }> = {
@@ -83,7 +86,27 @@ const severityInline: Record<string, { bg: string; color: string }> = {
 
 const fontSizeOptions = [12, 14, 16, 18, 22, 26, 32];
 
-/* 构建初始文档：章节标题 + 段落，问题句原地高亮 */
+/* 段落/标题对齐方式映射到 Lexical ElementNode.setFormat 支持的类型 */
+function applyAlign(node: { setFormat: (type: "left" | "center" | "right" | "justify") => unknown }, align?: BidParagraphAlign) {
+  if (align === "center" || align === "right" || align === "justify" || align === "left") {
+    node.setFormat(align);
+  }
+}
+
+function applyTextLook(
+  textNode: ReturnType<typeof $createTextNode>,
+  look?: Pick<BidParagraph, "font" | "fontSizePt" | "bold">,
+  extraStyle = "",
+) {
+  const parts: string[] = [];
+  if (look?.font) parts.push(`font-family:"${look.font}", SimSun, serif`);
+  if (look?.fontSizePt) parts.push(`font-size:${look.fontSizePt}pt`);
+  if (extraStyle) parts.push(extraStyle);
+  if (parts.length) textNode.setStyle(parts.join(";"));
+  if (look?.bold) textNode.toggleFormat("bold");
+}
+
+/* 构建初始文档：章节标题 + 段落，问题句原地高亮，并按投标书原文对齐/字号/加粗排版 */
 function buildInitialState(
   editor: LexicalEditor,
   sections: BidSection[],
@@ -97,27 +120,41 @@ function buildInitialState(
     sections.forEach((section) => {
       const level = section.level === 1 ? "h1" : section.level === 2 ? "h2" : "h3";
       const heading = $createHeadingNode(level);
-      heading.append($createTextNode(section.heading));
+      const headingText = $createTextNode(section.heading);
+      applyTextLook(headingText, section);
+      heading.append(headingText);
+      applyAlign(heading, section.align);
       anchorMapRef.current[section.id] = heading.getKey();
       root.append(heading);
 
       section.paragraphs.forEach((para) => {
         const p = $createParagraphNode();
+        applyAlign(p, para.align);
         if (para.problem) {
           const issue = issueMap.get(para.problem.issueId);
           const style = severityInline[issue?.severity || "建议"] || severityInline.建议;
           const parts = para.text.split(para.problem.highlight);
           parts.forEach((part, idx) => {
-            if (part) p.append($createTextNode(part));
+            if (part) {
+              const node = $createTextNode(part);
+              applyTextLook(node, para);
+              p.append(node);
+            }
             if (idx < parts.length - 1) {
               const hl = $createTextNode(para.problem.highlight);
-              hl.setStyle(`background-color:${style.bg};color:${style.color};border-radius:3px;padding:0 1px;`);
+              applyTextLook(
+                hl,
+                para,
+                `background-color:${style.bg};color:${style.color};border-radius:3px;padding:0 1px`,
+              );
               anchorMapRef.current[para.problem!.issueId] = hl.getKey();
               p.append(hl);
             }
           });
         } else {
-          p.append($createTextNode(para.text));
+          const node = $createTextNode(para.text);
+          applyTextLook(node, para);
+          p.append(node);
         }
         root.append(p);
       });
@@ -327,7 +364,7 @@ function Toolbar({ editMode, onIssueClick }: { editMode: boolean; onIssueClick: 
 }
 
 const WordEditor = forwardRef<WordEditorHandle, WordEditorProps>(function WordEditor(
-  { sections, issues, editMode, onIssueClick, initialContentState, onAutosave },
+  { sections, issues, editMode, onIssueClick, initialContentState, onAutosave, layout },
   ref,
 ) {
   const anchorMapRef = useRef<Record<string, string>>({});
@@ -388,14 +425,16 @@ const WordEditor = forwardRef<WordEditorHandle, WordEditorProps>(function WordEd
     editorRef.current?.setEditable(editMode);
   }, [editMode]);
 
-  const scrollToKey = useCallback((key: string) => {
-    if (!editorRef.current) return;
+  const scrollToKey = useCallback((key: string): boolean => {
+    if (!editorRef.current) return false;
     const dom = editorRef.current.getElementByKey(key);
     if (dom) {
       dom.scrollIntoView({ behavior: "smooth", block: "center" });
       dom.classList.add("issue-flash");
       window.setTimeout(() => dom.classList.remove("issue-flash"), 3400);
+      return true;
     }
+    return false;
   }, []);
 
   useImperativeHandle(
@@ -403,11 +442,11 @@ const WordEditor = forwardRef<WordEditorHandle, WordEditorProps>(function WordEd
     () => ({
       scrollToSection: (sectionId: string) => {
         const key = anchorMapRef.current[sectionId];
-        if (key) scrollToKey(key);
+        return key ? scrollToKey(key) : false;
       },
       scrollToIssue: (issueId: string) => {
         const key = anchorMapRef.current[issueId];
-        if (key) scrollToKey(key);
+        return key ? scrollToKey(key) : false;
       },
       getSerializedContent: () => {
         if (!editorRef.current) return null;
@@ -451,7 +490,13 @@ const WordEditor = forwardRef<WordEditorHandle, WordEditorProps>(function WordEd
           <TablePlugin />
           <LinkPlugin />
           <RichTextPlugin
-            contentEditable={<ContentEditable aria-label="投标书编辑器" className="lex-editor word-sheet mx-auto max-w-[820px] px-10 py-12" />}
+            contentEditable={
+              <ContentEditable
+                aria-label="投标书编辑器"
+                className="lex-editor lex-bidrev word-sheet mx-auto max-w-[820px] px-10 py-12"
+                style={writerLayoutCssVars(layout, true) as CSSProperties}
+              />
+            }
             placeholder={<div className="pointer-events-none absolute top-16 left-12 text-sm text-foreground-400">在空白处点击开始编辑…</div>}
             ErrorBoundary={LexicalErrorBoundary}
           />

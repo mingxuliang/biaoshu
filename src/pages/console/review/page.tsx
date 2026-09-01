@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams, Link } from "react-router-dom";
+import { useNavigate, useSearchParams, Link } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
 import Toast from "../components/Toast";
 import StatusBadge from "../components/StatusBadge";
 import TypeBadge from "../components/TypeBadge";
 import WordEditor, { type SerializedRevisionContent, type WordEditorHandle } from "./components/WordEditor";
+import BidDocxViewer, { type BidDocxViewerHandle } from "./components/BidDocxViewer";
 import DocTree from "./components/DocTree";
 import IssuePanel from "./components/IssuePanel";
 import { useProjects } from "@/context/ProjectContext";
@@ -17,6 +18,7 @@ import {
   exportBidRevisionDocx,
   getOrCreateBidRevision,
   listBidRevisionVersions,
+  patchBidRevisionIssueResolved,
   restoreBidRevisionVersion,
   type BidRevision,
   type BidRevisionVersion,
@@ -32,11 +34,13 @@ interface ToastState {
 export default function ReviewPage() {
   const { projects } = useProjects();
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedId = searchParams.get("project") || "";
+  const issueFromUrl = searchParams.get("issue") || "";
   const currentProject = projects.find((p) => p.id === selectedId);
 
-  const [editMode, setEditMode] = useState(true);
+  const [editMode, setEditMode] = useState(false);
   const [activeIssueId, setActiveIssueId] = useState<string | null>(null);
   const [activeSectionId, setActiveSectionId] = useState<string | null>(null);
   const [saveOpen, setSaveOpen] = useState(false);
@@ -53,6 +57,7 @@ export default function ReviewPage() {
   const [exporting, setExporting] = useState(false);
 
   const editorRef = useRef<WordEditorHandle>(null);
+  const viewerRef = useRef<BidDocxViewerHandle>(null);
 
   const showToast = (message: string, type: ToastState["type"] = "success") => {
     setToast({ message, type, visible: true });
@@ -78,6 +83,9 @@ export default function ReviewPage() {
       .then((data) => {
         if (cancelled) return;
         setRevision(data);
+        if (data.runSwitched) {
+          showToast("已切换到最新一轮预审结果，上一轮的改写草稿与已修复标记已清空", "info");
+        }
         return listBidRevisionVersions(data.id).then((vs) => {
           if (!cancelled) setVersions(vs);
         });
@@ -121,40 +129,56 @@ export default function ReviewPage() {
     return map;
   }, [revision]);
 
+  /* 编辑/预览两个视图都常驻挂载（切换只是显隐），跳转要打给当前正在展示的那个 */
+  const activeViewHandle = () => (editMode ? editorRef.current : viewerRef.current);
+
   const jumpToSection = (sectionId: string) => {
     setActiveSectionId(sectionId);
-    editorRef.current?.scrollToSection(sectionId);
+    const found = activeViewHandle()?.scrollToSection(sectionId);
+    if (found === false) showToast("未找到该章节在文档中的位置，请稍后重试", "error");
   };
 
   const jumpToIssue = (issueId: string) => {
     const sectionId = issueSectionMap[issueId];
     if (sectionId) setActiveSectionId(sectionId);
     setActiveIssueId(issueId);
-    editorRef.current?.scrollToIssue(issueId);
+    const found = activeViewHandle()?.scrollToIssue(issueId);
+    if (found === false) {
+      showToast("该问题为全篇级检查项，未能定位到具体段落，请在正文中自行查找相关内容", "info");
+    }
   };
 
   const jumpAll = () => {
-    const first = revision?.issues[0];
+    const first = revision?.issues.find((i) => !i.resolved) || revision?.issues[0];
     if (first) {
       jumpToIssue(first.id);
-      showToast("已按问题顺序锚定首个问题，可用右侧清单逐一跳转", "info");
+      showToast("已按问题顺序锚定首个待处理问题，可用右侧清单逐一跳转", "info");
     }
   };
+
+  useEffect(() => {
+    if (!revision || !issueFromUrl) return;
+    const timer = window.setTimeout(() => {
+      jumpToIssue(issueFromUrl);
+      const next = new URLSearchParams(searchParams);
+      next.delete("issue");
+      setSearchParams(next, { replace: true });
+    }, 1200);
+    return () => window.clearTimeout(timer);
+    // 只在打开带 issue= 的链接时跳一次；jumpToIssue 随渲染变化，不列入依赖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revision?.id, issueFromUrl]);
 
   const saveVersion = async () => {
     if (!revision) return;
     const content = editorRef.current?.getSerializedContent();
-    if (!content) {
-      showToast("编辑器尚未就绪，请稍后重试", "error");
-      return;
-    }
     setSaving(true);
     try {
       const version = await createBidRevisionVersion(revision.id, {
-        blocks: content.blocks,
-        contentState: content.contentState as unknown as Record<string, unknown>,
+        blocks: content?.blocks ?? [],
+        contentState: (content?.contentState as unknown as Record<string, unknown>) ?? revision.contentState ?? {},
         note: note.trim() || "保存当前编辑版本",
-        wordCount: content.wordCount,
+        wordCount: content?.wordCount ?? 0,
         author: user?.name || "未署名",
       });
       setVersions((prev) => [version, ...prev]);
@@ -165,6 +189,32 @@ export default function ReviewPage() {
       showToast(err instanceof ApiError ? err.message : "保存版本失败，请稍后重试", "error");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const toggleIssueResolved = async (issueId: string, resolved: boolean) => {
+    if (!revision) return;
+    setRevision((prev) =>
+      prev
+        ? {
+            ...prev,
+            issues: prev.issues.map((i) => (i.id === issueId ? { ...i, resolved } : i)),
+          }
+        : prev,
+    );
+    try {
+      const next = await patchBidRevisionIssueResolved(revision.id, issueId, resolved);
+      setRevision(next);
+    } catch (err) {
+      setRevision((prev) =>
+        prev
+          ? {
+              ...prev,
+              issues: prev.issues.map((i) => (i.id === issueId ? { ...i, resolved: !resolved } : i)),
+            }
+          : prev,
+      );
+      showToast(err instanceof ApiError ? err.message : "更新已修复状态失败", "error");
     }
   };
 
@@ -209,7 +259,24 @@ export default function ReviewPage() {
     }
   };
 
-  const targetBidDocumentId = versions[0]?.bidDocumentId || revision?.bidDocumentId || "";
+  const savedVersionId = versions[0]?.bidDocumentId || "";
+  const unresolvedCount = revision?.issues.filter((i) => !i.resolved).length ?? 0;
+
+  const enterSecondReview = () => {
+    if (!currentProject) return;
+    if (!savedVersionId) {
+      showToast("请先「保存版本」生成修改后的投标书。未保存时二次评审会审到原文，已被禁止。", "error");
+      setSaveOpen(true);
+      return;
+    }
+    const resolvedIds = (revision?.issues || []).filter((i) => i.resolved).map((i) => i.id);
+    const qs = new URLSearchParams({
+      project: currentProject.id,
+      bidDocumentId: savedVersionId,
+    });
+    if (resolvedIds.length) qs.set("resolved", resolvedIds.join(","));
+    navigate(`/console/audit?${qs.toString()}`);
+  };
 
   const inputCls =
     "h-9 w-full rounded-md border border-background-300 bg-background-50 px-3 text-sm text-foreground-900 outline-none transition-all focus:border-primary-400 focus:ring-1 focus:ring-primary-400/20 placeholder:text-foreground-500";
@@ -330,7 +397,7 @@ export default function ReviewPage() {
     <div>
       <PageHeader
         title="审核后修改闭环"
-        description="左侧文档目录定位章节，中间为真实 Word 编辑器（支持格式工具栏、格式刷、分栏、表格、链接），预审问题句原地高亮，右侧问题清单可一键锚定对应章节。"
+        description="中间默认按上传投标书原文排版展示。右侧清单来自 AI 预审中心最新一轮已完成结果；点「改写」进入 Word 编辑器，点击问题可跳到原文对应位置。"
         actions={
           <button
             type="button"
@@ -363,7 +430,9 @@ export default function ReviewPage() {
             <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-foreground-500">
               <span>编号 {currentProject.code}</span>
               <span>·</span>
-              <span>预审问题 {revision.issues.length} 项</span>
+              <span>第 {revision.reviewRound ?? "—"} 轮预审</span>
+              <span>·</span>
+              <span>问题 {revision.issues.length} 项</span>
               <StatusBadge status="改写中" />
             </div>
           </div>
@@ -372,23 +441,23 @@ export default function ReviewPage() {
           <div className="flex rounded-md border border-background-300 bg-background-100 p-0.5">
             <button
               type="button"
+              onClick={() => setEditMode(false)}
+              className={`font-label flex cursor-pointer items-center gap-1 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
+                !editMode ? "bg-gradient-to-r from-primary-500 to-primary-600 text-background-50" : "text-foreground-600 hover:text-foreground-900"
+              }`}
+            >
+              <i className="ri-file-word-2-line text-xs"></i>
+              原文
+            </button>
+            <button
+              type="button"
               onClick={() => setEditMode(true)}
               className={`font-label flex cursor-pointer items-center gap-1 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
                 editMode ? "bg-gradient-to-r from-primary-500 to-primary-600 text-background-50" : "text-foreground-600 hover:text-foreground-900"
               }`}
             >
               <i className="ri-pencil-line text-xs"></i>
-              编辑
-            </button>
-            <button
-              type="button"
-              onClick={() => setEditMode(false)}
-              className={`font-label flex cursor-pointer items-center gap-1 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
-                !editMode ? "bg-gradient-to-r from-primary-500 to-primary-600 text-background-50" : "text-foreground-600 hover:text-foreground-900"
-              }`}
-            >
-              <i className="ri-eye-line text-xs"></i>
-              预览
+              改写
             </button>
           </div>
           <button
@@ -427,38 +496,58 @@ export default function ReviewPage() {
           activeIssueId={activeIssueId}
           onSelectSection={jumpToSection}
         />
-        <div className="overflow-hidden rounded-lg border border-background-300 bg-background-100">
-          <WordEditor
-            key={`${currentProject.id}-${reloadKey}`}
-            ref={editorRef}
-            sections={revision.sections}
-            issues={revision.issues}
-            editMode={editMode}
-            onIssueClick={jumpAll}
-            initialContentState={revision.contentState}
-            onAutosave={handleAutosave}
-          />
+        <div className="relative overflow-hidden rounded-lg border border-background-300 bg-background-100">
+          <div className={editMode ? "hidden" : "h-full"}>
+            <BidDocxViewer
+              key={`${currentProject.id}-${reloadKey}-preview`}
+              ref={viewerRef}
+              bidDocumentId={revision.bidDocumentId}
+              sections={revision.sections}
+              issues={revision.issues}
+              fileName={`${currentProject.name}-投标书.docx`}
+              active={!editMode}
+            />
+          </div>
+          <div className={editMode ? "h-full" : "hidden"}>
+            <WordEditor
+              key={`${currentProject.id}-${reloadKey}`}
+              ref={editorRef}
+              sections={revision.sections}
+              issues={revision.issues}
+              editMode={editMode}
+              onIssueClick={jumpAll}
+              initialContentState={reloadKey > 0 ? revision.contentState : null}
+              onAutosave={handleAutosave}
+              layout={revision.layout}
+            />
+          </div>
         </div>
         <IssuePanel
           issues={revision.issues}
           activeIssueId={activeIssueId}
           onIssueClick={jumpToIssue}
           onJumpAll={jumpAll}
+          onToggleResolved={toggleIssueResolved}
         />
       </div>
 
       <div className="mt-4 flex items-center justify-between">
         <p className="flex items-start gap-1.5 text-xs text-foreground-500">
           <i className="ri-loop-left-line mt-0.5 text-primary-500"></i>
-          修改完成后，点击右侧问题清单逐项确认消除，再进入「AI 预审中心」对修改后的标书发起二次评审评分。
+          {savedVersionId
+            ? `已保存 ${versions.length} 个修改版本，待处理 ${unresolvedCount} 项。二次评审将针对最新保存的投标书。`
+            : "请勾选已修复项并「保存版本」后，再进入二次评审；未保存不能审修改稿。"}
         </p>
-        <Link
-          to={`/console/audit?project=${currentProject.id}${targetBidDocumentId ? `&bidDocumentId=${targetBidDocumentId}` : ""}`}
-          className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-accent-500 px-4 text-sm font-medium text-background-50 transition-colors hover:bg-accent-600"
+        <button
+          type="button"
+          onClick={enterSecondReview}
+          className={`flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md px-4 text-sm font-medium text-background-50 transition-colors ${
+            savedVersionId ? "bg-accent-500 hover:bg-accent-600" : "bg-foreground-400 hover:bg-foreground-500"
+          }`}
         >
           <i className="ri-shield-check-line text-sm"></i>
-          进入二次评审
-        </Link>
+          {savedVersionId ? "进入二次评审" : "请先保存版本"}
+        </button>
       </div>
 
       {/* 保存版本弹窗 */}

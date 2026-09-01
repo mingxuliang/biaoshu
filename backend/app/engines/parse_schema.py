@@ -271,10 +271,33 @@ def derive_veto_params(tree: list[dict], full_text: str) -> dict:
     for kw in ("营业执照", "安全生产许可证", "软件企业", "高新技术企业", "ISO 9001", "ISO 27001", "建造师"):
         if kw in blob and kw not in keywords:
             keywords.append(kw)
+
+    provisional_amount_wan = None
+    m = re.search(r"暂列金额[^。；\n]{0,10}?(\d+(?:\.\d+)?)\s*万", blob)
+    if m:
+        provisional_amount_wan = float(m.group(1))
+
+    # 人员/设备数量要求：best-effort 正则派生，仅用于在解析出数字时做量化比对增强，
+    # 解析不出时各引擎保持原有「资质库是否有条目」检查，不回退功能。
+    personnel_required: dict[str, int] = {}
+    for role in ("项目经理", "安全员", "八大员", "施工员", "质量员", "技术负责人"):
+        rm = re.search(rf"{role}[^。；\n]{{0,8}}?(\d+)\s*(?:名|人)", blob)
+        if rm:
+            personnel_required[role] = int(rm.group(1))
+
+    equipment_required: dict[str, int] = {}
+    for eq in ("塔吊", "盾构机", "挖掘机", "泵车", "压路机", "装载机", "起重机"):
+        em = re.search(rf"{eq}[^。；\n]{{0,10}}?(?:不少于|至少|配备)?\s*(\d+)\s*(?:台|套)", blob)
+        if em:
+            equipment_required[eq] = int(em.group(1))
+
     return {
         "validity_days_required": days,
         "budget_cap_wan": budget,
         "asset_liability_ratio_max": ratio,
         "qualification_keywords": keywords[:20],
         "anonymity_required": "暗标" in blob,
+        "provisional_amount_wan": provisional_amount_wan,
+        "personnel_required": personnel_required,
+        "equipment_required": equipment_required,
     }

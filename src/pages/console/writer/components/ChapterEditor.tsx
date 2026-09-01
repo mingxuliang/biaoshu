@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { LexicalComposer } from "@lexical/react/LexicalComposer";
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
 import { RichTextPlugin } from "@lexical/react/LexicalRichTextPlugin";
@@ -55,6 +55,8 @@ import {
   type TextNode,
 } from "lexical";
 import { $createImageNode, $isImageNode, ImageNode } from "../nodes/ImageNode";
+import type { LayoutConfig } from "@/mocks/writerSteps";
+import { writerLayoutCssVars } from "@/mocks/writerSteps";
 
 const INSERT_CHAPTER_IMAGE_COMMAND: LexicalCommand<{ src: string; alt: string }> = createCommand(
   "INSERT_CHAPTER_IMAGE_COMMAND",
@@ -68,6 +70,7 @@ const FONT_STACK: Record<string, string> = {
   黑体: '"黑体", SimHei, sans-serif',
   仿宋: '"仿宋", FangSong, serif',
   楷体: '"楷体", KaiTi, serif',
+  微软雅黑: '"微软雅黑", "Microsoft YaHei", sans-serif',
   "Times New Roman": '"Times New Roman", Times, serif',
   Arial: "Arial, Helvetica, sans-serif",
 };
@@ -95,7 +98,8 @@ function parseNodeFont(style: string): { font?: string; size?: string } {
   return { font, size: sz ? sz[1].trim() : undefined };
 }
 
-const FONT_WRAP_RE = /\{\{([^|}]+)\|([^}]+)\}\}([\s\S]*?)\{\{\/\}\}/g;
+const FONT_WRAP_RE = /\{\{([^|:{}]+)[:|]([^}]+)\}\}([\s\S]*?)\{\{\/\}\}/g;
+const CELL_SPAN_RE = /^(?:#c(\d+)#)?(?:#r(\d+)#)?/;
 
 const FONT_SIZE_CSS: Record<string, string> = {
   小二: "18pt",
@@ -137,25 +141,77 @@ function isTableRow(line: string): boolean {
 function parseTableRow(line: string): string[] {
   let t = line.trim();
   if (t.startsWith("|")) t = t.slice(1);
-  if (t.endsWith("|")) t = t.slice(0, -1);
-  return t.split("|").map((c) => c.trim());
+  if (t.endsWith("|") && !t.endsWith("\\|")) t = t.slice(0, -1);
+  const cells: string[] = [];
+  let buf = "";
+  let brace = 0;
+  let escape = false;
+  for (let i = 0; i < t.length; i += 1) {
+    const ch = t[i];
+    if (escape) {
+      buf += ch;
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escape = true;
+      continue;
+    }
+    if (ch === "{" && t[i + 1] === "{") {
+      brace += 1;
+      buf += "{{";
+      i += 1;
+      continue;
+    }
+    if (ch === "}" && t[i + 1] === "}") {
+      brace = Math.max(0, brace - 1);
+      buf += "}}";
+      i += 1;
+      continue;
+    }
+    if (ch === "|" && brace === 0) {
+      cells.push(buf.trim());
+      buf = "";
+      continue;
+    }
+    buf += ch;
+  }
+  cells.push(buf.trim());
+  return cells;
+}
+
+function parseCellMeta(raw: string): { text: string; colSpan: number; rowSpan: number } {
+  const m = CELL_SPAN_RE.exec(raw || "");
+  let text = raw || "";
+  let colSpan = 1;
+  let rowSpan = 1;
+  if (m && (m[1] || m[2])) {
+    if (m[1]) colSpan = Math.max(1, parseInt(m[1], 10));
+    if (m[2]) rowSpan = Math.max(1, parseInt(m[2], 10));
+    text = text.slice(m[0].length);
+  }
+  return { text, colSpan, rowSpan };
 }
 
 function appendTable(root: ReturnType<typeof $getRoot>, rows: string[][]) {
   if (!rows.length) return;
-  const width = Math.max(...rows.map((r) => r.length));
   const table = $createTableNode();
   rows.forEach((cells, rIdx) => {
     const row = $createTableRowNode();
-    for (let i = 0; i < width; i += 1) {
+    cells.forEach((raw) => {
+      const { text, colSpan, rowSpan } = parseCellMeta(raw);
       const header = rIdx === 0 ? TableCellHeaderStates.ROW : TableCellHeaderStates.NO_STATUS;
       const cell = $createTableCellNode(header);
-      const p = $createParagraphNode();
-      const text = cells[i] || "";
-      if (text) appendInline(p, text);
-      cell.append(p);
+      if (colSpan > 1) cell.setColSpan(colSpan);
+      if (rowSpan > 1) cell.setRowSpan(rowSpan);
+      const parts = text ? text.split(/<br\s*\/?>/i) : [""];
+      parts.forEach((part) => {
+        const p = $createParagraphNode();
+        if (part) appendInline(p, part);
+        cell.append(p);
+      });
       row.append(cell);
-    }
+    });
     table.append(row);
   });
   root.append(table);
@@ -236,7 +292,7 @@ function serializeInline(node: LexicalNode): string {
     if (node.hasFormat("underline")) text = `__${text}__`;
     const { font, size } = parseNodeFont(node.getStyle() || "");
     if (font || size) {
-      text = `{{${font || "宋体"}|${size || "12pt"}}}${text}{{/}}`;
+      text = `{{${font || "宋体"}:${size || "12pt"}}}${text}{{/}}`;
     }
     return text;
   }
@@ -356,16 +412,31 @@ function editorToMarkdown(editor: LexicalEditor): string {
           row
             .getChildren()
             .filter($isTableCellNode)
-            .map((cell) => serializeInline(cell).replace(/\|/g, "\\|").trim()),
+            .map((cell) => {
+              const body = cell
+                .getChildren()
+                .map((child) => serializeInline(child))
+                .join("<br>")
+                .trim();
+              const cs = cell.getColSpan() || 1;
+              const rs = cell.getRowSpan() || 1;
+              let prefix = "";
+              if (cs > 1) prefix += `#c${cs}#`;
+              if (rs > 1) prefix += `#r${rs}#`;
+              return (prefix + body).replace(/\|/g, "\\|");
+            }),
         );
         if (!grid.length) return;
-        const width = Math.max(...grid.map((r) => r.length), 1);
-        const pad = (r: string[]) => {
-          const next = [...r];
-          while (next.length < width) next.push("");
-          return next;
-        };
-        const fmt = (r: string[]) => `| ${pad(r).join(" | ")} |`;
+        const width = Math.max(
+          ...rows.map((row) =>
+            row
+              .getChildren()
+              .filter($isTableCellNode)
+              .reduce((n, cell) => n + (cell.getColSpan() || 1), 0),
+          ),
+          1,
+        );
+        const fmt = (r: string[]) => `| ${r.join(" | ")} |`;
         lines.push(fmt(grid[0]));
         lines.push(`| ${Array.from({ length: width }, () => "---").join(" | ")} |`);
         grid.slice(1).forEach((r) => lines.push(fmt(r)));
@@ -652,6 +723,8 @@ interface ChapterEditorProps {
   onFontSize: (v: string) => void;
   onMarkdownChange: (markdown: string) => void;
   onReady?: (handle: ChapterEditorHandle) => void;
+  layout?: LayoutConfig | null;
+  applyTenderIndent?: boolean;
 }
 
 export default function ChapterEditor({
@@ -664,6 +737,8 @@ export default function ChapterEditor({
   onFontSize,
   onMarkdownChange,
   onReady,
+  layout,
+  applyTenderIndent = false,
 }: ChapterEditorProps) {
   const editorRef = useRef<LexicalEditor | null>(null);
   const lastPushed = useRef(markdown);
@@ -742,11 +817,12 @@ export default function ChapterEditor({
           contentEditable={
             <ContentEditable
               aria-label="章节正文编辑器"
-              className="lex-editor word-sheet mx-auto min-h-[620px] max-w-3xl rounded-sm px-10 py-10"
+              className={`lex-editor word-sheet mx-auto min-h-[620px] max-w-5xl rounded-sm px-10 py-10${applyTenderIndent ? " lex-tech" : ""}`}
+              style={writerLayoutCssVars(layout, applyTenderIndent) as CSSProperties}
             />
           }
           placeholder={
-            <div className="pointer-events-none absolute left-1/2 top-24 w-full max-w-3xl -translate-x-1/2 px-10 text-[13px] text-foreground-400">
+            <div className="pointer-events-none absolute left-1/2 top-24 w-full max-w-5xl -translate-x-1/2 px-10 text-[13px] text-foreground-400">
               点击右上角「AI 生成」自动撰写，或直接在此编辑。右侧图片点「插入」会放在当前光标处。
             </div>
           }

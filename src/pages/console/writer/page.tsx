@@ -369,6 +369,11 @@ export default function WriterPage() {
             chapterContents={chapterContents}
             onChapterContentsChange={setChapterContents}
             projectName={currentProject.name}
+            knowledgeRefs={draft.knowledgeRefs || {}}
+            onKnowledgeRefsChange={(next) => {
+              setDraft((d) => (d ? { ...d, knowledgeRefs: next } : d));
+            }}
+            layout={settingsPayload.layout}
             onBack={goBack}
           />
         )}

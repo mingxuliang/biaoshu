@@ -58,11 +58,16 @@ def _pct(thresholds: dict, key: str, default: float) -> float:
         return default / 100.0
 
 
+def _enabled(key: str, enabled_keys: set[str] | None) -> bool:
+    return enabled_keys is None or key in enabled_keys
+
+
 def run(
     paragraphs: list[dict],
     word_rules: list[tuple] | None = None,
     thresholds: dict | None = None,
     context=None,
+    dup_keys: set[str] | None = None,
 ) -> list[dict]:
     raw_rules = word_rules if word_rules is not None else DEFAULT_WORD_PATTERNS
     word_patterns = [_unpack(r) for r in raw_rules]
@@ -80,133 +85,142 @@ def run(
     sentences = [s.strip() for s in SENTENCE_SPLIT.split(full_text) if s.strip()]
     total = len(sentences) or 1
 
-    hit_sentences = sum(1 for s in sentences if any(w in s for w, _, _, _ in word_patterns))
-    density = round(hit_sentences / total * 100, 1)
+    if _enabled("filler_density", dup_keys):
+        hit_sentences = sum(1 for s in sentences if any(w in s for w, _, _, _ in word_patterns))
+        density = round(hit_sentences / total * 100, 1)
 
-    if density > filler_density_safe:
-        findings.append(
-            _finding(
-                severity="扣分",
-                location="技术标 / 全文虚词密度",
-                excerpt=f"全文虚词命中句子占比 {density}%（安全线 {filler_density_safe}%）",
-                rule="F10.02 虚词表-空话承诺",
-                suggestion="按虚词自查五规则（数字/动作/对象/验证/密度）逐段改写，替换为可量化表述",
+        if density > filler_density_safe:
+            findings.append(
+                _finding(
+                    severity="扣分",
+                    location="技术标 / 全文虚词密度",
+                    excerpt=f"全文虚词命中句子占比 {density}%（安全线 {filler_density_safe}%）",
+                    rule="F10.02 虚词表-空话承诺",
+                    suggestion="按虚词自查五规则（数字/动作/对象/验证/密度）逐段改写，替换为可量化表述",
+                )
             )
-        )
 
-    high_hits: list[tuple[str, str, str]] = []
-    seen_words: set[str] = set()
-    for s in sentences:
-        for word, _category, level, rewrite in word_patterns:
-            if word in seen_words or word not in s:
-                continue
-            if level != "高危":
-                continue
-            seen_words.add(word)
-            high_hits.append((word, s, rewrite))
+    if _enabled("high_risk_words", dup_keys):
+        high_hits: list[tuple[str, str, str]] = []
+        seen_words: set[str] = set()
+        for s in sentences:
+            for word, _category, level, rewrite in word_patterns:
+                if word in seen_words or word not in s:
+                    continue
+                if level != "高危":
+                    continue
+                seen_words.add(word)
+                high_hits.append((word, s, rewrite))
+                if len(high_hits) >= 8:
+                    break
             if len(high_hits) >= 8:
                 break
-        if len(high_hits) >= 8:
-            break
-    for word, excerpt, rewrite in high_hits:
-        hint = rewrite or REWRITE_BY_WORD.get(word, "替换为可量化表述")
-        findings.append(
-            _finding(
-                severity="扣分",
-                location="技术标 / 高危虚词",
-                excerpt=excerpt[:150],
-                rule="F10.02 虚词表-高危词",
-                suggestion=f"命中高危虚词「{word}」。{hint}",
+        for word, excerpt, rewrite in high_hits:
+            hint = rewrite or REWRITE_BY_WORD.get(word, "替换为可量化表述")
+            findings.append(
+                _finding(
+                    severity="扣分",
+                    location="技术标 / 高危虚词",
+                    excerpt=excerpt[:150],
+                    rule="F10.02 虚词表-高危词",
+                    suggestion=f"命中高危虚词「{word}」。{hint}",
+                )
             )
-        )
 
-    seen_patterns: set[str] = set()
-    for s in sentences:
-        for pattern in HIGH_RISK_COMPILED:
-            if pattern.pattern in seen_patterns:
-                continue
-            if pattern.search(s):
-                seen_patterns.add(pattern.pattern)
+    if _enabled("high_risk_sentences", dup_keys):
+        seen_patterns: set[str] = set()
+        for s in sentences:
+            for pattern in HIGH_RISK_COMPILED:
+                if pattern.pattern in seen_patterns:
+                    continue
+                if pattern.search(s):
+                    seen_patterns.add(pattern.pattern)
+                    findings.append(
+                        _finding(
+                            severity="扣分",
+                            location="技术标 / 高危句式",
+                            excerpt=s[:150],
+                            rule="F10.02 虚词表-高危句式",
+                            suggestion="该句式属于万能模板句，请结合本项目实际情况改写为具体做法+数据",
+                        )
+                    )
+
+    full_sim_enabled = _enabled("full_text_sim", dup_keys)
+    key_sim_enabled = _enabled("key_section_sim", dup_keys)
+    if full_sim_enabled or key_sim_enabled:
+        best_full = (0.0, "")
+        best_key = (0.0, "")
+        for p in paragraphs:
+            is_key = any(h in p["text"] for h in KEY_SECTION_HINTS)
+            for s in SENTENCE_SPLIT.split(p["text"]):
+                s = s.strip()
+                if len(s) < 15:
+                    continue
+                for tpl in TEMPLATE_LIBRARY:
+                    ratio = difflib.SequenceMatcher(None, s, tpl).ratio()
+                    if ratio > best_full[0]:
+                        best_full = (ratio, s)
+                    if is_key and ratio > best_key[0]:
+                        best_key = (ratio, s)
+
+        if full_sim_enabled:
+            if best_full[0] > full_risk:
+                findings.append(
+                    _finding(
+                        severity="降档",
+                        location="技术标 / 模板相似度自检",
+                        excerpt=best_full[1][:150],
+                        rule="F06.05 查重阈值全文≤30%",
+                        suggestion=(
+                            f"该段落与内置示例模板相似度约 {round(best_full[0] * 100)}%"
+                            f"（风险线 {int(full_risk * 100)}%），技术标整体应降档，请注入本项目地点/工期/地质等特征重写"
+                        ),
+                    )
+                )
+            elif best_full[0] > full_safe:
                 findings.append(
                     _finding(
                         severity="扣分",
-                        location="技术标 / 高危句式",
-                        excerpt=s[:150],
-                        rule="F10.02 虚词表-高危句式",
-                        suggestion="该句式属于万能模板句，请结合本项目实际情况改写为具体做法+数据",
+                        location="技术标 / 模板相似度自检",
+                        excerpt=best_full[1][:150],
+                        rule="F06.05 查重阈值全文≤30%",
+                        suggestion=(
+                            f"该段落与内置示例模板相似度约 {round(best_full[0] * 100)}%"
+                            f"（安全线 {int(full_safe * 100)}%），请结合本项目特征改写"
+                        ),
                     )
                 )
 
-    best_full = (0.0, "")
-    best_key = (0.0, "")
-    for p in paragraphs:
-        is_key = any(h in p["text"] for h in KEY_SECTION_HINTS)
-        for s in SENTENCE_SPLIT.split(p["text"]):
-            s = s.strip()
-            if len(s) < 15:
-                continue
-            for tpl in TEMPLATE_LIBRARY:
-                ratio = difflib.SequenceMatcher(None, s, tpl).ratio()
-                if ratio > best_full[0]:
-                    best_full = (ratio, s)
-                if is_key and ratio > best_key[0]:
-                    best_key = (ratio, s)
+        if key_sim_enabled:
+            if best_key[0] > key_risk:
+                findings.append(
+                    _finding(
+                        severity="降档",
+                        location="技术标 / 重难点四新查重",
+                        excerpt=best_key[1][:150],
+                        rule="F06.05 重难点/四新查重≤20%",
+                        suggestion=(
+                            f"重难点/四新段落与内置模板相似度约 {round(best_key[0] * 100)}%"
+                            f"（风险线 {int(key_risk * 100)}%），该小节应按清零处理并重写"
+                        ),
+                    )
+                )
+            elif best_key[0] > key_safe:
+                findings.append(
+                    _finding(
+                        severity="扣分",
+                        location="技术标 / 重难点四新查重",
+                        excerpt=best_key[1][:150],
+                        rule="F06.05 重难点/四新查重≤20%",
+                        suggestion=(
+                            f"重难点/四新段落与内置模板相似度约 {round(best_key[0] * 100)}%"
+                            f"（安全线 {int(key_safe * 100)}%），请按本工程地质/工况重写"
+                        ),
+                    )
+                )
 
-    if best_full[0] > full_risk:
-        findings.append(
-            _finding(
-                severity="降档",
-                location="技术标 / 模板相似度自检",
-                excerpt=best_full[1][:150],
-                rule="F06.05 查重阈值全文≤30%",
-                suggestion=(
-                    f"该段落与内置示例模板相似度约 {round(best_full[0] * 100)}%"
-                    f"（风险线 {int(full_risk * 100)}%），技术标整体应降档，请注入本项目地点/工期/地质等特征重写"
-                ),
-            )
-        )
-    elif best_full[0] > full_safe:
-        findings.append(
-            _finding(
-                severity="扣分",
-                location="技术标 / 模板相似度自检",
-                excerpt=best_full[1][:150],
-                rule="F06.05 查重阈值全文≤30%",
-                suggestion=(
-                    f"该段落与内置示例模板相似度约 {round(best_full[0] * 100)}%"
-                    f"（安全线 {int(full_safe * 100)}%），请结合本项目特征改写"
-                ),
-            )
-        )
-
-    if best_key[0] > key_risk:
-        findings.append(
-            _finding(
-                severity="降档",
-                location="技术标 / 重难点四新查重",
-                excerpt=best_key[1][:150],
-                rule="F06.05 重难点/四新查重≤20%",
-                suggestion=(
-                    f"重难点/四新段落与内置模板相似度约 {round(best_key[0] * 100)}%"
-                    f"（风险线 {int(key_risk * 100)}%），该小节应按清零处理并重写"
-                ),
-            )
-        )
-    elif best_key[0] > key_safe:
-        findings.append(
-            _finding(
-                severity="扣分",
-                location="技术标 / 重难点四新查重",
-                excerpt=best_key[1][:150],
-                rule="F06.05 重难点/四新查重≤20%",
-                suggestion=(
-                    f"重难点/四新段落与内置模板相似度约 {round(best_key[0] * 100)}%"
-                    f"（安全线 {int(key_safe * 100)}%），请按本工程地质/工况重写"
-                ),
-            )
-        )
-
-    findings.extend(_cross_project_findings(paragraphs, sentences, thresholds, context))
+    if _enabled("cross_bidder", dup_keys):
+        findings.extend(_cross_project_findings(paragraphs, sentences, thresholds, context))
     return findings
 
 

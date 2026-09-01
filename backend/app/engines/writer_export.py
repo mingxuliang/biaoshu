@@ -16,10 +16,11 @@ import re
 import docx
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.oxml.ns import qn
-from docx.shared import Cm, Pt, Inches
+from docx.shared import Cm, Pt, Inches, RGBColor
 
 _INLINE_SPLIT_RE = re.compile(r"(\*\*.+?\*\*|__.+?__|\*.+?\*)")
-_FONT_WRAP_RE = re.compile(r"\{\{([^|}]+)\|([^}]+)\}\}(.*?)\{\{/\}\}", re.S)
+_FONT_WRAP_RE = re.compile(r"\{\{([^|:{}]+)[:|]([^}]+)\}\}(.*?)\{\{/\}\}", re.S)
+_CELL_SPAN_RE = re.compile(r"^(?:#c(\d+)#)?(?:#r(\d+)#)?")
 _BULLET_RE = re.compile(r"^[-*]\s+")
 _NUMBERED_RE = re.compile(r"^\d+[）.)\]].*")
 _CN_NUMBERED_RE = re.compile(r"^（[一二三四五六七八九十]+）")
@@ -99,26 +100,100 @@ def _parse_table_row(line: str) -> list[str]:
     t = (line or "").strip()
     if t.startswith("|"):
         t = t[1:]
-    if t.endswith("|"):
+    if t.endswith("|") and not t.endswith("\\|"):
         t = t[:-1]
-    return [c.strip() for c in t.split("|")]
+    cells: list[str] = []
+    buf: list[str] = []
+    brace = 0
+    escape = False
+    i = 0
+    while i < len(t):
+        ch = t[i]
+        if escape:
+            buf.append(ch)
+            escape = False
+            i += 1
+            continue
+        if ch == "\\":
+            escape = True
+            i += 1
+            continue
+        if ch == "{" and i + 1 < len(t) and t[i + 1] == "{":
+            brace += 1
+            buf.append("{{")
+            i += 2
+            continue
+        if ch == "}" and i + 1 < len(t) and t[i + 1] == "}":
+            brace = max(0, brace - 1)
+            buf.append("}}")
+            i += 2
+            continue
+        if ch == "|" and brace == 0:
+            cells.append("".join(buf).strip())
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    cells.append("".join(buf).strip())
+    return cells
+
+
+def _parse_cell(raw: str) -> dict:
+    text = raw or ""
+    col_span = 1
+    row_span = 1
+    m = _CELL_SPAN_RE.match(text)
+    if m and (m.group(1) or m.group(2)):
+        if m.group(1):
+            col_span = max(1, int(m.group(1)))
+        if m.group(2):
+            row_span = max(1, int(m.group(2)))
+        text = text[m.end() :]
+    return {"text": text, "colspan": col_span, "rowspan": row_span}
+
+
+def _fill_cell(cell, text: str) -> None:
+    cell.text = ""
+    parts = re.split(r"<br\s*/?>", text or "", flags=re.I)
+    for i, part in enumerate(parts):
+        p = cell.paragraphs[0] if i == 0 else cell.add_paragraph()
+        _add_runs_with_inline_styles(p, part)
 
 
 def _add_markdown_table(document, rows: list[list[str]]) -> None:
     if not rows:
         return
-    cols = max(len(r) for r in rows)
-    table = document.add_table(rows=len(rows), cols=max(cols, 1))
+    parsed = [[_parse_cell(c) for c in row] for row in rows]
+    cols = max((sum(c["colspan"] for c in row) for row in parsed), default=1)
+    table = document.add_table(rows=len(parsed), cols=max(cols, 1))
     table.style = "Table Grid"
-    for i, row in enumerate(rows):
-        for j in range(cols):
-            cell = table.cell(i, j)
-            cell.text = ""
-            p = cell.paragraphs[0]
-            _add_runs_with_inline_styles(p, row[j] if j < len(row) else "")
+    occupied = [[False] * cols for _ in parsed]
+    for i, row in enumerate(parsed):
+        c = 0
+        for info in row:
+            while c < cols and occupied[i][c]:
+                c += 1
+            if c >= cols:
+                break
+            cs = max(1, int(info["colspan"]))
+            rs = max(1, int(info["rowspan"]))
+            cell = table.cell(i, c)
+            if cs > 1 or rs > 1:
+                end_r = min(i + rs - 1, len(parsed) - 1)
+                end_c = min(c + cs - 1, cols - 1)
+                if end_r > i or end_c > c:
+                    cell.merge(table.cell(end_r, end_c))
+            _fill_cell(cell, info["text"])
+            for rr in range(i, min(i + rs, len(parsed))):
+                for cc in range(c, min(c + cs, cols)):
+                    occupied[rr][cc] = True
+            c += cs
 
 
-def render_markdown_block(document, line: str, image_paths: dict[str, str] | None = None) -> None:
+def render_markdown_block(
+    document, line: str, image_paths: dict[str, str] | None = None, layout: dict | None = None
+) -> None:
     """把编辑器里的一行 markdown-lite 文本追加为 docx 段落/标题。"""
     align, body = _split_align(line)
     trimmed = body.strip()
@@ -140,12 +215,14 @@ def render_markdown_block(document, line: str, image_paths: dict[str, str] | Non
         return
 
     if trimmed.startswith("### "):
-        p = document.add_heading(trimmed[4:], level=3)
+        p = document.add_heading(_unwrap_inline(trimmed[4:]), level=3)
+        _restyle_heading(p, layout)
         if align is not None:
             p.alignment = align
         return
     if trimmed.startswith("## "):
-        p = document.add_heading(trimmed[3:], level=2)
+        p = document.add_heading(_unwrap_inline(trimmed[3:]), level=2)
+        _restyle_heading(p, layout)
         if align is not None:
             p.alignment = align
         return
@@ -153,7 +230,7 @@ def render_markdown_block(document, line: str, image_paths: dict[str, str] | Non
     bullet_match = _BULLET_RE.match(trimmed)
     if bullet_match:
         p = document.add_paragraph(style="List Bullet")
-        _add_runs_with_inline_styles(p, trimmed[bullet_match.end():].strip())
+        _add_runs_with_inline_styles(p, trimmed[bullet_match.end() :].strip())
         if align is not None:
             p.alignment = align
         return
@@ -167,6 +244,7 @@ def render_markdown_block(document, line: str, image_paths: dict[str, str] | Non
 
     p = document.add_paragraph()
     _add_runs_with_inline_styles(p, trimmed)
+    _apply_body_indent(p, trimmed, layout)
     if align is not None:
         p.alignment = align
 
@@ -178,13 +256,75 @@ def _node_level(outline: list[dict], node_id: str, _depth: int = 0) -> int:
     return _node_level(outline, node["parentId"], _depth + 1)
 
 
-_FONT_PT = {"小三": 15, "小四": 12, "四号": 14, "三号": 16}
+_FONT_PT = {"小五": 9, "五号": 10.5, "小四": 12, "四号": 14, "小三": 15, "三号": 16, "小二": 18}
 _LINE_SPACING = {
     "1.5倍行距": 1.5,
     "2倍行距": 2.0,
     "固定值28磅": 28,
     "固定值30磅": 30,
 }
+
+
+def _unwrap_inline(text: str) -> str:
+    t = _FONT_WRAP_RE.sub(lambda m: m.group(3), text or "")
+    t = re.sub(r"\*\*(.+?)\*\*", r"\1", t)
+    t = re.sub(r"__(.+?)__", r"\1", t)
+    t = re.sub(r"(?<!\*)\*(.+?)\*(?!\*)", r"\1", t)
+    return t.strip()
+
+
+def _set_style_font(style, name: str, size_pt: float) -> None:
+    font = style.font
+    font.name = name
+    font.size = Pt(size_pt)
+    rPr = style.element.get_or_add_rPr()
+    rFonts = rPr.get_or_add_rFonts()
+    rFonts.set(qn("w:ascii"), name)
+    rFonts.set(qn("w:hAnsi"), name)
+    rFonts.set(qn("w:eastAsia"), name)
+    rFonts.set(qn("w:cs"), name)
+
+
+def _layout_body_pt(layout: dict | None) -> float:
+    if not layout:
+        return 12.0
+    try:
+        if layout.get("bodySizePt") is not None:
+            return float(layout["bodySizePt"])
+    except (TypeError, ValueError):
+        pass
+    return float(_FONT_PT.get(str(layout.get("fontSize") or ""), 12))
+
+
+def _restyle_heading(paragraph, layout: dict | None) -> None:
+    if not layout:
+        return
+    hfont = str(layout.get("headingFont") or layout.get("bodyFont") or "宋体")
+    try:
+        hpt = float(layout.get("headingSizePt") or _layout_body_pt(layout))
+    except (TypeError, ValueError):
+        hpt = _layout_body_pt(layout)
+    hbold = bool(layout.get("headingBold", True))
+    paragraph.paragraph_format.first_line_indent = Pt(0)
+    for run in paragraph.runs:
+        _set_run_font(run, hfont, f"{hpt:g}pt")
+        run.bold = hbold
+        run.font.color.rgb = RGBColor(0, 0, 0)
+
+
+def _apply_body_indent(paragraph, text: str, layout: dict | None) -> None:
+    if not layout:
+        return
+    try:
+        indent_pt = float(layout.get("indentPt") or 0)
+    except (TypeError, ValueError):
+        return
+    if indent_pt < 8:
+        return
+    stripped = (text or "").lstrip()
+    if stripped.startswith("　") or stripped.startswith(" "):
+        return
+    paragraph.paragraph_format.first_line_indent = Pt(indent_pt)
 
 
 def _apply_layout(document, layout: dict | None) -> None:
@@ -202,15 +342,34 @@ def _apply_layout(document, layout: dict | None) -> None:
         if margins.get("right") is not None:
             section.right_margin = Cm(float(margins["right"]))
 
-    style = document.styles["Normal"]
-    font = style.font
-    font.name = "宋体"
-    font.size = Pt(_FONT_PT.get(str(layout.get("fontSize") or ""), 12))
+    body_font = str(layout.get("bodyFont") or "宋体")
+    body_pt = _layout_body_pt(layout)
+    _set_style_font(document.styles["Normal"], body_font, body_pt)
 
-    pf = style.paragraph_format
+    heading_font = str(layout.get("headingFont") or body_font)
+    try:
+        heading_pt = float(layout.get("headingSizePt") or body_pt)
+    except (TypeError, ValueError):
+        heading_pt = body_pt
+    heading_bold = bool(layout.get("headingBold", True))
+    for i in range(1, 4):
+        try:
+            hstyle = document.styles[f"Heading {i}"]
+        except KeyError:
+            continue
+        _set_style_font(hstyle, heading_font, heading_pt)
+        hstyle.font.bold = heading_bold
+        hstyle.font.color.rgb = RGBColor(0, 0, 0)
+        hstyle.paragraph_format.first_line_indent = Pt(0)
+
+    pf = document.styles["Normal"].paragraph_format
     spacing = layout.get("lineSpacing")
-    multiple = _LINE_SPACING.get(str(spacing or ""), 1.5)
-    if spacing in ("固定值28磅", "固定值30磅"):
+    try:
+        mul = float(layout["lineSpacingMul"]) if layout.get("lineSpacingMul") is not None else None
+    except (TypeError, ValueError):
+        mul = None
+    multiple = mul if mul else _LINE_SPACING.get(str(spacing or ""), 1.5)
+    if spacing in ("固定值28磅", "固定值30磅") and mul is None:
         pf.line_spacing_rule = WD_LINE_SPACING.EXACTLY
         pf.line_spacing = Pt(multiple)
     else:
@@ -226,6 +385,8 @@ def chapters_to_docx(
     layout: dict | None = None,
 ) -> bytes:
     """按目录顺序把全部章节内容拼接为一份完整 .docx。"""
+    from .e_writer import chapter_kind
+
     document = docx.Document()
     _apply_layout(document, layout)
     if project_name:
@@ -235,6 +396,14 @@ def chapters_to_docx(
         level = min(_node_level(outline, node["id"]) + 1, 3)
         heading_text = f"{node.get('num', '')} {node.get('title', '')}".strip()
         document.add_heading(heading_text, level=level)
+
+        kind = chapter_kind(
+            str(node.get("title") or ""),
+            node.get("part"),
+            str(node.get("idea") or ""),
+            str(node.get("requirement") or ""),
+        )
+        body_layout = layout if kind == "tech" else None
 
         content = chapter_contents.get(node["id"], "")
         if not content.strip():
@@ -250,7 +419,7 @@ def chapters_to_docx(
                     i += 1
                 _add_markdown_table(document, rows)
                 continue
-            render_markdown_block(document, lines[i], image_paths)
+            render_markdown_block(document, lines[i], image_paths, body_layout)
             i += 1
 
     buf = io.BytesIO()

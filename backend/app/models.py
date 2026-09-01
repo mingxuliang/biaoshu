@@ -233,7 +233,9 @@ class BidRevision(Base):
     review_run_id = Column(String, ForeignKey("review_runs.id"), nullable=False)
     sections_json = Column(JSON, default=list)
     issues_json = Column(JSON, default=list)
+    layout_json = Column(JSON, nullable=True)
     content_state_json = Column(JSON, nullable=True)
+    resolved_ids_json = Column(JSON, default=list)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -482,6 +484,7 @@ class VetoRule(Base):
     wired_note = Column(String, default="")
     engine = Column(String, default="")
     seq = Column(Integer, default=0)
+    enabled = Column(Boolean, default=True)  # 管理员开关：关闭后引擎跳过该条对应检查
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -500,6 +503,7 @@ class CatalogRule(Base):
     wired_note = Column(String, default="")
     engine = Column(String, default="")
     seq = Column(Integer, default=0)
+    enabled = Column(Boolean, default=True)  # 管理员开关：关闭后引擎跳过该条对应检查
     created_at = Column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (UniqueConstraint("kind", "key", name="uq_catalog_kind_key"),)

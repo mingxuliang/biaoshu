@@ -1,4 +1,5 @@
 import type { ReactElement } from "react";
+import AuthImage from "../../components/AuthImage";
 import {
   $applyNodeReplacement,
   DecoratorNode,
@@ -79,7 +80,13 @@ export class ImageNode extends DecoratorNode<ReactElement> {
   decorate(): ReactElement {
     return (
       <figure className="my-3 flex flex-col items-center">
-        <img src={this.__src} alt={this.__alt} className="max-h-72 w-auto max-w-full object-contain" />
+        <AuthImage
+          src={this.__src}
+          alt={this.__alt}
+          eager
+          fallbackText="图片加载失败"
+          className="max-h-72 w-auto max-w-full object-contain"
+        />
         {this.__alt ? (
           <figcaption className="mt-1 text-center text-[11px] text-foreground-500">{this.__alt}</figcaption>
         ) : null}

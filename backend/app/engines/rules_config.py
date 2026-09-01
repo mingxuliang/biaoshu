@@ -5,9 +5,11 @@
 保证规则表为空/未迁移时引擎依然可用。
 """
 
+from dataclasses import dataclass, field
+
 from sqlalchemy.orm import Session
 
-from ..models import EvaluationChecklist, FillerWordRule, RulePackage, ThresholdRule, WeightTemplate
+from ..models import CatalogRule, EvaluationChecklist, FillerWordRule, RulePackage, ThresholdRule, VetoRule, WeightTemplate
 from . import rules_data
 
 
@@ -61,18 +63,74 @@ def load_enabled_package_items(db: Session) -> list[str]:
     return items
 
 
+def load_enabled_veto_keys(db: Session) -> set[str]:
+    """启用中的一票否决项 key 集合；管理员可在规则页逐条关闭对应引擎检查。"""
+    rows = db.query(VetoRule).all()
+    if not rows:
+        return {item["key"] for item in rules_data.VETO_CHECK_POINTS}
+    return {r.key for r in rows if r.enabled is not False}
+
+
+def load_enabled_catalog_keys(db: Session, kind: str) -> set[str]:
+    """启用中的商务自查/技术评分/专项检查/高分策略 key 集合，按 kind 过滤。"""
+    rows = db.query(CatalogRule).filter(CatalogRule.kind == kind).all()
+    if not rows:
+        return {item["key"] for item in rules_data.RULE_CATALOGS.get(kind, [])}
+    return {r.key for r in rows if r.enabled is not False}
+
+
 def load_locked_checklist(db: Session, project_id: str) -> tuple[dict | None, list]:
-    """锁定评标尺子的 engine_params 与 mustRespond 清单；未锁定时返回 (None, [])。"""
-    checklist = (
+    """兼容旧调用方：返回 (engine_params, mustRespond)。
+
+    优先用已锁定评标尺子；未锁定则回退到该项目最新一轮 status=done 的解析结果，
+    避免「解析完但忘了点锁定」时预审完全看不到招标约定。
+    """
+    cl = load_project_checklist(db, project_id)
+    if not cl.params and not cl.must_respond:
+        return None, []
+    return cl.params or {}, cl.must_respond
+
+
+@dataclass
+class ProjectChecklist:
+    """招标解析落到预审引擎的约定内容。"""
+
+    params: dict = field(default_factory=dict)
+    must_respond: list = field(default_factory=list)
+    score_rules: list = field(default_factory=list)
+    qualification: list = field(default_factory=list)
+    format_requirements: list = field(default_factory=list)
+    locked: bool = False
+    version: int | None = None
+
+
+def load_project_checklist(db: Session, project_id: str) -> ProjectChecklist:
+    locked = (
         db.query(EvaluationChecklist)
-        .filter(EvaluationChecklist.project_id == project_id, EvaluationChecklist.locked == True)  # noqa: E712
+        .filter(EvaluationChecklist.project_id == project_id, EvaluationChecklist.locked.is_(True))
         .order_by(EvaluationChecklist.version.desc())
         .first()
     )
-    if not checklist:
-        return None, []
-    data = checklist.checklist_json or {}
-    must = data.get("mustRespond") or []
-    if not isinstance(must, list):
-        must = []
-    return checklist.engine_params_json or None, must
+    row = locked or (
+        db.query(EvaluationChecklist)
+        .filter(EvaluationChecklist.project_id == project_id, EvaluationChecklist.status == "done")
+        .order_by(EvaluationChecklist.version.desc())
+        .first()
+    )
+    if not row:
+        return ProjectChecklist()
+    data = row.checklist_json or {}
+
+    def _list(key: str) -> list:
+        val = data.get(key) or []
+        return val if isinstance(val, list) else []
+
+    return ProjectChecklist(
+        params=row.engine_params_json or {},
+        must_respond=_list("mustRespond"),
+        score_rules=_list("scoreRules"),
+        qualification=_list("qualification"),
+        format_requirements=_list("formatRequirements"),
+        locked=bool(row.locked),
+        version=row.version,
+    )

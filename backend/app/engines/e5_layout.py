@@ -38,59 +38,75 @@ def _outline_from_style(style_name: str) -> int | None:
     return None
 
 
-def run(path: str, paragraphs: list[dict] | None = None, context=None) -> list[dict]:
+def _enabled(key: str, enabled_keys: set[str] | None) -> bool:
+    return enabled_keys is None or key in enabled_keys
+
+
+def run(
+    path: str,
+    paragraphs: list[dict] | None = None,
+    context=None,
+    veto_keys: set[str] | None = None,
+    dup_keys: set[str] | None = None,
+    strategy_keys: set[str] | None = None,
+) -> list[dict]:
     findings: list[dict] = []
     paragraphs = paragraphs if paragraphs is not None else extract_paragraphs(path)
 
-    levels_seen = [lvl for lvl in (_outline_from_style(p["style"]) for p in paragraphs) if lvl is not None]
-    for i in range(1, len(levels_seen)):
-        if levels_seen[i] - levels_seen[i - 1] > 1:
+    file_form_enabled = _enabled("file_form", veto_keys)
+    structured_layout_enabled = _enabled("structured_layout", strategy_keys)
+    anon_meta_enabled = _enabled("anon_meta", dup_keys)
+
+    if structured_layout_enabled:
+        levels_seen = [lvl for lvl in (_outline_from_style(p["style"]) for p in paragraphs) if lvl is not None]
+        for i in range(1, len(levels_seen)):
+            if levels_seen[i] - levels_seen[i - 1] > 1:
+                findings.append(
+                    _finding(
+                        severity="建议",
+                        location="全文 / 标题层级",
+                        excerpt=f"检测到标题层级从 Heading {levels_seen[i - 1]} 跳到 Heading {levels_seen[i]}",
+                        rule="F06.06 版式终审-标题连续性",
+                        suggestion="补齐中间层级标题，保持三级标题编号连续（1 → 1.1 → 1.1.1）",
+                    )
+                )
+                break
+
+        has_catalog_heading = any("目录" in p["text"] and len(p["text"]) < 10 for p in paragraphs)
+        if has_catalog_heading and not has_toc_field(path):
             findings.append(
                 _finding(
                     severity="建议",
-                    location="全文 / 标题层级",
-                    excerpt=f"检测到标题层级从 Heading {levels_seen[i - 1]} 跳到 Heading {levels_seen[i]}",
-                    rule="F06.06 版式终审-标题连续性",
-                    suggestion="补齐中间层级标题，保持三级标题编号连续（1 → 1.1 → 1.1.1）",
+                    location="全文 / 目录",
+                    excerpt="检测到「目录」标题但未使用自动域生成目录",
+                    rule="F06.06 版式终审",
+                    suggestion="使用 Word「引用 → 目录」自动域生成，确保页码与正文一致",
                 )
             )
-            break
 
-    has_catalog_heading = any("目录" in p["text"] and len(p["text"]) < 10 for p in paragraphs)
-    if has_catalog_heading and not has_toc_field(path):
-        findings.append(
-            _finding(
-                severity="建议",
-                location="全文 / 目录",
-                excerpt="检测到「目录」标题但未使用自动域生成目录",
-                rule="F06.06 版式终审",
-                suggestion="使用 Word「引用 → 目录」自动域生成，确保页码与正文一致",
+        if has_revision_marks(path):
+            findings.append(
+                _finding(
+                    severity="建议",
+                    location="全文 / 修订痕迹",
+                    excerpt="检测到 Word 修订标记（插入/删除）残留",
+                    rule="F06.06 版式终审",
+                    suggestion="接受或拒绝全部修订后再提交，避免评审时看到修改痕迹",
+                )
             )
-        )
 
-    if has_revision_marks(path):
-        findings.append(
-            _finding(
-                severity="建议",
-                location="全文 / 修订痕迹",
-                excerpt="检测到 Word 修订标记（插入/删除）残留",
-                rule="F06.06 版式终审",
-                suggestion="接受或拒绝全部修订后再提交，避免评审时看到修改痕迹",
+        if has_comments(path):
+            findings.append(
+                _finding(
+                    severity="建议",
+                    location="全文 / 批注",
+                    excerpt="检测到 Word 批注残留",
+                    rule="F06.06 版式终审-批注",
+                    suggestion="删除全部批注后再提交，避免评审端看到内部讨论",
+                )
             )
-        )
 
-    if has_comments(path):
-        findings.append(
-            _finding(
-                severity="建议",
-                location="全文 / 批注",
-                excerpt="检测到 Word 批注残留",
-                rule="F06.06 版式终审-批注",
-                suggestion="删除全部批注后再提交，避免评审端看到内部讨论",
-            )
-        )
-
-    if has_blank_page_hint(path):
+    if file_form_enabled and has_blank_page_hint(path):
         findings.append(
             _finding(
                 severity="建议",
@@ -101,19 +117,20 @@ def run(path: str, paragraphs: list[dict] | None = None, context=None) -> list[d
             )
         )
 
-    author = get_core_author(path)
-    if author:
-        findings.append(
-            _finding(
-                severity="建议",
-                location="文档属性 / 作者信息",
-                excerpt=f"文档属性中检测到作者信息「{author}」",
-                rule="F06.06 版式终审-暗标残留",
+    if anon_meta_enabled:
+        author = get_core_author(path)
+        if author:
+            findings.append(
+                _finding(
+                    severity="建议",
+                    location="文档属性 / 作者信息",
+                    excerpt=f"文档属性中检测到作者信息「{author}」",
+                    rule="F06.06 版式终审-暗标残留",
                     suggestion="若本项目要求暗标评审，请在 Word「文件→信息→检查文档」中清除作者等个人身份信息",
                 )
             )
 
-    if context is not None:
+    if file_form_enabled and context is not None:
         if getattr(context, "encrypted", False):
             findings.append(
                 _finding(

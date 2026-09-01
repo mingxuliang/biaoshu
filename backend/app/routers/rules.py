@@ -12,9 +12,11 @@ from ..schemas import (
     RulePackageIn,
     RulePackageOut,
     ThresholdRuleOut,
+    UpdateCatalogRuleIn,
     UpdateFillerWordRuleIn,
     UpdateRulePackageIn,
     UpdateThresholdIn,
+    UpdateVetoRuleIn,
     UpdateWeightTemplateIn,
     VetoRuleOut,
     WeightTemplateIn,
@@ -277,6 +279,7 @@ def _veto_to_out(row: VetoRule) -> VetoRuleOut:
         wiredNote=row.wired_note or "",
         engine=row.engine or "",
         seq=row.seq or 0,
+        enabled=row.enabled if row.enabled is not None else True,
     )
 
 
@@ -284,6 +287,23 @@ def _veto_to_out(row: VetoRule) -> VetoRuleOut:
 def list_veto_points(db: Session = Depends(get_db)) -> list[VetoRuleOut]:
     rows = db.query(VetoRule).order_by(VetoRule.seq.asc(), VetoRule.created_at.asc()).all()
     return [_veto_to_out(r) for r in rows]
+
+
+@router.patch("/veto-points/{rule_id}", response_model=VetoRuleOut)
+def update_veto_point(
+    rule_id: str,
+    payload: UpdateVetoRuleIn,
+    db: Session = Depends(get_db),
+    _user: User = Depends(_require_settings),
+) -> VetoRuleOut:
+    row = db.get(VetoRule, rule_id)
+    if not row:
+        raise HTTPException(404, "一票否决项不存在")
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(row, field, value)
+    db.commit()
+    db.refresh(row)
+    return _veto_to_out(row)
 
 
 CATALOG_KINDS = ("business", "tech", "dup_check", "strategy")
@@ -303,6 +323,7 @@ def _catalog_to_out(row: CatalogRule) -> CatalogRuleOut:
         wiredNote=row.wired_note or "",
         engine=row.engine or "",
         seq=row.seq or 0,
+        enabled=row.enabled if row.enabled is not None else True,
     )
 
 
@@ -315,3 +336,20 @@ def list_catalog_rules(kind: str | None = None, db: Session = Depends(get_db)) -
         query = query.filter(CatalogRule.kind == kind)
     rows = query.order_by(CatalogRule.kind.asc(), CatalogRule.seq.asc(), CatalogRule.created_at.asc()).all()
     return [_catalog_to_out(r) for r in rows]
+
+
+@router.patch("/catalog/{rule_id}", response_model=CatalogRuleOut)
+def update_catalog_rule(
+    rule_id: str,
+    payload: UpdateCatalogRuleIn,
+    db: Session = Depends(get_db),
+    _user: User = Depends(_require_settings),
+) -> CatalogRuleOut:
+    row = db.get(CatalogRule, rule_id)
+    if not row:
+        raise HTTPException(404, "目录项不存在")
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(row, field, value)
+    db.commit()
+    db.refresh(row)
+    return _catalog_to_out(row)

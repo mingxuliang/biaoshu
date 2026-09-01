@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   defaultStyle, pageSliderTicks, defaultPage, defaultLayout,
-  layoutFontSizes, layoutLineSpacings, defaultImage, normalImageOptions,
+  layoutFontSizes, layoutLineSpacings, layoutFontNamePt, defaultImage, normalImageOptions,
   archImageOptions, aiImageStyles,
   type StyleConfig, type PageConfig, type LayoutConfig, type ImageConfig,
 } from "@/mocks/writerSteps";
@@ -39,7 +39,10 @@ export default function BidSettings({
 }: BidSettingsProps) {
   const [style, setStyle] = useState<StyleConfig>(initialSettings?.style ?? defaultStyle);
   const [page, setPage] = useState<PageConfig>(initialSettings?.page ?? defaultPage);
-  const [layout, setLayout] = useState<LayoutConfig>(initialSettings?.layout ?? defaultLayout);
+  const [layout, setLayout] = useState<LayoutConfig>({
+    ...defaultLayout,
+    ...(initialSettings?.layout ?? {}),
+  });
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [scope, setScope] = useState("全部");
   const [type, setType] = useState("全部");
@@ -77,6 +80,12 @@ export default function BidSettings({
       cancelled = true;
     };
   }, [projectId]);
+
+  useEffect(() => {
+    const next = initialSettings?.layout;
+    if (!next?.fromTender) return;
+    setLayout((prev) => ({ ...defaultLayout, ...prev, ...next }));
+  }, [initialSettings?.layout?.fromTender, initialSettings?.layout?.bodyFont, initialSettings?.layout?.bodySizePt, initialSettings?.layout?.indentPt]);
 
   const filtered = useMemo(() => {
     return knowledgeDocs.filter((d) => {
@@ -490,10 +499,20 @@ export default function BidSettings({
               <label className="mb-1 block text-[11px] font-medium text-foreground-600">正文字号</label>
               <select
                 value={layout.fontSize}
-                onChange={(e) => setLayout({ ...layout, fontSize: e.target.value })}
+                onChange={(e) => {
+                  const fontSize = e.target.value;
+                  setLayout({
+                    ...layout,
+                    fontSize,
+                    bodySizePt: layoutFontNamePt[fontSize] ?? layout.bodySizePt,
+                  });
+                }}
                 className={`${inputCls} cursor-pointer`}
               >
-                {layoutFontSizes.map((s) => (
+                {(layout.fontSize && !layoutFontSizes.includes(layout.fontSize)
+                  ? [layout.fontSize, ...layoutFontSizes]
+                  : layoutFontSizes
+                ).map((s) => (
                   <option key={s}>{s}</option>
                 ))}
               </select>
@@ -502,7 +521,11 @@ export default function BidSettings({
               <label className="mb-1 block text-[11px] font-medium text-foreground-600">正文行间距</label>
               <select
                 value={layout.lineSpacing}
-                onChange={(e) => setLayout({ ...layout, lineSpacing: e.target.value })}
+                onChange={(e) => {
+                  const lineSpacing = e.target.value;
+                  const mul = lineSpacing.startsWith("2") ? 2 : lineSpacing.includes("1.5") ? 1.5 : layout.lineSpacingMul;
+                  setLayout({ ...layout, lineSpacing, lineSpacingMul: mul });
+                }}
                 className={`${inputCls} cursor-pointer`}
               >
                 {layoutLineSpacings.map((s) => (
@@ -511,6 +534,22 @@ export default function BidSettings({
               </select>
             </div>
           </div>
+          {layout.fromTender ? (
+            <p className="mt-2 rounded-md bg-secondary-50 px-3 py-2 text-[11px] leading-relaxed text-secondary-800">
+              已按本项目招标书识别：{layout.bodyFont || "宋体"}{" "}
+              {layout.bodySizePt != null ? `${layout.bodySizePt}pt` : layout.fontSize}
+              {layout.indentChars
+                ? `，首行缩进 ${layout.indentChars} 字`
+                : layout.indentPt
+                  ? `，首行缩进 ${layout.indentPt}pt`
+                  : "，正文无首行缩进"}
+              。不同招标书排版不同，下方选项可覆盖。
+            </p>
+          ) : (
+            <p className="mt-2 text-[11px] text-foreground-500">
+              正文字体、字号、首行缩进按上传的招标书自动识别；尚未识别到时沿用下拉框设置。
+            </p>
+          )}
         </section>
 
         {/* 5. 配图设置 */}

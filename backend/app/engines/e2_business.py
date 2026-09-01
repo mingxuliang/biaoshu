@@ -5,6 +5,9 @@
 
 属地细则：仅在正文已写到对应主题（临边/扫地杆/扬尘）却缺少启用包中的量化要求时扣分，
 不因未写该主题而凭空否决。
+
+biz_keys/veto_keys/strategy_keys：管理员在规则页关闭对应条目时，这里跳过相应检查块；
+传 None 表示不做开关过滤（全部启用，兼容旧调用方）。
 """
 
 import re
@@ -13,10 +16,13 @@ from .rules_data import THRESHOLDS
 
 PERFORMANCE_KEYWORDS = ["业绩", "类似项目", "施工业绩"]
 FOUR_PIECES = ["中标通知书", "合同", "竣工验收", "官网"]
+PERFORMANCE_QUANTIFIER_PATTERN = re.compile(r"\d+(?:\.\d+)?\s*(?:项|个|万元|㎡|平方米|年|月|km|公里)")
 
 ASSET_LIABILITY_PATTERN = re.compile(r"资产负债率\D{0,10}(\d{1,3}(?:\.\d+)?)\s*%")
 PRICE_WAN_PATTERN = re.compile(r"(?:投标报价|总报价|投标总价)\D{0,12}(-?\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*万元")
 BASE_PRICE_PATTERN = re.compile(r"(?:评标基准价|基准价|拦标价)\D{0,12}(\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*万元")
+FINANCE_TOPIC_KEYWORDS = ("财务指标", "资产负债率", "财务状况")
+FINANCE_COMPLETENESS_KEYWORDS = (("营业收入", "营收"), ("现金流",), ("审计报告",))
 
 LOCAL_ITEM_CHECKS = [
     {
@@ -57,6 +63,10 @@ def _finding(severity: str, location: str, excerpt: str, rule: str, suggestion: 
     }
 
 
+def _enabled(key: str, enabled_keys: set[str] | None) -> bool:
+    return enabled_keys is None or key in enabled_keys
+
+
 def _item_enabled(local_items: list[str], hint: str) -> bool:
     return any(hint in (item or "") for item in local_items)
 
@@ -67,6 +77,9 @@ def run(
     thresholds: dict | None = None,
     local_items: list[str] | None = None,
     context=None,
+    biz_keys: set[str] | None = None,
+    veto_keys: set[str] | None = None,
+    strategy_keys: set[str] | None = None,
 ) -> list[dict]:
     findings: list[dict] = []
     text_blocks = [p["text"] for p in paragraphs]
@@ -81,76 +94,110 @@ def run(
     ok_dev = thresholds.get("price_deviation_ok", THRESHOLDS.get("price_deviation_ok", 5))
     warn_dev = thresholds.get("price_deviation_warn", THRESHOLDS.get("price_deviation_warn", 10))
 
+    performance_enabled = _enabled("performance", biz_keys)
+    finance_enabled = _enabled("finance", biz_keys)
+    price_enabled = _enabled("price", veto_keys)
+
     flagged_windows: set[int] = set()
-    for idx, p in enumerate(paragraphs):
-        text = p["text"]
-        if not any(k in text for k in PERFORMANCE_KEYWORDS):
-            continue
-        window_key = idx // 6
-        if window_key in flagged_windows:
-            continue
-        window = "\n".join(text_blocks[idx : idx + 6])
-        missing = [kw for kw in FOUR_PIECES if kw not in window]
-        if missing:
-            flagged_windows.add(window_key)
-            findings.append(
-                _finding(
-                    severity="降档",
-                    location=f"商务标 / 业绩证明 / 段落 {p['index']}",
-                    excerpt=text[:150],
-                    rule="F03.05 业绩四件套齐全才计分",
-                    suggestion=f"该业绩缺少：{'、'.join(missing)}，请补充佐证材料，否则该项业绩不予计分",
-                )
-            )
-
-    m = ASSET_LIABILITY_PATTERN.search(full_text)
-    if m:
-        ratio = float(m.group(1))
-        if ratio > ratio_max:
-            findings.append(
-                _finding(
-                    severity="扣分",
-                    location="资格文件 / 财务指标",
-                    excerpt=m.group(0),
-                    rule="F02.04 财务要求核对",
-                    suggestion=(
-                        f"资产负债率 {ratio}% 超过 {ratio_max}% 上限，"
-                        "请核对最新年度报表或附说明函"
-                    ),
-                    tender_quote=f"资产负债率不高于 {ratio_max}%" if checklist_params.get("asset_liability_ratio_max") is not None else "",
-                )
-            )
-
-    m_price = PRICE_WAN_PATTERN.search(full_text)
-    m_base = BASE_PRICE_PATTERN.search(full_text)
-    if m_price and m_base:
-        try:
-            price = float(m_price.group(1).replace(",", ""))
-            base = float(m_base.group(1).replace(",", ""))
-        except ValueError:
-            price, base = None, None
-        if price is not None and base and base > 0 and price >= 0:
-            deviation = abs(price - base) / base * 100
-            if deviation > warn_dev:
+    if performance_enabled:
+        for idx, p in enumerate(paragraphs):
+            text = p["text"]
+            if not any(k in text for k in PERFORMANCE_KEYWORDS):
+                continue
+            window_key = idx // 6
+            if window_key in flagged_windows:
+                continue
+            window = "\n".join(text_blocks[idx : idx + 6])
+            missing = [kw for kw in FOUR_PIECES if kw not in window]
+            if missing:
+                flagged_windows.add(window_key)
                 findings.append(
                     _finding(
                         severity="降档",
-                        location="商务标 / 投标报价",
-                        excerpt=f"投标报价 {price} 万元，基准价 {base} 万元，偏离 {deviation:.1f}%",
-                        rule="F02.01 报价偏离预警",
-                        suggestion=f"相对评标基准价偏离超过 {warn_dev}%，请附成本分析或合理说明，避免被认定为异常价",
+                        location=f"商务标 / 业绩证明 / 段落 {p['index']}",
+                        excerpt=text[:150],
+                        rule="F03.05 业绩四件套齐全才计分",
+                        suggestion=f"该业绩缺少：{'、'.join(missing)}，请补充佐证材料，否则该项业绩不予计分",
                     )
                 )
-            elif deviation > ok_dev:
+            elif not PERFORMANCE_QUANTIFIER_PATTERN.search(window):
+                flagged_windows.add(window_key)
+                findings.append(
+                    _finding(
+                        severity="建议",
+                        location=f"商务标 / 业绩证明 / 段落 {p['index']}",
+                        excerpt=text[:150],
+                        rule="F03.05 业绩数量/规模/时间须量化",
+                        suggestion="该业绩缺少可核验的数量、规模或时间数据（如合同金额、建筑面积、完工年月），请补充具体数字",
+                    )
+                )
+
+    if finance_enabled:
+        m = ASSET_LIABILITY_PATTERN.search(full_text)
+        if m:
+            ratio = float(m.group(1))
+            if ratio > ratio_max:
                 findings.append(
                     _finding(
                         severity="扣分",
-                        location="商务标 / 投标报价",
-                        excerpt=f"投标报价 {price} 万元，基准价 {base} 万元，偏离 {deviation:.1f}%",
-                        rule="F02.01 报价偏离扣分",
-                        suggestion=f"相对评标基准价偏离超过 {ok_dev}%，请复核报价组成",
+                        location="资格文件 / 财务指标",
+                        excerpt=m.group(0),
+                        rule="F02.04 财务要求核对",
+                        suggestion=(
+                            f"资产负债率 {ratio}% 超过 {ratio_max}% 上限，"
+                            "请核对最新年度报表或附说明函"
+                        ),
+                        tender_quote=f"资产负债率不高于 {ratio_max}%" if checklist_params.get("asset_liability_ratio_max") is not None else "",
                     )
                 )
+        if any(k in full_text for k in FINANCE_TOPIC_KEYWORDS):
+            missing_finance = [
+                labels[0]
+                for labels in FINANCE_COMPLETENESS_KEYWORDS
+                if not any(kw in full_text for kw in labels)
+            ]
+            if len(missing_finance) >= 2:
+                findings.append(
+                    _finding(
+                        severity="扣分",
+                        location="资格文件 / 财务指标",
+                        excerpt="正文涉及财务指标，但资料不完整",
+                        rule="F02.04 财务资料完整性",
+                        suggestion=f"财务部分缺少：{'、'.join(missing_finance)}，近三年营收、现金流、审计报告须完整清晰、数据前后一致",
+                    )
+                )
+
+    if price_enabled:
+        m_price = PRICE_WAN_PATTERN.search(full_text)
+        m_base = BASE_PRICE_PATTERN.search(full_text)
+        if m_price and m_base:
+            try:
+                price = float(m_price.group(1).replace(",", ""))
+                base = float(m_base.group(1).replace(",", ""))
+            except ValueError:
+                price, base = None, None
+            if price is not None and base and base > 0 and price >= 0:
+                deviation = abs(price - base) / base * 100
+                if deviation > warn_dev:
+                    findings.append(
+                        _finding(
+                            severity="降档",
+                            location="商务标 / 投标报价",
+                            excerpt=f"投标报价 {price} 万元，基准价 {base} 万元，偏离 {deviation:.1f}%",
+                            rule="F02.01 报价偏离预警",
+                            suggestion=f"相对评标基准价偏离超过 {warn_dev}%，请附成本分析或合理说明，避免被认定为异常价",
+                        )
+                    )
+                elif deviation > ok_dev:
+                    findings.append(
+                        _finding(
+                            severity="扣分",
+                            location="商务标 / 投标报价",
+                            excerpt=f"投标报价 {price} 万元，基准价 {base} 万元，偏离 {deviation:.1f}%",
+                            rule="F02.01 报价偏离扣分",
+                            suggestion=f"相对评标基准价偏离超过 {ok_dev}%，请复核报价组成",
+                        )
+                    )
 
     for spec in LOCAL_ITEM_CHECKS:
         if not _item_enabled(local_items, spec["hint"]):
@@ -169,7 +216,7 @@ def run(
             )
         )
 
-    findings.extend(_context_findings(full_text, context))
+    findings.extend(_context_findings(full_text, context, checklist_params, biz_keys, strategy_keys))
     return findings
 
 
@@ -183,13 +230,27 @@ def _has_qual(quals: list, *keywords: str, kind: str | None = None) -> bool:
     return False
 
 
-def _context_findings(full_text: str, context) -> list[dict]:
+def _context_findings(
+    full_text: str,
+    context,
+    checklist_params: dict,
+    biz_keys: set[str] | None,
+    strategy_keys: set[str] | None,
+) -> list[dict]:
     if context is None:
         return []
     extra: list[dict] = []
     quals = list(getattr(context, "quals", []) or [])
 
-    if any(k in full_text for k in ("ISO", "iso", "荣誉", "奖项", "体系认证")):
+    honor_enabled = _enabled("honor", biz_keys)
+    localization_enabled = _enabled("localization", biz_keys)
+    staffing_enabled = _enabled("staffing", biz_keys)
+    equipment_enabled = _enabled("equipment", biz_keys)
+    credit_enabled = _enabled("credit", biz_keys)
+    data_loop_enabled = _enabled("data_loop", strategy_keys)
+    code_cite_enabled = _enabled("code_cite", strategy_keys)
+
+    if honor_enabled and any(k in full_text for k in ("ISO", "iso", "荣誉", "奖项", "体系认证")):
         if not _has_qual(quals, "ISO", "iso", "荣誉", "奖", "认证", kind="cert") and not _has_qual(
             quals, "ISO", "荣誉", "奖"
         ):
@@ -214,23 +275,38 @@ def _context_findings(full_text: str, context) -> list[dict]:
                 )
             )
 
-    local_keys = ("本地分支", "分支机构", "售后网点", "备品备件", "应急响应")
-    if any(k in full_text for k in local_keys):
-        missing = [k for k in ("分支", "网点", "备品", "应急") if k not in full_text]
-        if len(missing) >= 3:
-            extra.append(
-                _finding(
-                    severity="扣分",
-                    location="商务标 / 本地化服务",
-                    excerpt="正文提到本地化服务，但分支机构/网点/备品/应急响应未写全",
-                    rule="F03.07 本地化服务要素",
-                    suggestion="请补齐本地分支机构、售后网点、备品备件库与应急响应方案的具体地址或时限",
+    if localization_enabled:
+        local_keys = ("本地分支", "分支机构", "售后网点", "备品备件", "应急响应")
+        if any(k in full_text for k in local_keys):
+            missing = [k for k in ("分支", "网点", "备品", "应急") if k not in full_text]
+            if len(missing) >= 3:
+                extra.append(
+                    _finding(
+                        severity="扣分",
+                        location="商务标 / 本地化服务",
+                        excerpt="正文提到本地化服务，但分支机构/网点/备品/应急响应未写全",
+                        rule="F03.07 本地化服务要素",
+                        suggestion="请补齐本地分支机构、售后网点、备品备件库与应急响应方案的具体地址或时限",
+                    )
                 )
-            )
 
     people = [q for q in quals if q.kind == "people"]
-    if any(k in full_text for k in ("项目经理", "安全员", "八大员", "人员配置", "持证")):
-        if len(people) == 0:
+    if staffing_enabled and any(k in full_text for k in ("项目经理", "安全员", "八大员", "人员配置", "持证")):
+        personnel_required: dict = checklist_params.get("personnel_required") or {}
+        if personnel_required:
+            for role, required_count in personnel_required.items():
+                have = sum(1 for q in people if role in (q.blob or ""))
+                if have < required_count:
+                    extra.append(
+                        _finding(
+                            severity="扣分",
+                            location="商务标 / 人员配置",
+                            excerpt=f"招标要求「{role}」不少于 {required_count} 人，资质库仅录入 {have} 人",
+                            rule="F03.08 岗位持证人数达标",
+                            suggestion=f"请在资质证照库补齐「{role}」持证人员至 {required_count} 人以上，系统按库内人数核验",
+                        )
+                    )
+        elif len(people) == 0:
             extra.append(
                 _finding(
                     severity="扣分",
@@ -242,7 +318,21 @@ def _context_findings(full_text: str, context) -> list[dict]:
             )
 
     equipment = [q for q in quals if q.kind == "equipment"]
-    if any(k in full_text for k in ("设备", "机械", "盾构", "塔吊")):
+    if equipment_enabled and any(k in full_text for k in ("设备", "机械", "盾构", "塔吊")):
+        equipment_required: dict = checklist_params.get("equipment_required") or {}
+        if equipment_required:
+            for eq_name, required_count in equipment_required.items():
+                have = sum(1 for q in equipment if eq_name in (q.name or "") or eq_name in (q.blob or ""))
+                if have < required_count:
+                    extra.append(
+                        _finding(
+                            severity="扣分",
+                            location="商务标 / 设备机械",
+                            excerpt=f"招标要求「{eq_name}」不少于 {required_count} 台/套，资质库仅录入 {have} 台/套",
+                            rule="F03.09 设备型号数量达标",
+                            suggestion=f"请在资质证照库补齐「{eq_name}」台账至 {required_count} 台/套以上",
+                        )
+                    )
         if not equipment:
             extra.append(
                 _finding(
@@ -264,7 +354,7 @@ def _context_findings(full_text: str, context) -> list[dict]:
                 )
             )
 
-    if any(k in full_text for k in ("信用中国", "政府采购网", "失信")):
+    if credit_enabled and any(k in full_text for k in ("信用中国", "政府采购网", "失信")):
         credit = [q for q in quals if q.kind == "credit"]
         if not credit:
             extra.append(
@@ -277,23 +367,24 @@ def _context_findings(full_text: str, context) -> list[dict]:
                 )
             )
 
-    people_n = re.search(r"(?:高峰人数|劳动力|施工人数)\D{0,8}(\d{2,4})\s*人", full_text)
-    area_n = re.search(r"(?:宿舍|临建)\D{0,12}(\d{2,5})\s*(?:㎡|平方米|平米)", full_text)
-    if people_n and area_n:
-        headcount = int(people_n.group(1))
-        area = int(area_n.group(1))
-        if headcount > 0 and area / headcount < 4:
-            extra.append(
-                _finding(
-                    severity="扣分",
-                    location="技术标 / 数据链闭环",
-                    excerpt=f"高峰人数 {headcount} 人，宿舍/临建面积 {area}㎡，人均不足 4㎡",
-                    rule="F06.07 高峰人数与宿舍面积交叉验算",
-                    suggestion="请按人均不少于 4㎡ 调整临建面积或劳动力峰值，使数据可交叉验证",
+    if data_loop_enabled:
+        people_n = re.search(r"(?:高峰人数|劳动力|施工人数)\D{0,8}(\d{2,4})\s*人", full_text)
+        area_n = re.search(r"(?:宿舍|临建)\D{0,12}(\d{2,5})\s*(?:㎡|平方米|平米)", full_text)
+        if people_n and area_n:
+            headcount = int(people_n.group(1))
+            area = int(area_n.group(1))
+            if headcount > 0 and area / headcount < 4:
+                extra.append(
+                    _finding(
+                        severity="扣分",
+                        location="技术标 / 数据链闭环",
+                        excerpt=f"高峰人数 {headcount} 人，宿舍/临建面积 {area}㎡，人均不足 4㎡",
+                        rule="F06.07 高峰人数与宿舍面积交叉验算",
+                        suggestion="请按人均不少于 4㎡ 调整临建面积或劳动力峰值，使数据可交叉验证",
+                    )
                 )
-            )
 
-    if "废止" in full_text and re.search(r"GB[/\s]?\d|JGJ|JTG", full_text):
+    if code_cite_enabled and "废止" in full_text and re.search(r"GB[/\s]?\d|JGJ|JTG", full_text):
         extra.append(
             _finding(
                 severity="建议",

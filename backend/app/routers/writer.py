@@ -1,3 +1,4 @@
+import logging
 import os
 import urllib.parse
 
@@ -13,6 +14,7 @@ from ..engines import e_writer
 from ..engines.ark_image import ArkImageError, generate_and_save
 from ..engines.docx_extract import extract_paragraphs
 from ..engines.tender_form import extract_forms_from_storage, needs_form_recopy
+from ..engines.tender_style import extract_tender_typography_from_storage
 from ..engines.writer_export import chapters_to_docx
 from .. import storage
 from ..models import (
@@ -43,6 +45,7 @@ from ..schemas import (
 from ..tasks import run_chapter_generate_task, run_outline_generate_task, run_product_match_task
 
 router = APIRouter(prefix="/api", tags=["writer"])
+logger = logging.getLogger(__name__)
 
 
 def _draft_to_out(draft: WriterDraft) -> WriterDraftOut:
@@ -134,6 +137,30 @@ def _backfill_business_originals(db: Session, draft: WriterDraft) -> None:
     db.refresh(draft)
 
 
+def _ensure_tender_layout(db: Session, draft: WriterDraft) -> None:
+    """打开草稿时按本项目招标书补正文字体/字号/缩进；已识别过的不覆盖用户改动。"""
+    settings = dict(draft.settings_json or {}) if isinstance(draft.settings_json, dict) else {}
+    layout = dict(settings.get("layout") or {}) if isinstance(settings.get("layout"), dict) else {}
+    if layout.get("fromTender") and layout.get("bodyFont"):
+        return
+    tender_path = _project_tender_path(db, draft.project_id)
+    if not tender_path:
+        return
+    try:
+        extracted = extract_tender_typography_from_storage(tender_path)
+    except Exception:  # noqa: BLE001 —— 识别失败不影响打开草稿
+        logger.exception("extract tender typography failed")
+        return
+    extracted.pop("margins", None)
+    layout.update(extracted)
+    layout["fromTender"] = True
+    settings["layout"] = layout
+    draft.settings_json = settings
+    flag_modified(draft, "settings_json")
+    db.commit()
+    db.refresh(draft)
+
+
 @router.get("/projects/{project_id}/writer-draft", response_model=WriterDraftOut)
 def get_or_create_writer_draft(
     project_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
@@ -147,6 +174,7 @@ def get_or_create_writer_draft(
         db.refresh(draft)
     else:
         _backfill_business_originals(db, draft)
+    _ensure_tender_layout(db, draft)
     return _draft_to_out(draft)
 
 

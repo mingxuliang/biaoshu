@@ -1,13 +1,16 @@
 from datetime import datetime
+import urllib.parse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..audit import actor_from_request, project_label, write_audit
 from ..auth import get_current_user
 from ..db import get_db
-from ..models import BidDocument, ReviewFinding, ReviewRun, User
+from ..engines.review_export import review_run_to_docx
+from ..models import BidDocument, Project, ReviewFinding, ReviewRun, User
 from ..permissions import PERM_REVIEW, require_project
 from ..schemas import CreateJobIn, JobStatusOut, ReviewReportOut, TrendPointOut
 from ..tasks import run_prereview_task
@@ -123,3 +126,77 @@ def list_review_runs(
     return [
         TrendPointOut(round=r.round, score=r.overall, issues=(r.waste + r.risk + r.suggest)) for r in runs
     ]
+
+
+def _latest_done_run(db: Session, project_id: str) -> ReviewRun:
+    run = (
+        db.query(ReviewRun)
+        .filter(ReviewRun.project_id == project_id, ReviewRun.status == "done")
+        .order_by(ReviewRun.round.desc(), ReviewRun.finished_at.desc())
+        .first()
+    )
+    if not run:
+        raise HTTPException(404, "该项目暂无已完成的预审报告")
+    return run
+
+
+def _findings_as_issue_dicts(db: Session, run_id: str) -> list[dict]:
+    findings = db.query(ReviewFinding).filter(ReviewFinding.run_id == run_id).all()
+    return [
+        {
+            "id": f.id,
+            "level": f.level,
+            "severity": f.severity,
+            "location": f.location,
+            "excerpt": f.excerpt,
+            "rule": f.rule,
+            "tenderQuote": f.tender_quote,
+            "suggestion": f.suggestion,
+        }
+        for f in findings
+    ]
+
+
+@router.get("/projects/{project_id}/review-runs/latest/export")
+def export_latest_review_report(
+    project_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    require_project(db, current_user, project_id)
+    run = _latest_done_run(db, project_id)
+    project = db.get(Project, project_id)
+    issues = _findings_as_issue_dicts(db, run.id)
+    docx_bytes = review_run_to_docx(
+        project_name=project.name if project else "",
+        project_code=project.code if project else "",
+        round_no=run.round,
+        overall=run.overall or 0,
+        light=run.light or "",
+        waste=run.waste or 0,
+        risk=run.risk or 0,
+        suggest=run.suggest or 0,
+        levels=run.levels_json or [],
+        dimensions=run.dimensions_json or [],
+        issues=issues,
+        finished_at=run.finished_at,
+    )
+    write_audit(
+        db,
+        action="导出预审报告",
+        user_name=actor_from_request(db, request),
+        target=f"{project_label(db, project_id)}（第 {run.round} 轮）",
+        version=f"第 {run.round} 轮",
+        detail=f"导出 AI 预审报告 Word，共 {len(issues)} 项问题",
+    )
+    db.commit()
+    code = (project.code if project else "") or "prereview"
+    encoded_name = urllib.parse.quote(f"{code}-第{run.round}轮-AI预审报告.docx")
+    return Response(
+        content=docx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={
+            "Content-Disposition": f"attachment; filename=\"prereview-report.docx\"; filename*=UTF-8''{encoded_name}"
+        },
+    )

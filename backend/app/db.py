@@ -39,6 +39,10 @@ def ensure_schema() -> None:
         conn.execute(text("ALTER TABLE product_features ADD COLUMN IF NOT EXISTS parent_id VARCHAR"))
         conn.execute(text("ALTER TABLE knowledge_slices ADD COLUMN IF NOT EXISTS parent_id VARCHAR"))
         conn.execute(text("ALTER TABLE knowledge_slices ADD COLUMN IF NOT EXISTS level VARCHAR DEFAULT '一级'"))
+        conn.execute(text("ALTER TABLE veto_rules ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE"))
+        conn.execute(text("ALTER TABLE catalog_rules ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE"))
+        conn.execute(text("ALTER TABLE bid_revisions ADD COLUMN IF NOT EXISTS layout_json JSON"))
+        conn.execute(text("ALTER TABLE bid_revisions ADD COLUMN IF NOT EXISTS resolved_ids_json JSON DEFAULT '[]'::json"))
         conn.execute(
             text(
                 "UPDATE qualification_assets SET kind = 'cert' "

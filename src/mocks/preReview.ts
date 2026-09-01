@@ -19,6 +19,7 @@ export interface PreReviewIssue {
   rule: string;
   tenderQuote: string;
   suggestion: string;
+  resolved?: boolean;
 }
 
 export const preReviewLevels: PreReviewLevel[] = [

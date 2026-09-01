@@ -213,6 +213,10 @@ export async function getLatestReviewRun(projectId: string): Promise<ReviewRepor
   return request<ReviewReport>(`/api/projects/${projectId}/review-runs/latest`);
 }
 
+export async function exportLatestReviewReport(projectId: string): Promise<Blob> {
+  return fetchBlob(`/api/projects/${projectId}/review-runs/latest/export`);
+}
+
 export async function getReviewRunTrend(projectId: string): Promise<TrendPoint[]> {
   return request<TrendPoint[]>(`/api/projects/${projectId}/review-runs`);
 }
@@ -784,10 +788,16 @@ export interface BidProblem {
   highlight: string;
 }
 
+export type BidParagraphAlign = "" | "left" | "center" | "right" | "justify";
+
 export interface BidParagraph {
   id: string;
   text: string;
   problem?: BidProblem;
+  align?: BidParagraphAlign;
+  font?: string;
+  fontSizePt?: number;
+  bold?: boolean;
 }
 
 export interface BidSection {
@@ -795,6 +805,22 @@ export interface BidSection {
   heading: string;
   level: 1 | 2 | 3;
   paragraphs: BidParagraph[];
+  align?: BidParagraphAlign;
+  font?: string;
+  fontSizePt?: number;
+  bold?: boolean;
+}
+
+/** 投标书整体的字体/字号/首行缩进画像，来自 extract_bid_typography，供编辑器原样还原排版 */
+export interface BidLayout {
+  bodyFont?: string;
+  bodySizePt?: number;
+  headingFont?: string;
+  headingSizePt?: number;
+  headingBold?: boolean;
+  indentPt?: number;
+  indentChars?: number;
+  lineSpacingMul?: number;
 }
 
 export interface BidRevision {
@@ -802,9 +828,13 @@ export interface BidRevision {
   projectId: string;
   bidDocumentId: string;
   reviewRunId: string;
+  reviewRound?: number | null;
   sections: BidSection[];
   issues: PreReviewIssue[];
   contentState: Record<string, unknown> | null;
+  layout?: BidLayout | null;
+  resolvedIds?: string[];
+  runSwitched?: boolean;
 }
 
 export interface BidRevisionVersion {
@@ -824,8 +854,8 @@ export interface RevisionBlock {
 }
 
 export interface CreateVersionPayload {
-  blocks: RevisionBlock[];
-  contentState: Record<string, unknown>;
+  blocks?: RevisionBlock[];
+  contentState?: Record<string, unknown>;
   note?: string;
   wordCount?: number;
   author?: string;
@@ -847,6 +877,18 @@ export async function autosaveBidRevisionContent(
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ contentState }),
+  });
+}
+
+export async function patchBidRevisionIssueResolved(
+  revisionId: string,
+  issueId: string,
+  resolved: boolean,
+): Promise<BidRevision> {
+  return request<BidRevision>(`/api/bid-revisions/${revisionId}/issues/${issueId}/resolve`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ resolved }),
   });
 }
 
@@ -1347,6 +1389,7 @@ export interface VetoRule {
   wiredNote: string;
   engine: string;
   seq: number;
+  enabled: boolean;
 }
 
 export type CatalogKind = "business" | "tech" | "dup_check" | "strategy";
@@ -1444,9 +1487,25 @@ export async function listVetoRules(): Promise<VetoRule[]> {
   return request<VetoRule[]>("/api/rules/veto-points");
 }
 
+export async function updateVetoRule(id: string, patch: { enabled: boolean }): Promise<VetoRule> {
+  return request<VetoRule>(`/api/rules/veto-points/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
 export async function listCatalogRules(kind?: CatalogKind): Promise<CatalogRule[]> {
   const query = kind ? `?kind=${kind}` : "";
   return request<CatalogRule[]>(`/api/rules/catalog${query}`);
+}
+
+export async function updateCatalogRule(id: string, patch: { enabled: boolean }): Promise<CatalogRule> {
+  return request<CatalogRule>(`/api/rules/catalog/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
 }
 
 export interface AuditLogItem {

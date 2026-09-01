@@ -1,24 +1,30 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import AuthImage from "../../components/AuthImage";
 import { useAuth } from "@/context/AuthContext";
+import KnowledgePicker from "./KnowledgePicker";
 import {
   ApiError,
-  downloadKnowledgeDocument,
-  downloadTenderDocument,
   generateWriterImage,
-  listKnowledgeDocuments,
-  listProjectTenderDocuments,
+  listProductFeatures,
   listWriterImages,
   optimizeWriterImagePrompt,
-  triggerFileDownload,
+  updateWriterDraft,
   uploadWriterImage,
-  type KnowledgeDoc,
-  type TenderDocumentSummary,
+  type KnowledgeRef,
+  type ProductItem,
   type WriterImageItem,
   type WriterImageMode,
 } from "@/lib/api";
 
 interface ImagePanelProps {
   projectId: string;
+  draftId: string;
+  chapterId: string;
+  chapterNum?: string;
+  chapterTitle?: string;
+  chapterIdea?: string;
+  knowledgeRefs: Record<string, KnowledgeRef[]>;
+  onKnowledgeRefsChange: (next: Record<string, KnowledgeRef[]>) => void;
   onInsertImage: (item: WriterImageItem) => void;
 }
 
@@ -40,13 +46,31 @@ const watermarkLabel: Record<WriterImageMode, string> = {
   normal: "AI生图",
 };
 
-function formatSize(bytes: number): string {
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${bytes} B`;
+function flattenFeatures(items: ProductItem[]): ProductItem[] {
+  const out: ProductItem[] = [];
+  const walk = (n: ProductItem) => {
+    out.push(n);
+    (n.children || []).forEach(walk);
+  };
+  items.forEach(walk);
+  return out;
 }
 
-export default function ImagePanel({ projectId, onInsertImage }: ImagePanelProps) {
+function sourceOf(ref: KnowledgeRef) {
+  return ref.source || "knowledge";
+}
+
+export default function ImagePanel({
+  projectId,
+  draftId,
+  chapterId,
+  chapterNum,
+  chapterTitle,
+  chapterIdea,
+  knowledgeRefs,
+  onKnowledgeRefsChange,
+  onInsertImage,
+}: ImagePanelProps) {
   const { token } = useAuth();
   const [rightTab, setRightTab] = useState<RightTab>("image");
   const [imageTab, setImageTab] = useState<ImageTab>("ai");
@@ -61,8 +85,17 @@ export default function ImagePanel({ projectId, onInsertImage }: ImagePanelProps
   const [gallery, setGallery] = useState<WriterImageItem[]>([]);
   const [galleryLoading, setGalleryLoading] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [refs, setRefs] = useState<{ kind: "tender" | "knowledge"; id: string; name: string; extra: string }[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [libFeatures, setLibFeatures] = useState<Record<string, ProductItem[]>>({});
+  const [expandedFeat, setExpandedFeat] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const chapterRefs = knowledgeRefs[chapterId] || [];
+  const productRefs = chapterRefs.filter((r) => sourceOf(r) === "product");
+  const otherRefs = chapterRefs.filter((r) => sourceOf(r) !== "product");
+
+  useEffect(() => {
+    setExpandedFeat(null);
+  }, [chapterId]);
 
   useEffect(() => {
     if (!token || imageTab !== "gallery") return;
@@ -83,34 +116,62 @@ export default function ImagePanel({ projectId, onInsertImage }: ImagePanelProps
     };
   }, [token, projectId, imageTab]);
 
+  const productLibKey = productRefs.map((r) => r.docId).join(",");
   useEffect(() => {
-    if (!token || rightTab !== "reference") return;
+    const libIds = [...new Set(productLibKey.split(",").filter(Boolean))];
     let cancelled = false;
-    Promise.all([
-      listProjectTenderDocuments(token, projectId).catch(() => [] as TenderDocumentSummary[]),
-      listKnowledgeDocuments({ projectId }).catch(() => [] as KnowledgeDoc[]),
-    ]).then(([tenders, knowledge]) => {
-      if (cancelled) return;
-      const items = [
-        ...tenders.map((d) => ({
-          kind: "tender" as const,
-          id: d.id,
-          name: d.filename,
-          extra: formatSize(d.sizeBytes),
-        })),
-        ...knowledge.map((d) => ({
-          kind: "knowledge" as const,
-          id: d.id,
-          name: d.title,
-          extra: d.scope,
-        })),
-      ];
-      setRefs(items);
+    libIds.forEach((libId) => {
+      setLibFeatures((prev) => {
+        if (prev[libId]) return prev;
+        listProductFeatures(libId)
+          .then((items) => {
+            if (!cancelled) setLibFeatures((p) => ({ ...p, [libId]: items }));
+          })
+          .catch(() => {
+            if (!cancelled) setLibFeatures((p) => ({ ...p, [libId]: [] }));
+          });
+        return prev;
+      });
     });
     return () => {
       cancelled = true;
     };
-  }, [token, projectId, rightTab]);
+  }, [productLibKey]);
+
+  const boundFeatures = useMemo(() => {
+    const rows: { ref: KnowledgeRef; item: ProductItem | null; featureId: string }[] = [];
+    productRefs.forEach((ref) => {
+      const loaded = libFeatures[ref.docId];
+      const index = new Map(flattenFeatures(loaded || []).map((f) => [f.id, f]));
+      (ref.chapters || []).forEach((id) => {
+        rows.push({ ref, featureId: id, item: index.get(id) || null });
+      });
+    });
+    return rows;
+  }, [productRefs, libFeatures]);
+
+  const persistRefs = (nextChapterRefs: KnowledgeRef[]) => {
+    const next = { ...knowledgeRefs, [chapterId]: nextChapterRefs };
+    onKnowledgeRefsChange(next);
+    const productRef = nextChapterRefs.find((r) => sourceOf(r) === "product");
+    updateWriterDraft(draftId, {
+      knowledgeRefs: next,
+      ...(productRef ? { selectedProductLibraryId: productRef.docId } : {}),
+    }).catch(() => {
+      /* 引用保存失败不打断编辑，下次调整时会再写 */
+    });
+  };
+
+  const removeFeature = (docId: string, featureId: string) => {
+    persistRefs(
+      chapterRefs
+        .map((r) => {
+          if (!(sourceOf(r) === "product" && r.docId === docId)) return r;
+          return { ...r, chapters: (r.chapters || []).filter((id) => id !== featureId), mode: "manual" as const };
+        })
+        .filter((r) => sourceOf(r) !== "product" || (r.chapters || []).length > 0),
+    );
+  };
 
   const handleModeChange = (mode: WriterImageMode) => {
     setAiMode(mode);
@@ -165,17 +226,8 @@ export default function ImagePanel({ projectId, onInsertImage }: ImagePanelProps
     }
   };
 
-  const handleDownloadRef = async (item: { kind: "tender" | "knowledge"; id: string; name: string }) => {
-    try {
-      const blob =
-        item.kind === "tender" ? await downloadTenderDocument(item.id) : await downloadKnowledgeDocument(item.id);
-      triggerFileDownload(blob, item.name);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "下载失败");
-    }
-  };
-
   const currentImages = imageTab === "ai" ? generated : gallery;
+  const featuresLoading = productRefs.some((r) => r.docId && !(r.docId in libFeatures));
 
   return (
     <div className="flex w-72 shrink-0 flex-col rounded-lg border border-background-300 bg-background-100 lg:w-80">
@@ -366,7 +418,7 @@ export default function ImagePanel({ projectId, onInsertImage }: ImagePanelProps
                   }}
                 >
                   <div className="relative aspect-[4/3] w-full overflow-hidden bg-background-200">
-                    <img src={img.url} alt={img.prompt || img.filename} className="h-full w-full object-cover" />
+                    <AuthImage src={img.url} alt={img.prompt || img.filename} eager className="h-full w-full object-cover" />
                     {img.source === "generated" && (
                       <span
                         className={`absolute left-1 top-1 flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium text-background-50 ${watermarkColor[img.mode]}`}
@@ -417,36 +469,141 @@ export default function ImagePanel({ projectId, onInsertImage }: ImagePanelProps
           </div>
         </>
       ) : (
-        <div className="flex-1 overflow-y-auto px-3 py-3">
-          {refs.length === 0 ? (
-            <p className="py-8 text-center text-xs text-foreground-500">暂无本项目招标文件或知识库文档</p>
-          ) : (
-            <div className="space-y-2">
-              {refs.map((ref) => (
-                <div
-                  key={`${ref.kind}-${ref.id}`}
-                  className="flex items-center gap-2 rounded-md border border-background-300 bg-background-50 p-2 transition-colors hover:border-primary-200"
-                >
-                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded bg-secondary-100 text-secondary-600">
-                    <i className="ri-file-text-line text-xs"></i>
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-xs text-foreground-700">{ref.name}</div>
-                    <div className="text-[10px] text-foreground-400">{ref.extra}</div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => void handleDownloadRef(ref)}
-                    className="flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded text-foreground-400 hover:bg-background-200 hover:text-primary-600"
-                    title="下载"
-                  >
-                    <i className="ri-download-line text-xs"></i>
-                  </button>
-                </div>
-              ))}
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="border-b border-background-200 px-3 py-2">
+            <div className="truncate text-xs font-medium text-foreground-800">
+              {chapterNum ? `${chapterNum} ` : ""}
+              {chapterTitle || "未选择章节"}
             </div>
-          )}
+            <div className="mt-0.5 text-[11px] text-foreground-500">
+              {productRefs.length > 0
+                ? `已引用 ${boundFeatures.length} 项产品功能`
+                : "本章尚未绑定产品功能库"}
+            </div>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+            {featuresLoading && (
+              <p className="mb-2 text-[11px] text-foreground-500">
+                <i className="ri-loader-4-line mr-1 animate-spin"></i>
+                正在加载产品功能…
+              </p>
+            )}
+            {!chapterId ? (
+              <p className="py-8 text-center text-xs text-foreground-500">请先在左侧选择章节</p>
+            ) : boundFeatures.length === 0 && !featuresLoading ? (
+              <p className="py-6 text-center text-xs text-foreground-400">
+                目录页自动匹配或下方「选择引用」后，本章引用的产品功能会显示在这里
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {boundFeatures.map(({ ref, item, featureId }) => {
+                  const open = expandedFeat === featureId;
+                  const imgs = item ? [...(item.images || []), ...(item.children || []).flatMap((c) => c.images || [])] : [];
+                  return (
+                    <div
+                      key={`${ref.docId}-${featureId}`}
+                      className="rounded-md border border-background-300 bg-background-50"
+                    >
+                      <div className="flex items-start gap-1.5 p-2">
+                        <button
+                          type="button"
+                          onClick={() => setExpandedFeat(open ? null : featureId)}
+                          className="mt-0.5 flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center text-foreground-400"
+                          title={open ? "收起" : "展开"}
+                        >
+                          <i className={`ri-arrow-right-s-line text-sm transition-transform ${open ? "rotate-90" : ""}`}></i>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setExpandedFeat(open ? null : featureId)}
+                          className="min-w-0 flex-1 cursor-pointer text-left"
+                        >
+                          <div className="truncate text-xs text-foreground-800">{item?.name || featureId}</div>
+                          <div className="truncate text-[10px] text-foreground-400">
+                            产品库 · {ref.docTitle}
+                            {ref.mode === "ai" ? " · 自动匹配" : " · 手动"}
+                          </div>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removeFeature(ref.docId, featureId)}
+                          className="flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded text-foreground-400 hover:bg-background-200 hover:text-accent-600"
+                          title="取消引用"
+                        >
+                          <i className="ri-close-line text-xs"></i>
+                        </button>
+                      </div>
+                      {open && (
+                        <div className="border-t border-background-200 px-2 py-2">
+                          {item?.intro ? (
+                            <p className="text-[11px] leading-relaxed text-foreground-600">{item.intro}</p>
+                          ) : (
+                            <p className="text-[11px] text-foreground-400">暂无功能说明</p>
+                          )}
+                          {imgs.length > 0 && (
+                            <div className="mt-2 grid grid-cols-2 gap-1.5">
+                              {imgs.slice(0, 4).map((img) => (
+                                <AuthImage
+                                  key={img.id}
+                                  src={img.url}
+                                  alt={img.caption || item?.name}
+                                  eager
+                                  className="h-16 w-full rounded border border-background-300 object-cover"
+                                />
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {otherRefs.length > 0 && (
+              <div className="mt-3">
+                <div className="mb-1 text-[11px] text-foreground-500">其他引用</div>
+                <div className="flex flex-wrap gap-1">
+                  {otherRefs.map((r) => (
+                    <span
+                      key={`${sourceOf(r)}:${r.docId}`}
+                      className="rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700"
+                    >
+                      {sourceOf(r) === "qualification" ? "资质 · " : "文档 · "}
+                      {r.docTitle}
+                      {r.chapters.length > 0 ? `（${r.chapters.length}）` : ""}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="border-t border-background-200 px-3 py-2">
+            <button
+              type="button"
+              disabled={!chapterId}
+              onClick={() => setPickerOpen(true)}
+              className="flex h-8 w-full cursor-pointer items-center justify-center gap-1 rounded-md bg-primary-500 text-xs font-medium text-background-50 transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <i className="ri-bookmark-line"></i>
+              {chapterRefs.length > 0 ? "调整 / 重新选择引用" : "选择产品功能引用"}
+            </button>
+          </div>
         </div>
+      )}
+      {pickerOpen && chapterId && (
+        <KnowledgePicker
+          projectId={projectId}
+          nodeNum={chapterNum || ""}
+          nodeTitle={chapterTitle || ""}
+          nodeIdea={chapterIdea}
+          initialRefs={chapterRefs}
+          onClose={() => setPickerOpen(false)}
+          onSave={(refs) => {
+            persistRefs(refs);
+            setPickerOpen(false);
+          }}
+        />
       )}
     </div>
   );

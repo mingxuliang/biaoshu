@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session
 
 from ..models import BidDocument, ReviewFinding, ReviewRun
 from .. import storage
-from . import e1_veto, e2_business, e3_semantic, e4_duplicate_filler, e5_layout, rules_config
-from .docx_extract import extract_full_text, extract_paragraphs
+from . import e1_veto, e2_business, e3_semantic, e3_tech_modules, e4_duplicate_filler, e5_layout, e_parse_match, rules_config
+from .docx_extract import extract_document_plain_text, extract_full_text, extract_paragraphs
 from .review_context import load_review_context
 from .rules_data import DIMENSION_LABELS, SEVERITY_PENALTY
 
@@ -47,11 +47,19 @@ def run_prereview(db: Session, run_id: str) -> None:
     doc = db.get(BidDocument, run.bid_document_id)
     paragraphs: list[dict] = []
     full_text = ""
-    checklist_params, must_respond = rules_config.load_locked_checklist(db, run.project_id)
+    checklist = rules_config.load_project_checklist(db, run.project_id)
+    checklist_params, must_respond = checklist.params, checklist.must_respond
     weights = rules_config.load_active_weights(db)
     word_rules = rules_config.load_enabled_filler_words(db)
     thresholds = rules_config.load_thresholds(db)
     local_items = rules_config.load_enabled_package_items(db)
+
+    # 管理员规则页开关：关闭的条目在对应引擎里直接跳过检查，不再产生 Finding。
+    veto_keys = rules_config.load_enabled_veto_keys(db)
+    biz_keys = rules_config.load_enabled_catalog_keys(db, "business")
+    tech_keys = rules_config.load_enabled_catalog_keys(db, "tech")
+    dup_keys = rules_config.load_enabled_catalog_keys(db, "dup_check")
+    strategy_keys = rules_config.load_enabled_catalog_keys(db, "strategy")
 
     def _run_with_path(path: str | None):
         paras: list[dict] = []
@@ -59,29 +67,47 @@ def run_prereview(db: Session, run_id: str) -> None:
         if path:
             try:
                 paras = extract_paragraphs(path)
-                text = extract_full_text(path)
+                try:
+                    text = extract_document_plain_text(path)
+                except Exception:
+                    text = extract_full_text(path)
             except Exception:
                 paras = []
                 text = ""
         ctx = load_review_context(db, run.project_id, path)
-        e1 = e1_veto.run(paras, checklist_params, must_respond, thresholds, ctx)
-        e2 = e2_business.run(paras, checklist_params, thresholds, local_items, ctx)
-        e4 = e4_duplicate_filler.run(paras, word_rules, thresholds, ctx)
-        e5 = e5_layout.run(path, paras, ctx) if path else []
-        e3 = e3_semantic.run(text, weights)
-        return paras, text, e1, e2, e4, e5, e3, e3["issues"]
+        e1 = e1_veto.run(paras, checklist_params, must_respond, thresholds, ctx, veto_keys)
+        e2 = e2_business.run(paras, checklist_params, thresholds, local_items, ctx, biz_keys, veto_keys, strategy_keys)
+        e4 = e4_duplicate_filler.run(paras, word_rules, thresholds, ctx, dup_keys)
+        e5 = e5_layout.run(path, paras, ctx, veto_keys, dup_keys, strategy_keys) if path else []
+        e3 = e3_semantic.run(text, weights, tech_keys, strategy_keys, dup_keys, checklist.score_rules)
+        tech_findings = e3_tech_modules.run(text, paras, ctx.project_name, tech_keys)
+        parse_findings = e_parse_match.run(
+            text,
+            checklist.score_rules,
+            checklist.qualification,
+            checklist.format_requirements,
+            must_respond,
+            tech_keys,
+            veto_keys,
+            strategy_keys,
+            headings=[(p.get("text") or "") for p in paras],
+        )
+        e3_issues = e3["issues"] + tech_findings + [f for f in parse_findings if f["level"] == "L3"]
+        e1 = e1 + [f for f in parse_findings if f["level"] == "L1"]
+        e5 = e5 + [f for f in parse_findings if f["level"] == "L5"]
+        return paras, text, e1, e2, e4, e5, e3, e3_issues
 
     if doc and doc.storage_path and storage.exists(doc.storage_path):
         with storage.as_local(doc.storage_path) as path:
-            paragraphs, full_text, e1_findings, e2_findings, e4_findings, e5_findings, e3_result, e3_findings = (
+            paragraphs, full_text, e1_findings, e2_findings, e4_findings, e5_findings, e3_result, e3_issues = (
                 _run_with_path(path)
             )
     else:
-        paragraphs, full_text, e1_findings, e2_findings, e4_findings, e5_findings, e3_result, e3_findings = (
+        paragraphs, full_text, e1_findings, e2_findings, e4_findings, e5_findings, e3_result, e3_issues = (
             _run_with_path(None)
         )
 
-    all_findings = e1_findings + e2_findings + e4_findings + e5_findings + e3_findings
+    all_findings = e1_findings + e2_findings + e4_findings + e5_findings + e3_issues
 
     level_scores: dict[str, float] = {
         "L1": _score_from_findings(e1_findings),
@@ -91,7 +117,9 @@ def run_prereview(db: Session, run_id: str) -> None:
     }
 
     dims = e3_result["dimensions"]
-    level_scores["L3"] = round(sum(dims[k]["score"] * weights[k] / 100 for k in weights), 1)
+    dim_score = round(sum(dims[k]["score"] * weights[k] / 100 for k in weights), 1)
+    l3_penalty = sum(SEVERITY_PENALTY.get(f["severity"], 0) for f in e3_issues)
+    level_scores["L3"] = max(0.0, round(dim_score - l3_penalty, 1))
 
     levels_out = []
     for key, meta in LEVEL_META.items():

@@ -16,6 +16,7 @@ from .engines.orchestrator import run_prereview
 from .engines.product_extract import run_extract_for_source_doc
 from .engines.qualification_extract import run_extract_for_source_doc as run_qualification_extract
 from .engines.tender_form import extract_forms_from_storage
+from .engines.tender_style import extract_tender_typography_from_storage
 from .engines.tender_toc import extract_stipulated_toc
 from . import storage
 from .models import (
@@ -35,7 +36,7 @@ from .models import (
 logger = get_task_logger(__name__)
 
 
-@celery_app.task(name="run_prereview_task")
+@celery_app.task(name="run_prereview_task", soft_time_limit=12 * 60, time_limit=15 * 60)
 def run_prereview_task(run_id: str) -> None:
     db = SessionLocal()
     try:
@@ -536,6 +537,20 @@ def run_outline_generate_task(job_id: str) -> None:
         outline = e_writer.generate_outline(
             project_name, score_rules, must_respond, knowledge_headings, tender_toc, tender_text, draft.model_id
         )
+
+        if tender_path:
+            try:
+                extracted = extract_tender_typography_from_storage(tender_path)
+                settings = dict(draft.settings_json or {}) if isinstance(draft.settings_json, dict) else {}
+                layout = dict(settings.get("layout") or {}) if isinstance(settings.get("layout"), dict) else {}
+                extracted.pop("margins", None)
+                layout.update(extracted)
+                layout["fromTender"] = True
+                settings["layout"] = layout
+                draft.settings_json = settings
+                flag_modified(draft, "settings_json")
+            except Exception:  # noqa: BLE001 —— 排版识别失败不阻断目录
+                logger.exception("extract tender typography failed")
 
         contents: dict[str, str] = {}
         originals = _extract_business_originals(tender_path, outline, draft.model_id)

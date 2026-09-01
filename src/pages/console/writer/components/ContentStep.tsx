@@ -11,10 +11,12 @@ import {
   getOrCreateWriterDraft,
   pollWriterJobUntilDone,
   saveChapterContent,
+  type KnowledgeRef,
   type OutlineNode,
   type WriterImageItem,
 } from "@/lib/api";
 import { isOriginalFormTitle, isSkipAiWrite } from "@/lib/outlineNum";
+import type { LayoutConfig } from "@/mocks/writerSteps";
 
 interface ToastState {
   message: string;
@@ -30,6 +32,9 @@ interface ContentStepProps {
   chapterContents: Record<string, string>;
   onChapterContentsChange: (contents: Record<string, string>) => void;
   projectName: string;
+  knowledgeRefs: Record<string, KnowledgeRef[]>;
+  onKnowledgeRefsChange: (next: Record<string, KnowledgeRef[]>) => void;
+  layout?: LayoutConfig | null;
   onBack: () => void;
 }
 
@@ -41,6 +46,9 @@ export default function ContentStep({
   chapterContents,
   onChapterContentsChange,
   projectName,
+  knowledgeRefs,
+  onKnowledgeRefsChange,
+  layout,
   onBack,
 }: ContentStepProps) {
   const [activeId, setActiveId] = useState<string>(outline[0]?.id ?? "");
@@ -203,9 +211,20 @@ export default function ContentStep({
           onExport={handleExport}
           onContentChange={handleContentChange}
           exporting={exporting}
+          layout={layout}
         />
         <div className="hidden lg:flex">
-          <ImagePanel projectId={projectId} onInsertImage={handleInsertImage} />
+          <ImagePanel
+            projectId={projectId}
+            draftId={draftId}
+            chapterId={activeId}
+            chapterNum={activeNode?.num}
+            chapterTitle={activeNode?.title}
+            chapterIdea={activeNode?.idea}
+            knowledgeRefs={knowledgeRefs}
+            onKnowledgeRefsChange={onKnowledgeRefsChange}
+            onInsertImage={handleInsertImage}
+          />
         </div>
       </div>
 

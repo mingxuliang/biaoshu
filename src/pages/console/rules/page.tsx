@@ -14,8 +14,10 @@ import {
   listVetoRules,
   listWeightTemplates,
   listWordRules,
+  updateCatalogRule,
   updateRulePackage,
   updateThreshold,
+  updateVetoRule,
   updateWordRule,
   type CatalogRule,
   type FillerWordRule,
@@ -175,6 +177,26 @@ export default function RulesPage() {
     }
   };
 
+  const toggleVeto = async (rule: VetoRule) => {
+    try {
+      const updated = await updateVetoRule(rule.id, { enabled: !rule.enabled });
+      setVetoRules((prev) => prev.map((r) => (r.id === rule.id ? updated : r)));
+      showToast(updated.enabled ? `已启用「${updated.category}」` : `已停用「${updated.category}」，引擎将跳过该项检查`);
+    } catch (err) {
+      showToast(errMsg(err, "更新失败，请稍后重试"), "error");
+    }
+  };
+
+  const toggleCatalog = async (rule: CatalogRule) => {
+    try {
+      const updated = await updateCatalogRule(rule.id, { enabled: !rule.enabled });
+      setCatalogRules((prev) => prev.map((r) => (r.id === rule.id ? updated : r)));
+      showToast(updated.enabled ? `已启用「${updated.category}」` : `已停用「${updated.category}」，引擎将跳过该项检查`);
+    } catch (err) {
+      showToast(errMsg(err, "更新失败，请稍后重试"), "error");
+    }
+  };
+
   const addButtonMeta: Record<TabKey, { label: string; onClick: () => void } | null> = {
     weight: { label: "新增权重模板", onClick: () => setWeightModalOpen(true) },
     veto: null,
@@ -326,7 +348,8 @@ export default function RulesPage() {
               icon="ri-alarm-warning-line"
               iconWrapClass="from-accent-400 to-accent-500"
               emptyText="暂无一票否决清单，请确认后端已完成规则入库"
-              footer="清单来自青天一票否决口径，页面展示对照项与当前引擎接入状态。「接入判定」会进入废标结论；「部分接入」只覆盖部分子项。"
+              footer="清单来自青天一票否决口径，页面展示对照项与当前引擎接入状态。「接入判定」会进入废标结论；「部分接入」只覆盖可自动核验的子项（社保局联网、图片徽标识别等无法全自动，请人工对照）。关闭开关后引擎将跳过该项检查。"
+              onToggle={toggleVeto}
             />
           )}
 
@@ -337,7 +360,8 @@ export default function RulesPage() {
               icon="ri-briefcase-4-line"
               iconWrapClass="from-secondary-400 to-secondary-500"
               emptyText="暂无商务自查清单，请确认后端已完成规则入库"
-              footer="青天第二层「商务标 AI 打分自查项」。业绩四件套、资产负债率、报价偏离由商务核验（L2）部分接入；荣誉、本地化、人员、设备、信用仍为人工对照，不联网查询外部平台。"
+              footer="青天第二层「商务标 AI 打分自查项」。业绩、财务、荣誉、本地化、人员、设备、信用均已接入商务核验（L2），仅联网外部机构核验部分保持人工对照。关闭开关后引擎将跳过该项检查。"
+              onToggle={toggleCatalog}
             />
           )}
 
@@ -348,7 +372,8 @@ export default function RulesPage() {
               icon="ri-cpu-line"
               iconWrapClass="from-primary-400 to-primary-600"
               emptyText="暂无技术评分模块，请确认后端已完成规则入库"
-              footer="青天第三层「技术标核心 AI 评分点」。八个模块写入五维语义引擎（L3）Prompt，作为完整性/针对性/合规性/可落地性/规范性的判分参考，不按模块单独出分。"
+              footer="青天第三层「技术标核心 AI 评分点」。八个模块除写入五维语义引擎（L3）Prompt 外，同时接入确定性关键词核验，缺项会计入 L3 扣分。关闭开关后该模块退出 Prompt 与确定性核验。"
+              onToggle={toggleCatalog}
             />
           )}
 
@@ -438,7 +463,8 @@ export default function RulesPage() {
               icon="ri-shield-check-line"
               iconWrapClass="from-amber-400 to-amber-500"
               emptyText="暂无专项检查清单，请确认后端已完成规则入库"
-              footer="青天第四层「AI 查重/防废标专项检查」。虚词密度、高危词句由 L4 接入判定；全文/专项查重比对内置模板库与本企业历史标书。跨项目阈值驱动本企业查重，不比对其他投标人。"
+              footer="青天第四层「AI 查重/防废标专项检查」。虚词密度、高危词句由 L4 接入判定；全文/专项查重比对内置模板库与本企业历史标书。跨项目阈值驱动本企业查重，不比对其他投标人。关闭开关后引擎将跳过该项检查。"
+              onToggle={toggleCatalog}
             />
           )}
 
@@ -542,7 +568,8 @@ export default function RulesPage() {
               icon="ri-lightbulb-line"
               iconWrapClass="from-primary-500 to-primary-600"
               emptyText="暂无高分策略清单，请确认后端已完成规则入库"
-              footer="青天高分编制十条。部分条目已进入预审 Prompt 或版式/虚词引擎；数据链交叉验算、废止规范库仍为人工对照，不会虚构加分。"
+              footer="青天高分编制十条。已进入预审 Prompt 或版式/虚词/商务引擎；仅联网外部规范库核验部分仍为人工对照。关闭开关后引擎将跳过该项检查。"
+              onToggle={toggleCatalog}
             />
           )}
 
@@ -649,25 +676,29 @@ function wiredBadgeClass(wired: VetoRule["wired"]) {
   return "border-secondary-200 bg-secondary-100 text-secondary-500";
 }
 
-function CatalogGrid({
+function CatalogGrid<T extends VetoRule>({
   rules,
   icon,
   iconWrapClass,
   emptyText,
   footer,
+  onToggle,
 }: {
-  rules: VetoRule[];
+  rules: T[];
   icon: string;
   iconWrapClass: string;
   emptyText: string;
   footer: string;
+  onToggle: (rule: T) => void;
 }) {
   return (
     <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
       {rules.map((rule) => (
         <div
           key={rule.id}
-          className="rounded-lg border border-background-300 bg-background-100 p-4 transition-all hover:border-primary-300/60"
+          className={`rounded-lg border border-background-300 bg-background-100 p-4 transition-all hover:border-primary-300/60 ${
+            rule.enabled === false ? "opacity-60" : ""
+          }`}
         >
           <div className="flex items-start gap-3">
             <span
@@ -678,11 +709,28 @@ function CatalogGrid({
             <div className="min-w-0 flex-1">
               <div className="flex items-center justify-between gap-2">
                 <div className="text-sm font-medium text-foreground-900">{rule.category}</div>
-                <span
-                  className={`inline-flex shrink-0 items-center whitespace-nowrap rounded-md border px-2 py-0.5 text-xs font-medium ${wiredBadgeClass(rule.wired)}`}
-                >
-                  {rule.wired}
-                </span>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <span
+                    className={`inline-flex items-center whitespace-nowrap rounded-md border px-2 py-0.5 text-xs font-medium ${wiredBadgeClass(rule.wired)}`}
+                  >
+                    {rule.wired}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onToggle(rule)}
+                    className={`relative h-5 w-9 cursor-pointer rounded-full transition-colors ${
+                      rule.enabled !== false ? "bg-primary-500" : "bg-background-300"
+                    }`}
+                    aria-label="启用开关"
+                    title={rule.enabled !== false ? "点击停用该规则" : "点击启用该规则"}
+                  >
+                    <span
+                      className={`absolute top-0.5 h-4 w-4 rounded-full bg-background-50 shadow-sm transition-all ${
+                        rule.enabled !== false ? "left-[18px]" : "left-0.5"
+                      }`}
+                    />
+                  </button>
+                </div>
               </div>
               <div className="mt-0.5 text-[11px] leading-5 text-foreground-500">{rule.point}</div>
             </div>

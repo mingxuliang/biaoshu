@@ -1,6 +1,7 @@
-import { forwardRef, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { OutlineNode } from "@/lib/api";
 import { isSkipAiWrite } from "@/lib/outlineNum";
+import type { LayoutConfig } from "@/mocks/writerSteps";
 import StatusBadge from "../../components/StatusBadge";
 import ChapterEditor, { type ChapterEditorHandle } from "./ChapterEditor";
 
@@ -17,17 +18,25 @@ interface EditorPanelProps {
   onExport: () => void;
   onContentChange: (text: string) => void;
   exporting?: boolean;
+  layout?: LayoutConfig | null;
 }
 
 const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(function EditorPanel(
-  { chapter, content, generating, onGenerate, onSave, onExport, onContentChange, exporting = false },
+  { chapter, content, generating, onGenerate, onSave, onExport, onContentChange, exporting = false, layout },
   ref,
 ) {
-  const [fontSize, setFontSize] = useState("小四");
-  const [fontFamily, setFontFamily] = useState("宋体");
+  const layoutFont = layout?.bodyFont || "宋体";
+  const layoutSize = layout?.fontSize || "小四";
+  const [fontSize, setFontSize] = useState(layoutSize);
+  const [fontFamily, setFontFamily] = useState(layoutFont);
   const chapterRef = useRef<ChapterEditorHandle | null>(null);
   const wordCount = content.trim() ? Math.round(content.replace(/\s/g, "").length) : 0;
   const useOriginal = !!chapter && isSkipAiWrite(chapter);
+
+  useEffect(() => {
+    setFontFamily(layoutFont);
+    setFontSize(layoutSize);
+  }, [layoutFont, layoutSize]);
 
   useImperativeHandle(
     ref,
@@ -103,6 +112,8 @@ const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(function Edi
           onFontFamily={setFontFamily}
           onFontSize={setFontSize}
           onMarkdownChange={onContentChange}
+          layout={layout}
+          applyTenderIndent={!useOriginal}
           onReady={(handle) => {
             chapterRef.current = handle;
           }}

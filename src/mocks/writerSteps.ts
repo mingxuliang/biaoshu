@@ -63,6 +63,15 @@ export interface LayoutConfig {
   margins: { top: number; bottom: number; left: number; right: number }; // cm
   fontSize: string; // 正文字号
   lineSpacing: string; // 正文行间距
+  bodyFont?: string;
+  bodySizePt?: number;
+  headingFont?: string;
+  headingSizePt?: number;
+  headingBold?: boolean;
+  indentPt?: number;
+  indentChars?: number;
+  lineSpacingMul?: number;
+  fromTender?: boolean;
 }
 
 export const defaultLayout: LayoutConfig = {
@@ -71,8 +80,56 @@ export const defaultLayout: LayoutConfig = {
   lineSpacing: "1.5倍行距",
 };
 
-export const layoutFontSizes = ["小三", "小四", "四号", "三号"];
+export const layoutFontSizes = ["小二", "三号", "小三", "四号", "小四", "五号", "小五"];
 export const layoutLineSpacings = ["1.5倍行距", "2倍行距", "固定值28磅", "固定值30磅"];
+export const layoutFontNamePt: Record<string, number> = {
+  小二: 18,
+  三号: 16,
+  小三: 15,
+  四号: 14,
+  小四: 12,
+  五号: 10.5,
+  小五: 9,
+};
+
+const FONT_STACK: Record<string, string> = {
+  宋体: '"宋体", SimSun, serif',
+  黑体: '"黑体", SimHei, sans-serif',
+  仿宋: '"仿宋", FangSong, serif',
+  楷体: '"楷体", KaiTi, serif',
+  微软雅黑: '"微软雅黑", "Microsoft YaHei", sans-serif',
+  "Times New Roman": '"Times New Roman", Times, serif',
+  Arial: "Arial, Helvetica, sans-serif",
+};
+
+export function writerBodyFontStack(name?: string): string {
+  const n = (name || "宋体").trim();
+  return FONT_STACK[n] || `"${n}", serif`;
+}
+
+export function writerLayoutCssVars(
+  layout?: Partial<LayoutConfig> | null,
+  applyIndent = false,
+): Record<string, string> {
+  const bodyPt = layout?.bodySizePt ?? layoutFontNamePt[layout?.fontSize || ""] ?? 12;
+  const headingPt = layout?.headingSizePt ?? bodyPt + 4;
+  const bodySize = `${bodyPt}pt`;
+  const headingSize = `${headingPt}pt`;
+  const indent = applyIndent && layout?.indentPt ? `${layout.indentPt}pt` : "0";
+  const lineHeight = layout?.lineSpacingMul ? String(layout.lineSpacingMul) : "1.85";
+  return {
+    "--writer-body-font": writerBodyFontStack(layout?.bodyFont),
+    "--writer-body-size": bodySize,
+    "--writer-heading-font": writerBodyFontStack(layout?.headingFont || layout?.bodyFont),
+    "--writer-heading-size": headingSize,
+    "--writer-heading-weight": layout?.headingBold === false ? "400" : "700",
+    "--writer-h1-size": `${Math.max(headingPt, bodyPt + 6)}pt`,
+    "--writer-h2-size": `${Math.max(headingPt - 2, bodyPt + 3)}pt`,
+    "--writer-h3-size": `${Math.max(bodyPt + 1, 14)}pt`,
+    "--writer-indent": indent,
+    "--writer-line-height": lineHeight,
+  };
+}
 
 // 第一步：配图设置
 export interface ImageConfig {

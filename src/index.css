@@ -227,15 +227,24 @@ input[name="website_alt"] {
 
 /* ---------- Word 式编辑器主题 ---------- */
 .lex-editor {
-  font-family: "宋体", SimSun, serif;
-  font-size: 12pt;
-  line-height: 1.85;
+  font-family: var(--writer-body-font, "宋体", SimSun, serif);
+  font-size: var(--writer-body-size, 12pt);
+  line-height: var(--writer-line-height, 1.85);
   color: oklch(var(--foreground-800));
   caret-color: oklch(var(--primary-600));
   outline: none;
 }
 .lex-editor .editor-paragraph {
   margin: 0 0 0.55em;
+}
+.lex-editor.lex-tech .editor-paragraph {
+  text-indent: var(--writer-indent, 0);
+}
+.lex-editor .editor-heading-h1,
+.lex-editor .editor-heading-h2,
+.lex-editor .editor-heading-h3,
+.lex-editor .editor-heading-h4 {
+  text-indent: 0;
 }
 .lex-editor .editor-heading-h1 {
   font-size: 22px;
@@ -264,6 +273,42 @@ input[name="website_alt"] {
   color: oklch(var(--foreground-800));
   margin: 0.7em 0 0.35em;
 }
+.lex-editor.lex-tech .editor-heading-h1,
+.lex-editor.lex-tech .editor-heading-h2,
+.lex-editor.lex-tech .editor-heading-h3,
+.lex-editor.lex-tech .editor-heading-h4 {
+  font-family: var(--writer-heading-font, var(--writer-body-font, "宋体", SimSun, serif));
+  font-size: var(--writer-heading-size, var(--writer-body-size, 12pt));
+  font-weight: var(--writer-heading-weight, 700);
+  color: inherit;
+  margin: 0.8em 0 0.4em;
+}
+/* 修改闭环改写器：保留一/二/三级标题字号差，不再把所有标题拍成正文字号 */
+.lex-editor.lex-bidrev .editor-paragraph {
+  font-family: var(--writer-body-font, "宋体", SimSun, serif);
+  font-size: var(--writer-body-size, 12pt);
+  text-indent: var(--writer-indent, 0);
+}
+.lex-editor.lex-bidrev .editor-heading-h1,
+.lex-editor.lex-bidrev .editor-heading-h2,
+.lex-editor.lex-bidrev .editor-heading-h3,
+.lex-editor.lex-bidrev .editor-heading-h4 {
+  font-family: var(--writer-heading-font, var(--writer-body-font, "宋体", SimSun, serif));
+  font-weight: 700;
+  color: inherit;
+  text-indent: 0;
+  margin: 0.9em 0 0.4em;
+}
+.lex-editor.lex-bidrev .editor-heading-h1 {
+  font-size: var(--writer-h1-size, 18pt);
+}
+.lex-editor.lex-bidrev .editor-heading-h2 {
+  font-size: var(--writer-h2-size, 16pt);
+}
+.lex-editor.lex-bidrev .editor-heading-h3,
+.lex-editor.lex-bidrev .editor-heading-h4 {
+  font-size: var(--writer-h3-size, 14pt);
+}
 .lex-editor .editor-text-bold { font-weight: 700; }
 .lex-editor .editor-text-italic { font-style: italic; }
 .lex-editor .editor-text-underline { text-decoration: underline; }
@@ -275,18 +320,26 @@ input[name="website_alt"] {
   font-family: ui-monospace, monospace;
   font-size: 0.9em;
 }
-.lex-editor ul { margin: 0.4em 0; padding-left: 1.4em; list-style: disc; }
-.lex-editor ol { margin: 0.4em 0; padding-left: 1.4em; list-style: decimal; }
+.lex-editor ul { margin: 0.4em 0; padding-left: 1.4em; list-style: disc; text-indent: 0; }
+.lex-editor ol { margin: 0.4em 0; padding-left: 1.4em; list-style: decimal; text-indent: 0; }
+.lex-editor li { text-indent: 0; }
 .lex-editor .editor-link { color: oklch(var(--primary-600)); text-decoration: underline; }
 .lex-editor table {
   border-collapse: collapse;
   width: 100%;
   margin: 0.6em 0;
+  table-layout: auto;
 }
 .lex-editor td, .lex-editor th {
   border: 1px solid oklch(var(--background-300));
-  padding: 6px 10px;
-  font-size: 13px;
+  padding: 6px 8px;
+  font-size: inherit;
+  text-indent: 0;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  vertical-align: middle;
+  min-width: 2.5em;
 }
 .lex-editor .editor-image-wrap {
   display: block;
@@ -357,4 +410,31 @@ input[name="website_alt"] {
   outline: 2px solid oklch(var(--primary-500) / 0.85);
   outline-offset: 2px;
   background: oklch(var(--primary-50));
+}
+
+/* 修改闭环「原文」：docx-preview 渲染结果必须隔离 Tailwind Preflight 对 h1/h2 的 font-size:inherit 重置 */
+.bidrev-docx-host {
+  font-family: initial;
+  font-size: initial;
+  line-height: initial;
+  color: initial;
+}
+.bidrev-docx-host :where(h1, h2, h3, h4, h5, h6) {
+  font-size: revert;
+  font-weight: revert;
+  line-height: revert;
+  margin: revert;
+  color: revert;
+}
+.bidrev-docx-host :where(p, span, table, td, th, li) {
+  font-size: revert;
+  font-weight: revert;
+  font-family: revert;
+  line-height: revert;
+}
+.bidrev-docx-host [data-issue-id] {
+  background: var(--issue-bg, rgba(40, 120, 255, 0.22));
+  border-radius: 2px;
+  box-decoration-break: clone;
+  scroll-margin: 80px;
 }

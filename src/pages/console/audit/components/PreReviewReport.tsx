@@ -10,6 +10,7 @@ interface PreReviewReportProps {
   round: number;
   onExport: () => void;
   onCopy: () => void;
+  exporting?: boolean;
 }
 
 const levelStyle: Record<string, string> = {
@@ -37,6 +38,7 @@ export default function PreReviewReport({
   round,
   onExport,
   onCopy,
+  exporting = false,
 }: PreReviewReportProps) {
   const wasteCount = issues.filter((i) => i.severity === "废标" || i.severity === "降档").length;
   const riskCount = issues.filter((i) => i.severity === "扣分").length;
@@ -288,10 +290,11 @@ export default function PreReviewReport({
           <button
             type="button"
             onClick={onExport}
-            className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-gradient-to-r from-primary-500 to-primary-600 px-3 text-xs font-semibold text-background-50 transition-all hover:from-primary-600 hover:to-primary-700"
+            disabled={exporting}
+            className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-gradient-to-r from-primary-500 to-primary-600 px-3 text-xs font-semibold text-background-50 transition-all hover:from-primary-600 hover:to-primary-700 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            <i className="ri-download-2-line text-xs"></i>
-            导出完整报告
+            <i className={`${exporting ? "ri-loader-4-line animate-spin" : "ri-download-2-line"} text-xs`}></i>
+            {exporting ? "正在导出…" : "导出完整报告"}
           </button>
         </div>
       </div>

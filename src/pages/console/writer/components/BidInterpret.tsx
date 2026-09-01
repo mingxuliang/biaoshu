@@ -93,7 +93,7 @@ export default function BidInterpret({ projectId, source, onSourceChange, onConf
               </span>
               <div>
                 <div className="text-sm font-semibold text-foreground-900">复用招标解析结果</div>
-                <div className="text-[11px] text-foreground-500">直接引用「招标文件解析」模块已锁定的评标尺子</div>
+                <div className="text-[11px] text-foreground-500">引用本项目最新一次已完成的招标解析（不必锁定；预审同样使用最新解析）</div>
               </div>
               <span className={`ml-auto flex h-5 w-5 items-center justify-center rounded-full border ${source === "reuse" ? "border-primary-500 bg-primary-500 text-background-50" : "border-background-300 text-transparent"}`}>
                 <i className="ri-check-line text-[10px]"></i>
@@ -110,7 +110,7 @@ export default function BidInterpret({ projectId, source, onSourceChange, onConf
             {!loading && notFound && (
               <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-background-300 bg-background-100 p-5 text-center">
                 <i className="ri-file-warning-line text-2xl text-accent-500"></i>
-                <p className="text-xs text-foreground-600">该项目暂无招标解析记录，请先完成招标文件解析并锁定评标尺子</p>
+                <p className="text-xs text-foreground-600">该项目暂无招标解析记录，请先完成招标文件解析（完成即可，不必锁定）</p>
                 <Link
                   to={`/console/parse?project=${projectId}`}
                   className="mt-1 flex h-8 items-center gap-1 rounded-md bg-primary-500 px-3 text-xs font-medium text-background-50 transition-colors hover:bg-primary-600"
@@ -152,7 +152,7 @@ export default function BidInterpret({ projectId, source, onSourceChange, onConf
                       checklist.locked ? "bg-secondary-100 text-secondary-700" : "bg-accent-100 text-accent-700"
                     }`}
                   >
-                    {checklist.locked ? "评标尺子已锁定" : "评标尺子尚未锁定"}
+                    {checklist.locked ? "评标尺子已锁定" : "未锁定也可用于写标与预审"}
                   </span>
                 </div>
               </div>
@@ -190,7 +190,7 @@ export default function BidInterpret({ projectId, source, onSourceChange, onConf
             <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-background-300 bg-background-100 px-4 py-6 text-center">
               <i className="ri-upload-cloud-2-line text-3xl text-primary-500"></i>
               <p className="text-sm text-foreground-700">重新解析请统一在招标解析模块完成</p>
-              <p className="text-xs text-foreground-500">解析完成并锁定后，回到本页选择「复用招标解析结果」即可</p>
+              <p className="text-xs text-foreground-500">解析完成后回到本页选择「复用招标解析结果」即可，锁定不是写标的前置条件</p>
               <Link
                 to={`/console/parse?project=${projectId}`}
                 className="mt-1 flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-3 text-xs font-medium text-background-50 transition-colors hover:bg-primary-600"

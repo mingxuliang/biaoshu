@@ -65,13 +65,18 @@ def is_placeholder_markdown(md: str) -> bool:
 
 
 def needs_form_recopy(md: str) -> bool:
-    """占位说明或尚未带上字体字号的旧拷贝，打开时重抽。"""
+    """占位说明、旧字体标记或表格被 | 拆碎的拷贝，打开时重抽。"""
     if is_placeholder_markdown(md):
         return True
     text = (md or "").strip()
     if not text:
         return True
-    return "{{" not in text
+    if "{{" not in text:
+        return True
+    # 旧版 {{宋体|10pt}} / 表内 {{宋体\|10pt}} 会把 GFM 表格拆成碎列
+    if "\\|" in text or re.search(r"\{\{[^}:\n]+\|", text):
+        return True
+    return False
 
 
 def extract_forms_markdown(path: str, titles: list[str], model_id: str | None = None) -> dict[str, str]:
@@ -195,7 +200,7 @@ def _run_md(run, para: Paragraph) -> str:
     name = _run_font_name(run, para)
     pt = _run_font_size_pt(run, para)
     pt_s = f"{pt:g}pt"
-    return f"{{{{{name}|{pt_s}}}}}{text}{{{{/}}}}"
+    return "{{" + f"{name}:{pt_s}" + "}}" + text + "{{/}}"
 
 
 def _indent_prefix(para: Paragraph, align: str) -> str:
@@ -211,11 +216,80 @@ def _indent_prefix(para: Paragraph, align: str) -> str:
     return ""
 
 
-def _para_md(para: Paragraph) -> str:
-    parts = [_run_md(run, para) for run in para.runs]
-    inline = "".join(parts)
+def _is_cjk(ch: str) -> bool:
+    if not ch:
+        return False
+    o = ord(ch)
+    return (
+        0x4E00 <= o <= 0x9FFF
+        or 0x3400 <= o <= 0x4DBF
+        or 0x3000 <= o <= 0x303F
+        or 0xFF00 <= o <= 0xFFEF
+    )
+
+
+def _style_key(run, para: Paragraph) -> tuple:
+    return (
+        _run_font_name(run, para),
+        _run_font_size_pt(run, para),
+        bool(run.bold),
+        _run_underlined(run),
+        bool(run.italic),
+    )
+
+
+def _format_chunk(name: str, pt: float, bold: bool, under: bool, italic: bool, text: str) -> str:
+    if bold:
+        text = f"**{text}**"
+    if under and text.strip():
+        text = f"__{text}__"
+    if italic:
+        text = f"*{text}*"
+    pt_s = f"{pt:g}pt"
+    return "{{" + f"{name}:{pt_s}" + "}}" + text + "{{/}}"
+
+
+def _compact_font_wraps(md: str) -> str:
+    prev = None
+    out = md or ""
+    while prev != out:
+        prev = out
+        out = re.sub(
+            r"\{\{([^}]+)\}\}(.*?)\{\{/\}\}\{\{\1\}\}(.*?)\{\{/\}\}",
+            r"{{\1}}\2\3{{/}}",
+            out,
+            flags=re.S,
+        )
+    return out
+
+
+def _para_md(para: Paragraph, tight: bool = False) -> str:
+    chunks: list[list] = []
+    for run in para.runs:
+        raw = (run.text or "").replace("\t", "    ").replace("\r", "")
+        raw = raw.replace("\n", "")
+        if _run_underlined(run) and not raw.strip():
+            raw = "_" * max(len(raw), 6)
+        elif not raw.strip():
+            if tight and chunks and _is_cjk(str(chunks[-1][1])[-1:]):
+                continue
+            if not raw:
+                continue
+        if not raw:
+            continue
+        key = _style_key(run, para)
+        if chunks and chunks[-1][0] == key:
+            prev_text = str(chunks[-1][1])
+            if tight and prev_text and raw and _is_cjk(prev_text[-1]) and _is_cjk(raw[0]):
+                chunks[-1][1] = prev_text + raw.lstrip()
+            else:
+                chunks[-1][1] = prev_text + raw
+        else:
+            chunks.append([key, raw])
+    parts = [_format_chunk(*key, text) for key, text in chunks]
+    inline = _compact_font_wraps("".join(parts))
     if not inline.strip():
-        inline = (para.text or "").replace("\t", "    ")
+        inline = (para.text or "").replace("\t", "    ").replace("\n", "")
     align = _alignment(para)
     inline = _indent_prefix(para, align) + inline.rstrip()
     if not inline.strip():
@@ -243,23 +317,97 @@ def _is_heading(para: Paragraph, text: str) -> bool:
     return False
 
 
-def _table_md(table: Table) -> str:
-    rows: list[list[str]] = []
-    for row in table.rows:
-        cells: list[str] = []
-        for cell in row.cells:
-            bits = [_para_md(p).lstrip("> ").strip() for p in cell.paragraphs]
-            bits = [b for b in bits if b]
-            cells.append(" ".join(bits).replace("|", "\\|"))
-        rows.append(cells)
-    if not rows:
+def _tc_grid_span(tc) -> int:
+    tcPr = getattr(tc, "tcPr", None)
+    if tcPr is None or tcPr.gridSpan is None:
+        return 1
+    try:
+        return max(1, int(tcPr.gridSpan.val))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _tc_vmerge(tc) -> str | None:
+    tcPr = getattr(tc, "tcPr", None)
+    if tcPr is None or tcPr.vMerge is None:
+        return None
+    val = tcPr.vMerge.val
+    if val in (None, "restart"):
+        return "restart"
+    return "continue"
+
+
+def _cell_md(cell) -> str:
+    bits = []
+    for p in cell.paragraphs:
+        md = re.sub(r"^>+\s*", "", _para_md(p, tight=True)).strip()
+        if md:
+            bits.append(md)
+    if not bits:
         return ""
-    width = max(len(r) for r in rows)
-    for r in rows:
-        while len(r) < width:
-            r.append("")
-    lines = ["| " + " | ".join(r) + " |" for r in rows]
-    lines.insert(1, "| " + " | ".join("---" for _ in range(width)) + " |")
+    return _compact_font_wraps("<br>".join(bits) if len(bits) > 1 else bits[0])
+
+
+def _logical_table(table: Table) -> list[list[tuple[str, int, int]]]:
+    parsed: list[list[tuple[object, int, int, str | None]]] = []
+    for row in table.rows:
+        items: list[tuple[object, int, int, str | None]] = []
+        seen: set[int] = set()
+        col = 0
+        for cell in row.cells:
+            tc = cell._tc
+            if id(tc) in seen:
+                continue
+            seen.add(id(tc))
+            span = _tc_grid_span(tc)
+            items.append((cell, col, span, _tc_vmerge(tc)))
+            col += span
+        parsed.append(items)
+
+    def _rowspan(r: int, col: int, span: int) -> int:
+        n = 1
+        for rr in range(r + 1, len(parsed)):
+            hit = False
+            for _cell, c, s, vm in parsed[rr]:
+                if vm == "continue" and c <= col < c + s:
+                    hit = True
+                    break
+            if not hit:
+                break
+            n += 1
+        return n
+
+    out: list[list[tuple[str, int, int]]] = []
+    for r, items in enumerate(parsed):
+        row_out: list[tuple[str, int, int]] = []
+        for cell, col, span, vm in items:
+            if vm == "continue":
+                continue
+            rs = _rowspan(r, col, span) if vm == "restart" else 1
+            row_out.append((_cell_md(cell), span, rs))
+        if row_out:
+            out.append(row_out)
+    return out
+
+
+def _table_md(table: Table) -> str:
+    logical = _logical_table(table)
+    if not logical:
+        return ""
+    lines: list[str] = []
+    for ridx, row in enumerate(logical):
+        cells: list[str] = []
+        for md, cs, rs in row:
+            prefix = ""
+            if cs > 1:
+                prefix += f"#c{cs}#"
+            if rs > 1:
+                prefix += f"#r{rs}#"
+            cells.append(prefix + md.replace("|", "\\|"))
+        lines.append("| " + " | ".join(cells) + " |")
+        if ridx == 0:
+            width = max(sum(cs for _, cs, _ in row) for row in logical)
+            lines.append("| " + " | ".join("---" for _ in range(max(width, 1))) + " |")
     return "\n".join(lines)
 
 

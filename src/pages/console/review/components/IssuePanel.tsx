@@ -5,6 +5,7 @@ interface IssuePanelProps {
   activeIssueId: string | null;
   onIssueClick: (issueId: string) => void;
   onJumpAll: () => void;
+  onToggleResolved?: (issueId: string, resolved: boolean) => void;
 }
 
 const severityStyle: Record<string, string> = {
@@ -21,7 +22,15 @@ const dot: Record<string, string> = {
   建议: "bg-primary-500",
 };
 
-export default function IssuePanel({ issues, activeIssueId, onIssueClick, onJumpAll }: IssuePanelProps) {
+export default function IssuePanel({
+  issues,
+  activeIssueId,
+  onIssueClick,
+  onJumpAll,
+  onToggleResolved,
+}: IssuePanelProps) {
+  const pending = issues.filter((i) => !i.resolved).length;
+
   return (
     <div className="flex h-full flex-col overflow-hidden rounded-lg border border-background-300 bg-background-100">
       <div className="border-b border-background-300 bg-background-50 px-4 py-3">
@@ -30,7 +39,9 @@ export default function IssuePanel({ issues, activeIssueId, onIssueClick, onJump
             <i className="ri-list-check-3 text-accent-500"></i>
             发现问题清单
           </div>
-          <span className="font-label text-[11px] text-foreground-500">{issues.length} 项</span>
+          <span className="font-label text-[11px] text-foreground-500">
+            待处理 {pending} / 共 {issues.length}
+          </span>
         </div>
         <button
           type="button"
@@ -45,38 +56,63 @@ export default function IssuePanel({ issues, activeIssueId, onIssueClick, onJump
         <div className="space-y-2">
           {issues.map((issue) => {
             const active = activeIssueId === issue.id;
+            const resolved = !!issue.resolved;
             return (
-              <button
+              <div
                 key={issue.id}
-                type="button"
-                onClick={() => onIssueClick(issue.id)}
-                className={`w-full cursor-pointer rounded-lg border p-3 text-left transition-all duration-200 ${
-                  active
-                    ? "border-primary-300 bg-primary-50/70 ring-1 ring-primary-300"
-                    : "border-background-300 bg-background-50 hover:border-background-400 hover:bg-background-50"
+                className={`rounded-lg border p-3 transition-all duration-200 ${
+                  resolved
+                    ? "border-background-200 bg-background-50/70 opacity-70"
+                    : active
+                      ? "border-primary-300 bg-primary-50/70 ring-1 ring-primary-300"
+                      : "border-background-300 bg-background-50 hover:border-background-400"
                 }`}
               >
-                <div className="flex items-center justify-between gap-2">
-                  <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${severityStyle[issue.severity]}`}>
-                    {issue.severity}
-                  </span>
-                  <span className="font-label flex items-center gap-1 text-[10px] text-foreground-500">
-                    <span className={`h-1.5 w-1.5 rounded-full ${dot[issue.severity]}`}></span>
-                    {issue.location}
-                  </span>
+                <div className="flex items-start gap-2">
+                  <label
+                    className="mt-0.5 flex shrink-0 cursor-pointer items-center gap-1"
+                    onClick={(e) => e.stopPropagation()}
+                    title={resolved ? "取消已修复" : "标记为已修复"}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={resolved}
+                      onChange={(e) => onToggleResolved?.(issue.id, e.target.checked)}
+                      className="h-3.5 w-3.5 cursor-pointer accent-primary-500"
+                    />
+                    <span className="sr-only">已修复</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => onIssueClick(issue.id)}
+                    className="min-w-0 flex-1 cursor-pointer text-left"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${severityStyle[issue.severity]}`}>
+                        {issue.severity}
+                      </span>
+                      <span className="font-label flex items-center gap-1 text-[10px] text-foreground-500">
+                        <span className={`h-1.5 w-1.5 rounded-full ${dot[issue.severity]}`}></span>
+                        {issue.location}
+                        {resolved && <span className="text-primary-600">已修复</span>}
+                      </span>
+                    </div>
+                    <p className={`mt-1.5 text-xs leading-relaxed ${resolved ? "text-foreground-400 line-through" : active ? "text-primary-800" : "text-foreground-700"}`}>
+                      「{issue.excerpt}」
+                    </p>
+                    <div className="mt-1.5 flex items-center justify-between">
+                      <span className="text-[11px] text-foreground-500">建议：{issue.suggestion}</span>
+                      <span
+                        className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md transition-all ${
+                          active ? "bg-primary-500 text-background-50" : "bg-background-200 text-foreground-500"
+                        }`}
+                      >
+                        <i className="ri-corner-down-right-line text-xs"></i>
+                      </span>
+                    </div>
+                  </button>
                 </div>
-                <p className={`mt-1.5 text-xs leading-relaxed ${active ? "text-primary-800" : "text-foreground-700"}`}>
-                  「{issue.excerpt}」
-                </p>
-                <div className="mt-1.5 flex items-center justify-between">
-                  <span className="text-[11px] text-foreground-500">建议：{issue.suggestion}</span>
-                  <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md transition-all ${
-                    active ? "bg-primary-500 text-background-50" : "bg-background-200 text-foreground-500"
-                  }`}>
-                    <i className="ri-corner-down-right-line text-xs"></i>
-                  </span>
-                </div>
-              </button>
+              </div>
             );
           })}
         </div>
@@ -84,7 +120,7 @@ export default function IssuePanel({ issues, activeIssueId, onIssueClick, onJump
       <div className="border-t border-background-300 bg-background-50 px-4 py-2.5">
         <p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-foreground-500">
           <i className="ri-lightbulb-flash-line mt-0.5 shrink-0 text-primary-500"></i>
-          点击问题可锚定到投标书正文对应章节并高亮命中句；「一键锚定」顺序定位全部问题位置。
+          点击问题跳到原文对应位置。勾选「已修复」后保存版本，再进入二次评审；未保存版本不能审修改稿。
         </p>
       </div>
     </div>

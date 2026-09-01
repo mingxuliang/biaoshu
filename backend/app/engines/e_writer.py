@@ -9,6 +9,7 @@ import logging
 import re
 
 from .llm import LlmError, chat_complete, is_vision_model
+from .tender_style import apply_tech_markdown_style
 
 logger = logging.getLogger(__name__)
 
@@ -924,12 +925,13 @@ def _user_content_with_images(text: str, knowledge_images: list[dict] | None, mo
     return parts
 
 
-def _wrap_tech_chapter(requirement: str, solution: str) -> str:
+def _wrap_tech_chapter(requirement: str, solution: str, layout: dict | None = None) -> str:
     body = sanitize_chapter_markdown(solution)
     body = re.sub(r"^##\s*原始需求[\s\S]*?(?=^##\s*解决方案|\Z)", "", body, flags=re.M).strip()
     body = re.sub(r"^##\s*解决方案\s*", "", body, flags=re.M).strip()
     req = (requirement or "").strip() or "（本章未抽取到招标原文，请对照招标文件补充。）"
-    return f"## 原始需求\n\n{req}\n\n## 解决方案\n\n{body}".strip()
+    md = f"## 原始需求\n\n{req}\n\n## 解决方案\n\n{body}".strip()
+    return apply_tech_markdown_style(md, layout if isinstance(layout, dict) else None)
 
 
 def generate_chapter_content(
@@ -956,6 +958,7 @@ def generate_chapter_content(
         return business_skip_markdown(chapter_title)
 
     req_text = (requirement or "").strip() or _requirement_from_idea(chapter_idea)
+    layout = (writing_prefs or {}).get("layout") if isinstance(writing_prefs, dict) else None
     prompt = _build_chapter_context(
         project_name,
         chapter_title,
@@ -989,7 +992,7 @@ def generate_chapter_content(
         solution = sanitize_chapter_markdown(text) or _fallback_chapter_content(
             chapter_title, chapter_idea, "AI 返回内容为空"
         )
-        return _wrap_tech_chapter(req_text, solution)
+        return _wrap_tech_chapter(req_text, solution, layout)
     except LlmError as exc:
         if knowledge_images and is_vision_model(model_id):
             try:
@@ -1005,14 +1008,15 @@ def generate_chapter_content(
                 solution = sanitize_chapter_markdown(text) or _fallback_chapter_content(
                     chapter_title, chapter_idea, "AI 返回内容为空"
                 )
-                return _wrap_tech_chapter(req_text, solution)
+                return _wrap_tech_chapter(req_text, solution, layout)
             except Exception:
                 logger.exception("chapter generate retry without images failed")
-        return _wrap_tech_chapter(req_text, _fallback_chapter_content(chapter_title, chapter_idea, str(exc)))
+        return _wrap_tech_chapter(req_text, _fallback_chapter_content(chapter_title, chapter_idea, str(exc)), layout)
     except Exception as exc:  # noqa: BLE001 —— 任何网络/解析异常都应降级为占位正文，而不是让任务失败
         return _wrap_tech_chapter(
             req_text,
             _fallback_chapter_content(chapter_title, chapter_idea, f"调用大模型失败（{exc.__class__.__name__}）"),
+            layout,
         )
 
 

@@ -10,9 +10,11 @@ import { useProjects } from "@/context/ProjectContext";
 import {
   ApiError,
   createPrereviewJob,
+  exportLatestReviewReport,
   getLatestReviewRun,
   getReviewRunTrend,
   pollJobUntilDone,
+  triggerFileDownload,
   type ReviewReport,
   type TrendPoint,
 } from "@/lib/api";
@@ -77,6 +79,7 @@ export default function AuditPage() {
   const [report, setReport] = useState<ReviewReport | null>(null);
   const [trend, setTrend] = useState<TrendPoint[]>([]);
   const [toast, setToast] = useState<ToastState>({ message: "", type: "success", visible: false });
+  const [exporting, setExporting] = useState(false);
 
   const busy = reviewing || secondReviewing;
 
@@ -101,10 +104,10 @@ export default function AuditPage() {
     if (!currentProject || !docSource) return;
     const setBusy = kind === "first" ? setReviewing : setSecondReviewing;
     setBusy(true);
-    showToast(`AI 预审已启动，正在对「${docSource.name}」执行 L1-L5 分层扫描…`, "info");
+      showToast(`AI 预审已启动，正在对「${docSource.name}」执行 L1-L5 分层扫描。技术标按章节送审，最长约 30 万字，通常数分钟内完成…`, "info");
     try {
       const job = await createPrereviewJob(currentProject.id, docSource.bidDocumentId);
-      const finalStatus = await pollJobUntilDone(job.job_id);
+      const finalStatus = await pollJobUntilDone(job.job_id, { intervalMs: 2500, timeoutMs: 15 * 60 * 1000 });
       if (finalStatus.status === "failed") {
         showToast(`第 ${finalStatus.round} 轮预审失败：${finalStatus.error ?? "未知错误"}`, "error");
         return;
@@ -143,6 +146,40 @@ export default function AuditPage() {
   const maxTrendScore = trend.length ? Math.max(...trend.map((d) => d.score)) : 100;
   const prevTrendPoint = trend.length >= 2 ? trend[trend.length - 2] : null;
   const exportReady = !!report && report.overall >= 90 && report.waste === 0;
+
+  const exportReport = async () => {
+    if (!currentProject || !report) return;
+    setExporting(true);
+    showToast(`正在导出第 ${report.round} 轮 AI 预审报告 Word 文档…`, "info");
+    try {
+      const blob = await exportLatestReviewReport(currentProject.id);
+      triggerFileDownload(blob, `${currentProject.code || currentProject.name}-第${report.round}轮-AI预审报告.docx`);
+      showToast("预审报告已开始下载");
+    } catch (err) {
+      showToast(err instanceof ApiError ? err.message : "导出报告失败，请稍后重试", "error");
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const copyReportSummary = async () => {
+    if (!report || !currentProject) return;
+    const lines = [
+      `AI 智能预审报告 · ${currentProject.name}（${currentProject.code}）`,
+      `第 ${report.round} 轮 · 综合得分 ${report.overall} · 风险灯 ${report.light}`,
+      `废标 ${report.waste} 项 · 扣分 ${report.risk} 项 · 建议 ${report.suggest} 项`,
+      ...(report.levels || []).map((lv) => `${lv.key} ${lv.name}：${lv.score} 分，${lv.issues} 项，${lv.status}`),
+      "",
+      "问题摘要：",
+      ...report.issues.slice(0, 20).map((issue, i) => `${i + 1}. [${issue.severity}] ${issue.rule} @ ${issue.location}：${issue.excerpt}`),
+    ];
+    try {
+      await navigator.clipboard.writeText(lines.join("\n"));
+      showToast("预审报告摘要已复制到剪贴板");
+    } catch {
+      showToast("复制失败，请检查浏览器剪贴板权限", "error");
+    }
+  };
 
   /* 未选择项目：先选择项目 */
   if (!currentProject) {
@@ -277,6 +314,18 @@ export default function AuditPage() {
           ))}
         </select>
       </div>
+
+      {docSource?.source === "修改闭环二次评审" && (
+        <div className="mb-4 flex items-start gap-2 rounded-lg border border-accent-200 bg-accent-50/70 px-4 py-3 text-xs text-foreground-700">
+          <i className="ri-information-line mt-0.5 text-accent-500"></i>
+          <span>
+            当前预审文件来自修改闭环已保存版本，不会审到上一轮原文。
+            {searchParams.get("resolved")
+              ? ` 上一轮已标记修复 ${searchParams.get("resolved")!.split(",").filter(Boolean).length} 项，请对照新报告确认是否消除。`
+              : ""}
+          </span>
+        </div>
+      )}
 
       {/* 二次评审对比条 */}
       {report && report.round > 1 && prevTrendPoint && (
@@ -453,15 +502,21 @@ export default function AuditPage() {
                   </div>
                   <ul className="divide-y divide-background-200">
                     {report.issues.map((issue) => (
-                      <li key={issue.id} className="px-4 py-3">
-                        <div className="flex items-center justify-between">
-                          <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${severityStyle[issue.severity]}`}>
-                            {issue.severity}
-                          </span>
-                          <span className="font-label text-[10px] text-foreground-500">{issue.level} · {issue.location}</span>
-                        </div>
-                        <p className="mt-1.5 text-xs leading-relaxed text-foreground-700">「{issue.excerpt}」</p>
-                        <p className="mt-1 text-[11px] text-foreground-500">建议：{issue.suggestion}</p>
+                      <li key={issue.id}>
+                        <Link
+                          to={`/console/review?project=${currentProject.id}&issue=${issue.id}`}
+                          className="block cursor-pointer px-4 py-3 transition-colors hover:bg-primary-50/60"
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${severityStyle[issue.severity]}`}>
+                              {issue.severity}
+                            </span>
+                            <span className="font-label text-[10px] text-foreground-500">{issue.level} · {issue.location}</span>
+                          </div>
+                          <p className="mt-1.5 text-xs leading-relaxed text-foreground-700">「{issue.excerpt}」</p>
+                          <p className="mt-1 text-[11px] text-foreground-500">建议：{issue.suggestion}</p>
+                          <p className="mt-1.5 text-[11px] text-primary-600">点击定位到修改闭环原文 →</p>
+                        </Link>
                       </li>
                     ))}
                     {report.issues.length === 0 && (
@@ -521,8 +576,9 @@ export default function AuditPage() {
               dimensions={report.dimensions}
               overall={report.overall}
               round={report.round}
-              onExport={() => showToast(`正在导出第 ${report.round} 轮 AI 预审报告 Word 文档…`, "info")}
-              onCopy={() => showToast("预审报告摘要已复制到剪贴板")}
+              exporting={exporting}
+              onExport={() => { if (!exporting) void exportReport(); }}
+              onCopy={() => { void copyReportSummary(); }}
             />
           )}
         </>
