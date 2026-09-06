@@ -7,7 +7,22 @@ from ..audit import actor_from_request, project_label, write_audit
 from ..auth import get_current_user
 from ..db import get_db
 from ..engines.docx_extract import extract_paragraphs
-from ..engines.revision_build import anchor_findings, blocks_to_docx, build_sections, writeback_docx
+from ..engines.revision_build import (
+    anchor_findings,
+    blocks_to_docx,
+    build_sections,
+    clear_problems,
+    sections_to_blocks,
+    writeback_docx,
+)
+from ..engines.revision_suggest import (
+    apply_text_to_paragraph,
+    enrich_issue,
+    heuristic_apply_text,
+    llm_rewrite_paragraph,
+    patch_lexical_text,
+    pick_strategy,
+)
 from ..engines.tender_style import extract_bid_typography
 from ..models import BidDocument, BidRevision, BidRevisionVersion, ReviewFinding, ReviewRun, User
 from ..permissions import PERM_WRITER, require_project
@@ -25,16 +40,30 @@ router = APIRouter(prefix="/api", tags=["revision"])
 
 
 def _finding_to_issue_dict(f: ReviewFinding) -> dict:
-    return {
-        "id": f.id,
-        "level": f.level,
-        "severity": f.severity,
-        "location": f.location,
-        "excerpt": f.excerpt,
-        "rule": f.rule,
-        "tenderQuote": f.tender_quote,
-        "suggestion": f.suggestion,
-    }
+    extra = f.evidence_json if isinstance(f.evidence_json, dict) else {}
+    return enrich_issue(
+        {
+            "id": f.id,
+            "level": f.level,
+            "severity": f.severity,
+            "location": f.location,
+            "excerpt": f.excerpt,
+            "rule": f.rule,
+            "tenderQuote": f.tender_quote,
+            "suggestion": f.suggestion,
+            "strategyKey": extra.get("strategyKey") or "",
+            "applyText": extra.get("applyText") or "",
+        }
+    )
+
+
+def _enrich_stored_issues(raw_issues: list) -> list[dict]:
+    return [enrich_issue(dict(item)) for item in raw_issues if isinstance(item, dict)]
+
+
+def _reanchor_sections(sections: list[dict], issues: list[dict]) -> list[dict]:
+    clear_problems(sections)
+    return anchor_findings(sections, issues)
 
 
 def _latest_done_run(db: Session, project_id: str) -> ReviewRun:
@@ -124,9 +153,10 @@ def get_or_create_bid_revision(
 ) -> BidRevisionOut:
     require_project(db, current_user, project_id, PERM_WRITER)
     run = _latest_done_run(db, project_id)
-    sections, issues, layout = _build_revision_content(db, run)
-
     revision = db.query(BidRevision).filter(BidRevision.project_id == project_id).first()
+    # 始终按最新一轮预审 Finding + 含表格正文重建章节/锚点。
+    # 工程标正文常在表内：沿用旧 sections 会只剩标题，L3 全部无法命中。
+    sections, issues, layout = _build_revision_content(db, run)
     switched = False
     if revision:
         switched = _sync_revision_to_run(revision, run, sections, issues, layout)
@@ -187,6 +217,100 @@ def autosave_bid_revision_content(
     db.commit()
     db.refresh(revision)
     return _revision_to_out(revision)
+
+
+@router.post("/bid-revisions/{revision_id}/issues/{issue_id}/apply", response_model=BidRevisionOut)
+def apply_issue_suggestion(
+    revision_id: str,
+    issue_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> BidRevisionOut:
+    """把该条 AI 整改建议写回正文段落（跳过目录），并尽量同步编辑器状态与工作稿。"""
+    revision = _require_revision(db, current_user, revision_id)
+    issues = _enrich_stored_issues(revision.issues_json or [])
+    issue = next((i for i in issues if i.get("id") == issue_id), None)
+    if not issue:
+        raise HTTPException(404, "问题项不存在")
+
+    sections = _reanchor_sections(list(revision.sections_json or []), issues)
+    target = None
+    for sec in sections:
+        if sec.get("isToc"):
+            continue
+        for para in sec.get("paragraphs") or []:
+            problem = para.get("problem") or {}
+            if problem.get("issueId") == issue_id and not para.get("isToc"):
+                target = para
+                break
+        if target:
+            break
+    if not target:
+        raise HTTPException(400, "未能定位到正文段落（锚点不在目录或该条为全篇级检查），请手工在「改写」中修改")
+
+    old_text = target.get("text") or ""
+    old_highlight = (target.get("problem") or {}).get("highlight") or issue.get("excerpt") or ""
+    suggestion = issue.get("suggestion") or ""
+    apply_text = (issue.get("applyText") or "").strip() or heuristic_apply_text(old_highlight, suggestion)
+    new_text = apply_text_to_paragraph(old_text, old_highlight, suggestion, apply_text)
+    if new_text.strip() == old_text.strip() or not new_text.strip():
+        rewritten = llm_rewrite_paragraph(old_text, old_highlight, suggestion, pick_strategy(issue))
+        if rewritten:
+            new_text = rewritten
+    if not new_text.strip() or new_text.strip() == old_text.strip():
+        raise HTTPException(400, "未能生成可写入原文的改写句，请手工在「改写」中修改")
+
+    target["text"] = new_text
+    new_highlight = apply_text if apply_text and apply_text in new_text else new_text
+    target["problem"] = {"issueId": issue_id, "highlight": new_highlight}
+    issue["applyText"] = apply_text or new_highlight
+    issue["excerpt"] = new_highlight if new_highlight in new_text else issue.get("excerpt") or new_highlight
+
+    if isinstance(revision.content_state_json, dict):
+        state = revision.content_state_json
+        if not patch_lexical_text(state, old_highlight, new_highlight if new_highlight in new_text else new_text):
+            patch_lexical_text(state, old_text, new_text)
+        revision.content_state_json = state
+
+    resolved = [x for x in (revision.resolved_ids_json or []) if isinstance(x, str)]
+    if issue_id not in resolved:
+        resolved.append(issue_id)
+    revision.resolved_ids_json = resolved
+    revision.sections_json = sections
+    revision.issues_json = issues
+
+    base_doc = db.get(BidDocument, revision.bid_document_id)
+    if base_doc and storage.exists(base_doc.storage_path):
+        try:
+            with storage.as_local(base_doc.storage_path) as path:
+                docx_bytes = writeback_docx(path, sections_to_blocks(sections))
+            key = storage.put_bytes(f"bid-documents/{revision.project_id}", docx_bytes, ".docx")
+            new_doc = BidDocument(
+                project_id=revision.project_id,
+                filename="投标书修改稿.docx",
+                storage_path=key,
+                size_bytes=len(docx_bytes),
+                source="revision",
+            )
+            db.add(new_doc)
+            db.flush()
+            revision.bid_document_id = new_doc.id
+        except Exception:
+            pass
+
+    write_audit(
+        db,
+        action="改写接受",
+        user_name=actor_from_request(db, request),
+        target=project_label(db, revision.project_id),
+        version="—",
+        detail=f"已将问题 {issue_id} 的整改建议写入正文",
+    )
+    db.commit()
+    db.refresh(revision)
+    run = db.get(ReviewRun, revision.review_run_id)
+    return _revision_to_out(revision, run)
 
 
 @router.patch("/bid-revisions/{revision_id}/issues/{issue_id}/resolve", response_model=BidRevisionOut)

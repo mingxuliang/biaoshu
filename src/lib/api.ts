@@ -17,6 +17,56 @@ export interface DimensionScore {
   score: number;
 }
 
+// 技术评分 8 模块（施工组织总纲/专项施工方案/工期管控/质量管理/安全文明/环保水保/
+// 资源配置/售后质保）逐项打分明细，与规则页「技术评分」tab 的 8 张卡片一一对应。
+export interface TechModuleScore {
+  key: string;
+  module: string;
+  maxScore: number;
+  score: number;
+  status: string;
+  summary: string;
+}
+
+export interface TenderStrategyRef {
+  key: string;
+  category: string;
+  point: string;
+  clauses: string[];
+}
+
+export interface TenderRuleItem {
+  id: string;
+  group: string;
+  name: string;
+  rule: string;
+  maxScore: number;
+  score: number;
+  status: string;
+  grade?: string;
+  evidence?: string;
+  reason: string;
+  suggestion: string;
+  strategies: TenderStrategyRef[];
+}
+
+export interface TenderRuleGroup {
+  key: string;
+  label: string;
+  maxScore: number;
+  score: number;
+  items: TenderRuleItem[];
+}
+
+export interface TenderRuleReport {
+  judgeMode?: boolean;
+  totalMax: number;
+  totalScore: number;
+  percent: number;
+  groups: TenderRuleGroup[];
+  note: string;
+}
+
 export interface ReviewReport {
   round: number;
   overall: number;
@@ -26,6 +76,8 @@ export interface ReviewReport {
   light: "绿" | "橙" | "红";
   levels: PreReviewLevel[];
   dimensions: DimensionScore[];
+  techModules: TechModuleScore[];
+  tenderRules?: TenderRuleReport | null;
   issues: PreReviewIssue[];
 }
 
@@ -325,6 +377,7 @@ export interface ProjectDto {
   code: string;
   name: string;
   type: "工程" | "政采" | "医疗" | "交通" | "IT" | "能源";
+  category: "软件服务类" | "工程类";
   owner: string;
   budget: string;
   deadline: string;
@@ -340,6 +393,7 @@ export interface CreateProjectPayload {
   name: string;
   code: string;
   type: ProjectDto["type"];
+  category?: ProjectDto["category"];
   budget?: string;
   deadline?: string;
   owner?: string;
@@ -880,6 +934,15 @@ export async function autosaveBidRevisionContent(
   });
 }
 
+export async function applyBidRevisionSuggestion(
+  revisionId: string,
+  issueId: string,
+): Promise<BidRevision> {
+  return request<BidRevision>(`/api/bid-revisions/${revisionId}/issues/${issueId}/apply`, {
+    method: "POST",
+  });
+}
+
 export async function patchBidRevisionIssueResolved(
   revisionId: string,
   issueId: string,
@@ -1034,7 +1097,7 @@ export async function listUsers(token: string): Promise<TeamMember[]> {
 
 export async function inviteUser(
   token: string,
-  payload: { name: string; email: string; phone?: string; role: string },
+  payload: { name: string; email: string; phone?: string; role: string; password: string },
 ): Promise<TeamMember & { initialPassword: string }> {
   return request<TeamMember & { initialPassword: string }>("/api/users", {
     method: "POST",
@@ -1385,6 +1448,7 @@ export interface VetoRule {
   category: string;
   point: string;
   items: string[];
+  wiredItems?: string[];
   wired: "接入判定" | "部分接入" | "仅对照";
   wiredNote: string;
   engine: string;

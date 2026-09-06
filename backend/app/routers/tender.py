@@ -27,8 +27,10 @@ from .. import storage
 router = APIRouter(prefix="/api", tags=["tender"])
 
 
-def _checklist_to_out(checklist: EvaluationChecklist) -> ChecklistOut:
+def _checklist_to_out(checklist: EvaluationChecklist, db: Session) -> ChecklistOut:
     data = checklist.checklist_json or {}
+    project = db.get(Project, checklist.project_id)
+    category = (project.category if project else None) or "软件服务类"
     return ChecklistOut(
         id=checklist.id,
         project_id=checklist.project_id,
@@ -40,7 +42,7 @@ def _checklist_to_out(checklist: EvaluationChecklist) -> ChecklistOut:
         mustRespond=data.get("mustRespond", []),
         qualification=data.get("qualification", []),
         formatRequirements=data.get("formatRequirements", []),
-        dimensions=merge_tree(data.get("dimensions")),
+        dimensions=merge_tree(data.get("dimensions"), category),
         vetoParams=checklist.engine_params_json or {},
         error=checklist.error,
     )
@@ -60,14 +62,24 @@ async def upload_tender_document(
 
     if ext == ".doc":
         raise HTTPException(400, "暂不支持旧版 .doc 格式，请在 Word 中另存为 .docx 后重新上传")
-    if ext != ".docx":
-        raise HTTPException(400, "仅支持 .docx 格式的招标文件，如为 PDF 请先转换为 Word 格式")
+    if ext not in (".docx", ".pdf"):
+        raise HTTPException(400, "仅支持 .docx 或 .pdf 格式的招标文件")
 
     content = await file.read()
-    try:
-        docx.Document(io.BytesIO(content))
-    except Exception as exc:
-        raise HTTPException(400, "文档已损坏或无法解析，请重新上传") from exc
+    if ext == ".docx":
+        try:
+            docx.Document(io.BytesIO(content))
+        except Exception as exc:
+            raise HTTPException(400, "文档已损坏或无法解析，请重新上传") from exc
+    else:
+        import pymupdf as fitz
+
+        try:
+            with fitz.open(stream=content, filetype="pdf") as doc:
+                if doc.page_count < 1:
+                    raise ValueError("空文档")
+        except Exception as exc:
+            raise HTTPException(400, "PDF 文件已损坏或无法解析，请重新上传") from exc
 
     key = storage.put_bytes(f"tender/{project_id}", content, ext)
     doc = TenderDocument(
@@ -166,7 +178,7 @@ def get_latest_checklist(
     )
     if not checklist:
         raise HTTPException(404, "该项目暂无解析记录，请先上传招标文件并发起解析")
-    return _checklist_to_out(checklist)
+    return _checklist_to_out(checklist, db)
 
 
 @router.post("/projects/{project_id}/checklist/{checklist_id}/lock", response_model=ChecklistOut)
@@ -207,7 +219,7 @@ def lock_checklist(
     db.commit()
     db.refresh(checklist)
 
-    return _checklist_to_out(checklist)
+    return _checklist_to_out(checklist, db)
 
 
 @router.get("/projects/{project_id}/checklist/{checklist_id}/export")
@@ -231,6 +243,7 @@ def export_checklist_report(
         version=checklist.version,
         locked=bool(checklist.locked),
         data=checklist.checklist_json or {},
+        category=(project.category if project else None) or "软件服务类",
     )
     encoded_name = urllib.parse.quote(f"{(project.code if project else 'parse')}-解析报告-v{checklist.version}.docx")
     return Response(

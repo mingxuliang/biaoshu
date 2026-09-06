@@ -100,6 +100,7 @@ class ProjectChecklist:
     score_rules: list = field(default_factory=list)
     qualification: list = field(default_factory=list)
     format_requirements: list = field(default_factory=list)
+    dimensions: list = field(default_factory=list)
     locked: bool = False
     version: int | None = None
 
@@ -131,6 +132,7 @@ def load_project_checklist(db: Session, project_id: str) -> ProjectChecklist:
         score_rules=_list("scoreRules"),
         qualification=_list("qualification"),
         format_requirements=_list("formatRequirements"),
+        dimensions=_list("dimensions"),
         locked=bool(row.locked),
         version=row.version,
     )

@@ -272,6 +272,11 @@ VETO_CHECK_POINTS = [
             "不使用纯图片扫描 PDF",
             "文件未加密、可正常打开",
         ],
+        "wiredItems": [
+            "无空白页、乱码、错页、漏页",
+            "不使用纯图片扫描 PDF",
+            "文件未加密、可正常打开",
+        ],
         "wired": "部分接入",
         "wiredNote": "L5 检查空白页、目录域、修订痕迹、批注、加密/损坏文件与纯图片扫描 PDF",
         "engine": "e5_layout",
@@ -286,6 +291,10 @@ VETO_CHECK_POINTS = [
             "安全生产许可证在有效期内",
             "人员证书有效期与专业匹配",
         ],
+        "wiredItems": [
+            "营业执照在有效期内",
+            "安全生产许可证在有效期内",
+        ],
         "wired": "部分接入",
         "wiredNote": "E1 核验正文有效期日期，并对照资质库缺件/过期；专业对口仍需人工确认",
         "engine": "e1_veto",
@@ -299,6 +308,9 @@ VETO_CHECK_POINTS = [
             "安考证与社保缴纳单位一致",
             "无在建项目任职承诺",
             "安全员、八大员社保证明齐全",
+        ],
+        "wiredItems": [
+            "项目经理注册单位与投标人一致",
         ],
         "wired": "部分接入",
         "wiredNote": "E1 按招标/正文关键词对照资质库人员与社保证明；不联网社保局",
@@ -339,6 +351,11 @@ VETO_CHECK_POINTS = [
             "投标保证金按招标要求提交",
             "签字盖章、骑缝章、法人授权书已实质完成",
             "暗标文件无单位名称、徽标、作者信息",
+        ],
+        "wiredItems": [
+            "投标有效期满足招标天数",
+            "投标保证金按招标要求提交",
+            "签字盖章、骑缝章、法人授权书已实质完成",
         ],
         "wired": "部分接入",
         "wiredNote": "E1 检查有效期天数、签章占位符、保证金关键词，暗标要求时对照资质库营业执照抬头扫描正文残留单位名；L5 检查文档作者属性。图片/徽标中的单位标识未自动扫描",
@@ -386,6 +403,13 @@ BUSINESS_CHECK_POINTS = [
             "竣工验收报告",
             "招标官网中标公示截图",
         ],
+        "wiredItems": [
+            "业绩数量、规模、时间齐全",
+            "合同原件或复印件",
+            "中标通知书",
+            "竣工验收报告",
+            "招标官网中标公示截图",
+        ],
         "wired": "部分接入",
         "wiredNote": "E2 在正文出现「业绩」等关键词时核验四件套关键词，并检查该业绩是否附带数量/规模/时间量化数字；数据真实性仍需人工核对",
         "engine": "e2_business",
@@ -395,6 +419,7 @@ BUSINESS_CHECK_POINTS = [
         "category": "财务指标",
         "point": "近三年资产负债率、营收、现金流、审计报告完整清晰，数据前后一致",
         "items": ["资产负债率不超过上限", "近三年营收可核验", "现金流与审计报告完整", "数据前后一致"],
+        "wiredItems": ["资产负债率不超过上限", "近三年营收可核验", "现金流与审计报告完整"],
         "wired": "部分接入",
         "wiredNote": "E2 核验正文中的资产负债率是否超过规则页上限（评标尺子优先），并在涉及财务指标时核验营收/现金流/审计报告关键词完整性；数据真实性不联网核验",
         "engine": "e2_business",
@@ -404,6 +429,7 @@ BUSINESS_CHECK_POINTS = [
         "category": "荣誉认证",
         "point": "企业荣誉、奖项、ISO 体系认证按要求附有效期内证书",
         "items": ["荣誉奖项按招标要求附证", "ISO 体系认证在有效期内"],
+        "wiredItems": ["荣誉奖项按招标要求附证", "ISO 体系认证在有效期内"],
         "wired": "部分接入",
         "wiredNote": "E2 对照资质库荣誉/ISO 条目及有效期，核验到系统内部数据的最大程度；不联网颁证机构核实真伪",
         "engine": "e2_business",
@@ -413,6 +439,7 @@ BUSINESS_CHECK_POINTS = [
         "category": "本地化服务",
         "point": "本地分支机构、售后网点、备品备件库、应急响应方案",
         "items": ["本地分支机构", "售后网点", "备品备件库", "应急响应方案"],
+        "wiredItems": ["本地分支机构", "售后网点", "备品备件库", "应急响应方案"],
         "wired": "部分接入",
         "wiredNote": "E2 在正文写到本地化服务时核验分支/网点/备品/应急是否写全",
         "engine": "e2_business",
@@ -422,6 +449,7 @@ BUSINESS_CHECK_POINTS = [
         "category": "人员配置",
         "point": "岗位齐全、证书对口、持证人数达标",
         "items": ["岗位齐全", "证书专业对口", "持证人数达标"],
+        "wiredItems": ["岗位齐全", "持证人数达标"],
         "wired": "部分接入",
         "wiredNote": "E2 对照资质库人员证书是否已录入；若能从招标文件正则解析出岗位人数要求，进一步核验库内持证人数是否达标，解析不出时仅核验是否有条目",
         "engine": "e2_business",
@@ -431,6 +459,7 @@ BUSINESS_CHECK_POINTS = [
         "category": "设备机械",
         "point": "清单齐全，型号参数数量符合需求，附购置发票或租赁协议",
         "items": ["设备清单齐全", "型号参数数量符合需求", "购置发票或租赁协议"],
+        "wiredItems": ["设备清单齐全", "购置发票或租赁协议"],
         "wired": "部分接入",
         "wiredNote": "E2 对照资质库设备台账及发票/租赁关键词；若能从招标文件正则解析出设备数量要求，进一步核验台账数量是否达标；型号参数真实性不联网核验",
         "engine": "e2_business",
@@ -440,6 +469,7 @@ BUSINESS_CHECK_POINTS = [
         "category": "信用记录",
         "point": "信用中国、中国政府采购网无失信，附查询截图",
         "items": ["信用中国无失信", "中国政府采购网无失信", "附查询截图"],
+        "wiredItems": ["附查询截图"],
         "wired": "部分接入",
         "wiredNote": "E2 对照资质库信用材料，核验到系统内部数据的最大程度；不联网信用中国或政府采购网查询实时结果",
         "engine": "e2_business",
@@ -449,6 +479,7 @@ BUSINESS_CHECK_POINTS = [
 TECH_SCORE_MODULES = [
     {
         "key": "org_outline",
+        "score": 15,  # 8 项确定性核验模块的满分权重，合计 100，供 AI 预审报告展示「模块名 N 分」
         "module": "施工组织总纲",
         "logic": "工程概况、重难点结合本项目实际；开篇绑定本项目全称+独有特征",
         "category": "施工组织总纲",
@@ -460,6 +491,7 @@ TECH_SCORE_MODULES = [
     },
     {
         "key": "special_plan",
+        "score": 15,
         "module": "专项施工方案",
         "logic": "分部分项方案完整；关键工序、危大工程单独阐述并引用最新规范条文号",
         "category": "专项施工方案",
@@ -471,6 +503,7 @@ TECH_SCORE_MODULES = [
     },
     {
         "key": "schedule",
+        "score": 15,
         "module": "工期管控",
         "logic": "必须附双代号网络图或横道图，纯文字不认；关键线路清晰",
         "category": "工期管控",
@@ -482,6 +515,7 @@ TECH_SCORE_MODULES = [
     },
     {
         "key": "quality",
+        "score": 15,
         "module": "质量管理",
         "logic": "质保体系、三级交底、样板引路、验收流程完整；引用具体规范条文号",
         "category": "质量管理",
@@ -493,6 +527,7 @@ TECH_SCORE_MODULES = [
     },
     {
         "key": "safety",
+        "score": 15,
         "module": "安全文明",
         "logic": "安全责任制、危险源清单、专项防护；属地扬尘六个 100%、临边 1.2m 等细则写入",
         "category": "安全文明",
@@ -504,6 +539,7 @@ TECH_SCORE_MODULES = [
     },
     {
         "key": "environment",
+        "score": 10,
         "module": "环保水保",
         "logic": "噪声治理、污水固废处理具体；绿色施工四节一环保量化",
         "category": "环保水保",
@@ -515,6 +551,7 @@ TECH_SCORE_MODULES = [
     },
     {
         "key": "resources",
+        "score": 10,
         "module": "资源配置",
         "logic": "劳动力动态曲线、材料采购、机械进退场全部量化，数据可交叉验证",
         "category": "资源配置",
@@ -526,6 +563,7 @@ TECH_SCORE_MODULES = [
     },
     {
         "key": "after_sales",
+        "score": 5,
         "module": "售后质保",
         "logic": "维修响应时限（2小时到场/24小时修复）、巡检计划、备品备件清单齐全",
         "category": "售后质保",
@@ -570,6 +608,9 @@ DUP_CHECK_POINTS = [
         "category": "虚词自查五规则",
         "point": "数字、动作、对象、验证、密度五条，作为技术标语义评审约束",
         "items": list(FILLER_SELF_CHECK_RULES),
+        "wiredItems": [
+            "密度规则：全文虚词密度不超过 5%，每页至少 1 个数据或图表支撑",
+        ],
         "wired": "部分接入",
         "wiredNote": "密度由 E4 硬判定；其余四条写入 E3 Prompt，由大模型参考给分，不是逐条规则引擎",
         "engine": "e3_semantic",
@@ -579,6 +620,7 @@ DUP_CHECK_POINTS = [
         "category": "全文模板查重",
         "point": "全文与既有模板相似度应 ≤30%，超过 42% 技术标整体降档",
         "items": ["安全线默认 30%", "风险线默认 42%", "对内置模板库自检"],
+        "wiredItems": ["安全线默认 30%", "风险线默认 42%", "对内置模板库自检"],
         "wired": "部分接入",
         "wiredNote": "E4 与内置示例模板库及本企业历史标书做相似度比对，不比对其他投标人",
         "engine": "e4_duplicate_filler",
@@ -588,6 +630,7 @@ DUP_CHECK_POINTS = [
         "category": "重难点/四新专项查重",
         "point": "重难点、四新等专项章节相似度应 ≤20%，超过 40% 该小节清零",
         "items": ["安全线默认 20%", "风险线默认 40%", "命中重难点/四新标题后再比"],
+        "wiredItems": ["安全线默认 20%", "风险线默认 40%", "命中重难点/四新标题后再比"],
         "wired": "部分接入",
         "wiredNote": "E4 在出现重难点/四新等提示语的段落上做专项比对；阈值在「查重阈值」tab 可改",
         "engine": "e4_duplicate_filler",
@@ -606,6 +649,7 @@ DUP_CHECK_POINTS = [
         "category": "暗标身份残留",
         "point": "清除文档属性中的作者/单位/软件元数据，避免暗标可识别身份",
         "items": ["文档作者属性", "最后修改者", "单位/软件元数据"],
+        "wiredItems": ["文档作者属性"],
         "wired": "部分接入",
         "wiredNote": "E5 检查 Word 核心作者属性；图片内嵌单位名与正文暗标单位名未自动扫描",
         "engine": "e5_layout",
@@ -627,6 +671,7 @@ HIGH_SCORE_STRATEGIES = [
         "category": "数据代替定性空话",
         "point": "虚词全部替换为可量化表述",
         "items": ["删除加强/确保等态度词", "改为数量、时限、频次、百分比"],
+        "wiredItems": ["删除加强/确保等态度词"],
         "wired": "部分接入",
         "wiredNote": "E4 命中虚词时给出改写建议；不自动改写全文",
         "engine": "e4_duplicate_filler",
@@ -636,6 +681,7 @@ HIGH_SCORE_STRATEGIES = [
         "category": "原创度控制红线",
         "point": "全文查重≤30%，重难点章节≤20%",
         "items": ["全文 ≤30%", "重难点 ≤20%"],
+        "wiredItems": ["全文 ≤30%", "重难点 ≤20%"],
         "wired": "部分接入",
         "wiredNote": "与「专项检查」全文/专项查重同一套 E4 阈值，对内置模板库自检",
         "engine": "e4_duplicate_filler",
@@ -645,6 +691,7 @@ HIGH_SCORE_STRATEGIES = [
         "category": "本地化策略优先",
         "point": "本地业绩、本地团队、本地售后列明",
         "items": ["本地业绩", "本地团队", "本地售后"],
+        "wiredItems": ["本地售后"],
         "wired": "部分接入",
         "wiredNote": "属地细则包启用后由 E2 核验量化条款；本地业绩真实性未自动核验",
         "engine": "e2_business",
@@ -654,6 +701,7 @@ HIGH_SCORE_STRATEGIES = [
         "category": "严格结构化排版",
         "point": "三级标题 1→1.1→1.1.1，目录自动生成",
         "items": ["标题层级连续", "目录使用自动域", "页码与正文一致"],
+        "wiredItems": ["标题层级连续", "目录使用自动域"],
         "wired": "部分接入",
         "wiredNote": "E5 检查标题跳级、目录域、修订痕迹和批注",
         "engine": "e5_layout",
@@ -663,6 +711,7 @@ HIGH_SCORE_STRATEGIES = [
         "category": "数据链逻辑闭环",
         "point": "高峰人数与宿舍面积、塔吊覆盖与平面图可交叉验证",
         "items": ["劳动力与临建面积匹配", "机械覆盖与平面图匹配"],
+        "wiredItems": ["劳动力与临建面积匹配"],
         "wired": "部分接入",
         "wiredNote": "E2 在高峰人数与宿舍/临建面积同时写出时按人均 4㎡ 交叉验算；塔吊覆盖未自动验算",
         "engine": "e2_business",
@@ -672,6 +721,7 @@ HIGH_SCORE_STRATEGIES = [
         "category": "图表自制规范",
         "point": "清除图片属性中的作者/单位/软件元数据",
         "items": ["清除作者", "清除单位", "清除软件元数据"],
+        "wiredItems": ["清除作者"],
         "wired": "部分接入",
         "wiredNote": "E5 检查文档级作者属性；不解析每张图片的 EXIF",
         "engine": "e5_layout",
@@ -681,6 +731,7 @@ HIGH_SCORE_STRATEGIES = [
         "category": "规范引用精准",
         "point": "精确到条文号，不使用废止规范",
         "items": ["引用到条文号", "不使用废止规范"],
+        "wiredItems": ["引用到条文号"],
         "wired": "部分接入",
         "wiredNote": "E3 Prompt 要求引用条文号；E2 在正文同时出现规范编号与「废止」时提示人工核对。本系统无国家现行规范库",
         "engine": "e2_business",
@@ -699,6 +750,7 @@ HIGH_SCORE_STRATEGIES = [
         "category": "一票否决零容错",
         "point": "资质、人员、社保、签字、盖章、保证金、有效期、报价专人交叉复核",
         "items": ["资质", "人员社保", "签字盖章", "保证金", "有效期", "报价"],
+        "wiredItems": ["资质", "签字盖章", "保证金", "有效期", "报价"],
         "wired": "部分接入",
         "wiredNote": "与「一票否决」tab 同一口径：星号/报价/有效期/保证金关键词已接入，人员社保对照资质库且不联网社保局",
         "engine": "e1_veto",
@@ -711,6 +763,37 @@ RULE_CATALOGS = {
     "dup_check": DUP_CHECK_POINTS,
     "strategy": HIGH_SCORE_STRATEGIES,
 }
+
+
+def resolve_wired_items(spec: dict) -> list[str]:
+    """卡片上高亮的已接入子项：接入判定=全部；部分接入=wiredItems；仅对照=空。"""
+    items = [str(x) for x in (spec.get("items") or [])]
+    wired = spec.get("wired") or "仅对照"
+    explicit = spec.get("wiredItems")
+    if isinstance(explicit, list):
+        allow = {str(x) for x in explicit}
+        return [x for x in items if x in allow]
+    if wired == "接入判定":
+        return list(items)
+    return []
+
+
+def veto_wired_items(key: str, wired: str, items: list[str]) -> list[str]:
+    for spec in VETO_CHECK_POINTS:
+        if spec.get("key") == key:
+            return resolve_wired_items(spec)
+    if wired == "接入判定":
+        return list(items)
+    return []
+
+
+def catalog_wired_items(kind: str, key: str, wired: str, items: list[str]) -> list[str]:
+    for spec in RULE_CATALOGS.get(kind) or []:
+        if spec.get("key") == key:
+            return resolve_wired_items(spec)
+    if wired == "接入判定":
+        return list(items)
+    return []
 
 LOCAL_RULE_PACKAGES = [
     {

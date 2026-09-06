@@ -316,10 +316,10 @@ def _build_system_prompt(
 
 属地合规细节（合肥/安徽常见）：临边防护高度 1.2m、扫地杆距地 ≤20cm、扬尘六个 100%。若正文涉及对应主题但缺少量化，在合规性或可落地性中扣分。
 
-高分策略参考（用于给改写建议，不作为虚构加分）：
+高分策略（改写建议必须点名其中一条，并说明按该条款写可拿高分）：
 {strategy_lines}
 
-注意：完整标书已按章节拆分后全部送审。完整性只评本段应有内容是否写清，禁止因为看不到前后章节而给低分。issues 每段最多 8 条，优先降档/扣分，excerpt 必须摘自本段原文。
+注意：完整标书已按章节拆分后全部送审。完整性只评本段应有内容是否写清，禁止因为看不到前后章节而给低分。issues 每段最多 8 条，优先降档/扣分。excerpt 必须摘自本段【正文】，禁止摘目录行或带点线页码的目录条目。location 写章节名，不要写「目录」。
 
 请仅返回严格的 JSON，不要包含任何其他文字说明，格式如下：
 {{
@@ -331,7 +331,7 @@ def _build_system_prompt(
     "standardization": {{"score": 0-100, "reason": "..."}}
   }},
   "issues": [
-    {{"severity": "扣分|降档|建议", "location": "章节/位置描述", "excerpt": "原文片段", "suggestion": "改写建议"}}
+    {{"severity": "扣分|降档|建议", "location": "章节名/正文位置", "excerpt": "正文原句", "suggestion": "【预审规则-高分策略：《分类》】条款：……。按此写法可拿高分。随后给出可直接替换原文的句子", "strategyKey": "quantify", "applyText": "可直接替换 excerpt 的正文句子"}}
   ]
 }}
 """
@@ -361,6 +361,8 @@ def _normalize(data: dict, weights: dict) -> dict:
                 "rule": "五维语义评审（AI 生成，供参考）",
                 "tenderQuote": "",
                 "suggestion": item.get("suggestion", ""),
+                "strategyKey": item.get("strategyKey") or "",
+                "applyText": item.get("applyText") or "",
                 "confidence": 0.6,
             }
         )

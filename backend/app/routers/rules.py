@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
 from ..db import get_db
+from ..engines.rules_data import catalog_wired_items, veto_wired_items
 from ..models import CatalogRule, FillerWordRule, RulePackage, ThresholdRule, User, VetoRule, WeightTemplate
 from ..permissions import PERM_SETTINGS, require_perm
 from ..schemas import (
@@ -269,12 +270,14 @@ def update_rule_package(
 
 def _veto_to_out(row: VetoRule) -> VetoRuleOut:
     wired = row.wired if row.wired in ("接入判定", "部分接入", "仅对照") else "仅对照"
+    items = row.items_json or []
     return VetoRuleOut(
         id=row.id,
         key=row.key,
         category=row.category,
         point=row.point,
-        items=row.items_json or [],
+        items=items,
+        wiredItems=veto_wired_items(row.key, wired, items),
         wired=wired,
         wiredNote=row.wired_note or "",
         engine=row.engine or "",
@@ -312,13 +315,15 @@ CATALOG_KINDS = ("business", "tech", "dup_check", "strategy")
 def _catalog_to_out(row: CatalogRule) -> CatalogRuleOut:
     wired = row.wired if row.wired in ("接入判定", "部分接入", "仅对照") else "仅对照"
     kind = row.kind if row.kind in CATALOG_KINDS else "business"
+    items = row.items_json or []
     return CatalogRuleOut(
         id=row.id,
         kind=kind,
         key=row.key,
         category=row.category,
         point=row.point,
-        items=row.items_json or [],
+        items=items,
+        wiredItems=catalog_wired_items(kind, row.key, wired, items),
         wired=wired,
         wiredNote=row.wired_note or "",
         engine=row.engine or "",

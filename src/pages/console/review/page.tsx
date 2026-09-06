@@ -13,6 +13,7 @@ import { useProjects } from "@/context/ProjectContext";
 import { useAuth } from "@/context/AuthContext";
 import {
   ApiError,
+  applyBidRevisionSuggestion,
   autosaveBidRevisionContent,
   createBidRevisionVersion,
   exportBidRevisionDocx,
@@ -41,6 +42,7 @@ export default function ReviewPage() {
   const currentProject = projects.find((p) => p.id === selectedId);
 
   const [editMode, setEditMode] = useState(false);
+  const [editorMounted, setEditorMounted] = useState(false);
   const [activeIssueId, setActiveIssueId] = useState<string | null>(null);
   const [activeSectionId, setActiveSectionId] = useState<string | null>(null);
   const [saveOpen, setSaveOpen] = useState(false);
@@ -55,6 +57,7 @@ export default function ReviewPage() {
   const [reloadKey, setReloadKey] = useState(0);
   const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [applyingIssueId, setApplyingIssueId] = useState<string | null>(null);
 
   const editorRef = useRef<WordEditorHandle>(null);
   const viewerRef = useRef<BidDocxViewerHandle>(null);
@@ -215,6 +218,24 @@ export default function ReviewPage() {
           : prev,
       );
       showToast(err instanceof ApiError ? err.message : "更新已修复状态失败", "error");
+    }
+  };
+
+  const applySuggestion = async (issueId: string) => {
+    if (!revision) return;
+    setApplyingIssueId(issueId);
+    try {
+      const next = await applyBidRevisionSuggestion(revision.id, issueId);
+      setRevision(next);
+      setEditorMounted(true);
+      setEditMode(true);
+      setReloadKey((k) => k + 1);
+      setActiveIssueId(issueId);
+      showToast("已按高分策略条款将整改建议写入正文，请在「改写」中核对");
+    } catch (err) {
+      showToast(err instanceof ApiError ? err.message : "写入原文失败，请稍后重试或手工改写", "error");
+    } finally {
+      setApplyingIssueId(null);
     }
   };
 
@@ -451,7 +472,10 @@ export default function ReviewPage() {
             </button>
             <button
               type="button"
-              onClick={() => setEditMode(true)}
+              onClick={() => {
+                setEditorMounted(true);
+                setEditMode(true);
+              }}
               className={`font-label flex cursor-pointer items-center gap-1 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
                 editMode ? "bg-gradient-to-r from-primary-500 to-primary-600 text-background-50" : "text-foreground-600 hover:text-foreground-900"
               }`}
@@ -516,7 +540,7 @@ export default function ReviewPage() {
               issues={revision.issues}
               editMode={editMode}
               onIssueClick={jumpAll}
-              initialContentState={reloadKey > 0 ? revision.contentState : null}
+              initialContentState={revision.contentState}
               onAutosave={handleAutosave}
               layout={revision.layout}
             />
@@ -525,9 +549,12 @@ export default function ReviewPage() {
         <IssuePanel
           issues={revision.issues}
           activeIssueId={activeIssueId}
+          applyingIssueId={applyingIssueId}
+          anchoredIds={Object.keys(issueSectionMap)}
           onIssueClick={jumpToIssue}
           onJumpAll={jumpAll}
           onToggleResolved={toggleIssueResolved}
+          onApplySuggestion={applySuggestion}
         />
       </div>
 

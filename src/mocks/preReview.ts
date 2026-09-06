@@ -20,6 +20,11 @@ export interface PreReviewIssue {
   tenderQuote: string;
   suggestion: string;
   resolved?: boolean;
+  strategyKey?: string;
+  strategyCategory?: string;
+  strategyPoint?: string;
+  strategyClauses?: string[];
+  applyText?: string;
 }
 
 export const preReviewLevels: PreReviewLevel[] = [

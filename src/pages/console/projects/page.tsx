@@ -88,6 +88,7 @@ export default function ProjectsPage() {
             code: values.code.trim(),
             name: values.name.trim(),
             type: values.type,
+            category: values.category,
             owner: values.owner,
             budget: values.budget ? `¥ ${values.budget} 万` : "待定",
             deadline: values.deadline || "2026-12-31",
@@ -111,6 +112,7 @@ export default function ProjectsPage() {
         code: values.code.trim(),
         name: values.name.trim(),
         type: values.type,
+        category: values.category,
         owner: values.owner,
         budget: values.budget,
         deadline: values.deadline || "2026-12-31",
@@ -296,7 +298,14 @@ export default function ProjectsPage() {
                       <div className="mt-0.5 text-xs text-foreground-500">编号 {project.code}</div>
                     </td>
                     <td className="px-3 py-3.5">
-                      <TypeBadge type={project.type} />
+                      <div className="flex flex-wrap items-center gap-1">
+                        <TypeBadge type={project.type} />
+                        {project.category === "工程类" && (
+                          <span className="inline-flex items-center whitespace-nowrap rounded-md border border-primary-200 bg-primary-50 px-2 py-0.5 text-xs font-medium text-primary-600">
+                            工程类
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-3 py-3.5">
                       <span className="flex items-center gap-2 whitespace-nowrap text-sm text-foreground-700">

@@ -47,7 +47,7 @@ export default function LoginPage() {
       return;
     }
     if (!email.trim() || !password) {
-      setError("请填写邮箱和密码");
+      setError("请填写账号和密码");
       return;
     }
     setLoading(true);
@@ -220,19 +220,20 @@ export default function LoginPage() {
               </div>
             )}
 
-            {/* 邮箱 */}
+            {/* 账号 */}
             <div>
               <label className="font-label mb-1.5 block text-[13px] font-semibold text-foreground-800">
-                邮箱账号
+                账号
               </label>
               <div className="relative">
-                <i className="ri-mail-line absolute left-3 top-1/2 -translate-y-1/2 text-sm text-foreground-500"></i>
+                <i className="ri-user-3-line absolute left-3 top-1/2 -translate-y-1/2 text-sm text-foreground-500"></i>
                 <input
-                  type="email"
-                  name="email"
+                  type="text"
+                  name="username"
+                  autoComplete="username"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@company.com"
+                  placeholder="邮箱、手机号或工号均可"
                   className="h-11 w-full rounded-lg border border-background-300 bg-background-100 pl-9 pr-3 text-sm text-foreground-900 placeholder:text-foreground-500 outline-none transition-all focus:border-primary-400 focus:ring-2 focus:ring-primary-400/20"
                 />
               </div>

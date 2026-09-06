@@ -1,4 +1,5 @@
 import type { PreReviewLevel, PreReviewIssue } from "@/mocks/preReview";
+import type { TechModuleScore } from "@/lib/api";
 
 interface PreReviewReportProps {
   projectName: string;
@@ -6,6 +7,7 @@ interface PreReviewReportProps {
   levels: PreReviewLevel[];
   issues: PreReviewIssue[];
   dimensions: { name: string; weight: number; score: number }[];
+  techModules?: TechModuleScore[];
   overall: number;
   round: number;
   onExport: () => void;
@@ -34,6 +36,7 @@ export default function PreReviewReport({
   levels,
   issues,
   dimensions,
+  techModules = [],
   overall,
   round,
   onExport,
@@ -54,7 +57,7 @@ export default function PreReviewReport({
             <i className="ri-shield-check-line text-lg"></i>
           </span>
           <div>
-            <h3 className="font-heading text-base font-semibold tracking-wide text-foreground-950">AI 智能预审报告</h3>
+            <h3 className="font-heading text-base font-semibold tracking-wide text-foreground-950">青天预审报告</h3>
             <p className="text-xs text-foreground-500">智标云 AI · 自动生成于 2026-08-17 15:40 · 第 {round} 轮预审{isSecondReview ? "（修改后）" : ""}</p>
           </div>
         </div>
@@ -197,6 +200,43 @@ export default function PreReviewReport({
             ))}
           </div>
         </div>
+
+        {/* 技术评分模块核验（8 项）：与规则页「技术评分」tab 一一对应 */}
+        {techModules.length > 0 && (
+          <>
+            <h4 className="mb-2.5 mt-6 flex items-center gap-1.5 text-sm font-semibold text-foreground-900">
+              <i className="ri-cpu-line text-primary-500 text-sm"></i>
+              技术评分模块核验（8 项确定性核验）
+            </h4>
+            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+              {techModules.map((m) => (
+                <div key={m.key} className="flex items-start justify-between gap-3 rounded-lg border border-background-200 bg-background-50 p-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-foreground-900">{m.module}</span>
+                      <span
+                        className={`font-label whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                          m.status === "达标"
+                            ? "bg-primary-50 text-primary-600"
+                            : m.status === "建议"
+                              ? "bg-secondary-100 text-secondary-600"
+                              : "bg-accent-50 text-accent-600"
+                        }`}
+                      >
+                        {m.status}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs leading-relaxed text-foreground-500">{m.summary}</p>
+                  </div>
+                  <div className="shrink-0 text-right">
+                    <div className="font-heading text-sm font-bold text-foreground-900">{m.score}</div>
+                    <div className="text-[10px] text-foreground-500">满分 {m.maxScore}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
 
         {/* 四、预审问题与原文对照 */}
         <h4 className="mb-2.5 mt-6 flex items-center gap-1.5 text-sm font-semibold text-foreground-900">

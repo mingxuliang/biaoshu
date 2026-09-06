@@ -1,7 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..auth import create_access_token, get_current_user, hash_password, verify_password
+from ..auth import (
+    create_access_token,
+    find_user_by_account,
+    get_current_user,
+    hash_password,
+    normalize_account,
+    verify_password,
+)
 from ..db import get_db
 from ..models import User
 from ..schemas import AuthOut, LoginIn, RegisterIn, UpdateProfileIn, UserOut
@@ -23,16 +30,17 @@ def _to_user_out(user: User) -> UserOut:
 
 @router.post("/register", response_model=AuthOut)
 def register(payload: RegisterIn, db: Session = Depends(get_db)) -> AuthOut:
-    email = payload.email.strip().lower()
-    if not email or not payload.password:
-        raise HTTPException(400, "邮箱和密码不能为空")
-    existing = db.query(User).filter(User.email == email).first()
-    if existing:
-        raise HTTPException(409, "该邮箱已注册，请直接登录")
+    account = normalize_account(payload.email)
+    if not account or not payload.password:
+        raise HTTPException(400, "账号和密码不能为空")
+    if any(ch.isspace() for ch in account) or len(account) > 64:
+        raise HTTPException(400, "账号不能含空格，且不超过 64 位")
+    if find_user_by_account(db, account):
+        raise HTTPException(409, "该账号已注册，请直接登录")
 
     user = User(
-        name=payload.name.strip() or email,
-        email=email,
+        name=payload.name.strip() or account,
+        email=account,
         password_hash=hash_password(payload.password),
         phone=payload.phone,
         company=payload.company,
@@ -49,10 +57,9 @@ def register(payload: RegisterIn, db: Session = Depends(get_db)) -> AuthOut:
 
 @router.post("/login", response_model=AuthOut)
 def login(payload: LoginIn, db: Session = Depends(get_db)) -> AuthOut:
-    email = payload.email.strip().lower()
-    user = db.query(User).filter(User.email == email).first()
+    user = find_user_by_account(db, payload.email)
     if not user or not verify_password(payload.password, user.password_hash):
-        raise HTTPException(401, "邮箱或密码不正确")
+        raise HTTPException(401, "账号或密码不正确")
     if getattr(user, "disabled", False):
         raise HTTPException(401, "账号已停用，请联系管理员")
 
@@ -74,12 +81,14 @@ def update_me(
     if payload.name is not None:
         current_user.name = payload.name.strip() or current_user.name
     if payload.email is not None:
-        new_email = payload.email.strip().lower()
-        if new_email and new_email != current_user.email:
-            existing = db.query(User).filter(User.email == new_email).first()
+        new_account = normalize_account(payload.email)
+        if new_account and new_account != (current_user.email or "").lower():
+            if any(ch.isspace() for ch in new_account) or len(new_account) > 64:
+                raise HTTPException(400, "账号不能含空格，且不超过 64 位")
+            existing = find_user_by_account(db, new_account)
             if existing and existing.id != current_user.id:
-                raise HTTPException(409, "该邮箱已被其他账号使用")
-            current_user.email = new_email
+                raise HTTPException(409, "该账号已被其他用户使用")
+            current_user.email = new_account
     if payload.phone is not None:
         current_user.phone = payload.phone
     if payload.company is not None:

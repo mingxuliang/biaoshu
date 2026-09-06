@@ -102,9 +102,9 @@ export default function ProfileModal({ open, onClose }: ProfileModalProps) {
             </div>
             <div>
               <label className="font-label mb-1.5 block text-[13px] font-medium text-foreground-800">
-                邮箱
+                账号
               </label>
-              <input type="email" name="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" className={inputCls} />
+              <input type="text" name="username" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="邮箱、手机号或工号均可" className={inputCls} />
             </div>
             <div>
               <label className="font-label mb-1.5 block text-[13px] font-medium text-foreground-800">

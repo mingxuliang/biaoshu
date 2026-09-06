@@ -65,8 +65,10 @@ export default function TeamPage() {
     name: "",
     email: "",
     phone: "",
+    password: "",
     role: "撰写专家" as MemberRole,
   });
+  const [showInvitePwd, setShowInvitePwd] = useState(false);
   const [editForm, setEditForm] = useState({ name: "", phone: "", role: "撰写专家" as string });
 
   const showToast = (message: string, type: ToastState["type"] = "success") => {
@@ -121,7 +123,11 @@ export default function TeamPage() {
     e.preventDefault();
     if (!token) return;
     if (!form.name.trim() || !form.email.trim()) {
-      showToast("请填写姓名与邮箱", "error");
+      showToast("请填写姓名与账号", "error");
+      return;
+    }
+    if (form.password.trim().length < 6) {
+      showToast("请设置至少 6 位登录密码", "error");
       return;
     }
     setSubmitting(true);
@@ -131,11 +137,13 @@ export default function TeamPage() {
         email: form.email.trim(),
         phone: form.phone.trim(),
         role: form.role,
+        password: form.password.trim(),
       });
       setInviteOpen(false);
-      setForm({ name: "", email: "", phone: "", role: "撰写专家" });
+      setForm({ name: "", email: "", phone: "", password: "", role: "撰写专家" });
+      setShowInvitePwd(false);
       await reload();
-      showToast(`已创建账号 ${created.email}，初始密码 ${created.initialPassword}（请自行告知对方）`);
+      showToast(`已创建账号 ${created.email}，请将密码告知对方（系统不发送邮件）`);
     } catch (err) {
       showToast(err instanceof ApiError ? err.message : "邀请失败", "error");
     } finally {
@@ -233,7 +241,7 @@ export default function TeamPage() {
             type="text"
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
-            placeholder="搜索成员姓名或邮箱…"
+            placeholder="搜索成员姓名或账号…"
             className={`${inputCls} pl-9`}
           />
         </div>
@@ -391,7 +399,7 @@ export default function TeamPage() {
         open={inviteOpen}
         onClose={() => setInviteOpen(false)}
         title="邀请新成员"
-        subtitle="将直接创建可登录账号，初始密码为 123456，请自行告知对方（系统不发送邮件）"
+        subtitle="用账号和密码登录即可，账号可以是邮箱、手机号或任意数字工号（系统不发送邮件）"
       >
         <form onSubmit={handleInvite} className="space-y-4">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -427,15 +435,17 @@ export default function TeamPage() {
             </div>
           </div>
           <div>
-            <label className={labelCls} htmlFor="inv-email">
-              工作邮箱 <span className="text-accent-500">*</span>
+            <label className={labelCls} htmlFor="inv-account">
+              登录账号 <span className="text-accent-500">*</span>
             </label>
             <input
-              id="inv-email"
-              type="email"
+              id="inv-account"
+              type="text"
+              inputMode="text"
+              autoComplete="off"
               value={form.email}
               onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
-              placeholder="name@company.com"
+              placeholder="邮箱、手机号或工号均可，如 10086"
               className={inputCls}
             />
           </div>
@@ -451,6 +461,30 @@ export default function TeamPage() {
               placeholder="选填"
               className={inputCls}
             />
+          </div>
+          <div>
+            <label className={labelCls} htmlFor="inv-password">
+              登录密码 <span className="text-accent-500">*</span>
+            </label>
+            <div className="relative">
+              <input
+                id="inv-password"
+                type={showInvitePwd ? "text" : "password"}
+                value={form.password}
+                onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
+                placeholder="至少 6 位，创建后请告知对方"
+                autoComplete="new-password"
+                className={`${inputCls} pr-10`}
+              />
+              <button
+                type="button"
+                onClick={() => setShowInvitePwd((v) => !v)}
+                className="absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 cursor-pointer items-center justify-center text-foreground-500 transition-colors hover:text-foreground-800"
+                aria-label={showInvitePwd ? "隐藏密码" : "显示密码"}
+              >
+                <i className={`${showInvitePwd ? "ri-eye-off-line" : "ri-eye-line"} text-sm`}></i>
+              </button>
+            </div>
           </div>
           <div className="flex items-center justify-end gap-2 pt-2">
             <button

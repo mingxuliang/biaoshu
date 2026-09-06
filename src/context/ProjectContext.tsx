@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
-import type { Project, ProjectType } from "@/mocks/projects";
+import type { Project, ProjectCategory, ProjectType } from "@/mocks/projects";
 import { useAuth } from "@/context/AuthContext";
 import {
   createProject as apiCreateProject,
@@ -15,6 +15,7 @@ export interface NewProjectInput {
   name: string;
   code: string;
   type: ProjectType;
+  category?: ProjectCategory;
   budget?: string;
   deadline?: string;
   owner?: string;
@@ -68,6 +69,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         name: input.name,
         code: input.code,
         type: input.type,
+        category: input.category,
         budget: input.budget,
         deadline: input.deadline,
         owner: input.owner,

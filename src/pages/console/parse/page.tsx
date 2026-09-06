@@ -251,7 +251,7 @@ export default function ParsePage() {
           <div className="min-w-0">
             <div className="truncate text-sm font-medium text-foreground-900">{currentProject.name}</div>
             <div className="text-[11px] text-foreground-500">
-              编号 {currentProject.code} · {currentProject.type} ·{" "}
+              编号 {currentProject.code} · {currentProject.type} · {currentProject.category} ·{" "}
               {checklist
                 ? checklist.locked
                   ? `评标尺子已锁定 v${checklist.version}`
@@ -294,6 +294,7 @@ export default function ParsePage() {
             checklist={checklist}
             parsing={parsing}
             locking={locking}
+            category={currentProject.category}
             onLock={handleLock}
             onShare={async () => {
               try {

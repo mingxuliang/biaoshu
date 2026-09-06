@@ -55,12 +55,69 @@ class PreReviewIssueOut(BaseModel):
     tenderQuote: str
     suggestion: str
     resolved: bool = False
+    strategyKey: str = ""
+    strategyCategory: str = ""
+    strategyPoint: str = ""
+    strategyClauses: list[str] = []
+    applyText: str = ""
 
 
 class DimensionOut(BaseModel):
     name: str
     weight: int
     score: float
+
+
+class TechModuleOut(BaseModel):
+    """技术评分 8 模块（施工组织总纲/专项施工方案/工期管控…）逐项打分，
+    与规则页「技术评分」tab 的 8 张卡片一一对应，供预审报告直接展示
+    「模块名 N 分，缺项说明」，不再只笼统混在 issue 列表里。"""
+
+    key: str
+    module: str
+    maxScore: float
+    score: float
+    status: str
+    summary: str
+
+
+class TenderStrategyOut(BaseModel):
+    key: str
+    category: str
+    point: str
+    clauses: list[str] = []
+
+
+class TenderRuleItemOut(BaseModel):
+    id: str
+    group: str
+    name: str
+    rule: str
+    maxScore: float
+    score: float
+    status: str
+    grade: str = ""
+    evidence: str = ""
+    reason: str
+    suggestion: str
+    strategies: list[TenderStrategyOut] = []
+
+
+class TenderRuleGroupOut(BaseModel):
+    key: str
+    label: str
+    maxScore: float
+    score: float
+    items: list[TenderRuleItemOut] = []
+
+
+class TenderRuleReportOut(BaseModel):
+    judgeMode: bool = False
+    totalMax: float = 0
+    totalScore: float = 0
+    percent: float = 0
+    groups: list[TenderRuleGroupOut] = []
+    note: str = ""
 
 
 class ReviewReportOut(BaseModel):
@@ -72,6 +129,8 @@ class ReviewReportOut(BaseModel):
     light: Literal["绿", "橙", "红"]
     levels: list[PreReviewLevelOut]
     dimensions: list[DimensionOut]
+    techModules: list[TechModuleOut] = []
+    tenderRules: TenderRuleReportOut | None = None
     issues: list[PreReviewIssueOut]
 
 
@@ -248,6 +307,7 @@ class InviteUserIn(BaseModel):
     email: str
     phone: str = ""
     role: str = "撰写专家"
+    password: str = ""
 
 
 class InviteUserOut(TeamMemberOut):
@@ -333,6 +393,7 @@ class ProjectOut(BaseModel):
     code: str
     name: str
     type: Literal["工程", "政采", "医疗", "交通", "IT", "能源"]
+    category: Literal["软件服务类", "工程类"] = "软件服务类"
     owner: str
     budget: str
     deadline: str
@@ -348,6 +409,7 @@ class CreateProjectIn(BaseModel):
     name: str
     code: str
     type: Literal["工程", "政采", "医疗", "交通", "IT", "能源"]
+    category: Literal["软件服务类", "工程类"] = "软件服务类"
     budget: Optional[str] = None
     deadline: Optional[str] = None
     owner: Optional[str] = None
@@ -643,6 +705,7 @@ class UpdateProjectIn(BaseModel):
     name: Optional[str] = None
     code: Optional[str] = None
     type: Optional[Literal["工程", "政采", "医疗", "交通", "IT", "能源"]] = None
+    category: Optional[Literal["软件服务类", "工程类"]] = None
     owner: Optional[str] = None
     budget: Optional[str] = None
     deadline: Optional[str] = None
@@ -751,6 +814,7 @@ class VetoRuleOut(BaseModel):
     category: str
     point: str
     items: list[str] = []
+    wiredItems: list[str] = []
     wired: Literal["接入判定", "部分接入", "仅对照"]
     wiredNote: str = ""
     engine: str = ""
@@ -769,6 +833,7 @@ class CatalogRuleOut(BaseModel):
     category: str
     point: str
     items: list[str] = []
+    wiredItems: list[str] = []
     wired: Literal["接入判定", "部分接入", "仅对照"]
     wiredNote: str = ""
     engine: str = ""

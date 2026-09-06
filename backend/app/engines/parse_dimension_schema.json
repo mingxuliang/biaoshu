@@ -148,6 +148,38 @@
     ]
   },
   {
+    "key": "evalMethod",
+    "label": "评标办法",
+    "items": [
+      {
+        "id": "eval-tech",
+        "label": "技术评审标准",
+        "sections": [
+          {
+            "id": "et-1",
+            "title": "技术评审标准（完整原文）",
+            "rows": [
+              "评分因素与标准"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "eval-business",
+        "label": "商务标评分评审标准",
+        "sections": [
+          {
+            "id": "eb-1",
+            "title": "商务标评分评审标准（完整原文）",
+            "rows": [
+              "评分因素与标准"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
     "key": "review",
     "label": "评审要求",
     "items": [

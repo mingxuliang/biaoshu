@@ -348,7 +348,7 @@ export default function RulesPage() {
               icon="ri-alarm-warning-line"
               iconWrapClass="from-accent-400 to-accent-500"
               emptyText="暂无一票否决清单，请确认后端已完成规则入库"
-              footer="清单来自青天一票否决口径，页面展示对照项与当前引擎接入状态。「接入判定」会进入废标结论；「部分接入」只覆盖可自动核验的子项（社保局联网、图片徽标识别等无法全自动，请人工对照）。关闭开关后引擎将跳过该项检查。"
+              footer="清单来自青天一票否决口径。「接入判定」子项全部高亮并进入废标结论；「部分接入」卡片中蓝色为引擎已自动核验的子项，灰色为尚未接入、需人工对照的子项（如社保局联网、图片徽标识别）。关闭开关后引擎将跳过该项检查。"
               onToggle={toggleVeto}
             />
           )}
@@ -360,7 +360,7 @@ export default function RulesPage() {
               icon="ri-briefcase-4-line"
               iconWrapClass="from-secondary-400 to-secondary-500"
               emptyText="暂无商务自查清单，请确认后端已完成规则入库"
-              footer="青天第二层「商务标 AI 打分自查项」。业绩、财务、荣誉、本地化、人员、设备、信用均已接入商务核验（L2），仅联网外部机构核验部分保持人工对照。关闭开关后引擎将跳过该项检查。"
+              footer="青天第二层「商务标 AI 打分自查项」。蓝色标签为已接入商务核验（L2）的子项，灰色为仍需人工对照（如专业对口、联网查失信）。关闭开关后引擎将跳过该项检查。"
               onToggle={toggleCatalog}
             />
           )}
@@ -463,7 +463,7 @@ export default function RulesPage() {
               icon="ri-shield-check-line"
               iconWrapClass="from-amber-400 to-amber-500"
               emptyText="暂无专项检查清单，请确认后端已完成规则入库"
-              footer="青天第四层「AI 查重/防废标专项检查」。虚词密度、高危词句由 L4 接入判定；全文/专项查重比对内置模板库与本企业历史标书。跨项目阈值驱动本企业查重，不比对其他投标人。关闭开关后引擎将跳过该项检查。"
+              footer="青天第四层「AI 查重/防废标专项检查」。蓝色为引擎已自动核验的子项，灰色为未接入子项。虚词密度、高危词句由 L4 接入判定；全文/专项查重比对内置模板库与本企业历史标书。关闭开关后引擎将跳过该项检查。"
               onToggle={toggleCatalog}
             />
           )}
@@ -568,7 +568,7 @@ export default function RulesPage() {
               icon="ri-lightbulb-line"
               iconWrapClass="from-primary-500 to-primary-600"
               emptyText="暂无高分策略清单，请确认后端已完成规则入库"
-              footer="青天高分编制十条。已进入预审 Prompt 或版式/虚词/商务引擎；仅联网外部规范库核验部分仍为人工对照。关闭开关后引擎将跳过该项检查。"
+              footer="青天高分编制十条。蓝色为已进入预审引擎的子项，灰色为尚未自动核验、需人工对照的子项。关闭开关后引擎将跳过该项检查。"
               onToggle={toggleCatalog}
             />
           )}
@@ -676,6 +676,13 @@ function wiredBadgeClass(wired: VetoRule["wired"]) {
   return "border-secondary-200 bg-secondary-100 text-secondary-500";
 }
 
+function itemIsWired(rule: VetoRule, item: string): boolean {
+  if (Array.isArray(rule.wiredItems)) {
+    return rule.wiredItems.includes(item);
+  }
+  return rule.wired === "接入判定";
+}
+
 function CatalogGrid<T extends VetoRule>({
   rules,
   icon,
@@ -736,16 +743,36 @@ function CatalogGrid<T extends VetoRule>({
             </div>
           </div>
           <div className="mt-3 flex flex-wrap gap-1.5">
-            {rule.items.map((item) => (
-              <span
-                key={item}
-                className="inline-flex items-center gap-1 rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700"
-              >
-                <i className="ri-checkbox-circle-line"></i>
-                {item}
-              </span>
-            ))}
+            {rule.items.map((item) => {
+              const wired = itemIsWired(rule, item);
+              return (
+                <span
+                  key={item}
+                  title={wired ? "已接入自动核验" : "尚未接入，需人工对照"}
+                  className={
+                    wired
+                      ? "inline-flex items-center gap-1 rounded bg-primary-500 px-1.5 py-0.5 text-[10px] text-white"
+                      : "inline-flex items-center gap-1 rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700"
+                  }
+                >
+                  <i className={wired ? "ri-checkbox-circle-fill" : "ri-checkbox-blank-circle-line"}></i>
+                  {item}
+                </span>
+              );
+            })}
           </div>
+          {rule.wired === "部分接入" && (
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-[10px] text-foreground-500">
+              <span className="inline-flex items-center gap-1">
+                <span className="h-2 w-2 rounded-sm bg-primary-500" />
+                已接入
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="h-2 w-2 rounded-sm bg-secondary-200" />
+                未接入
+              </span>
+            </div>
+          )}
           {rule.wiredNote && (
             <div className="mt-3 text-[11px] leading-5 text-foreground-500">{rule.wiredNote}</div>
           )}

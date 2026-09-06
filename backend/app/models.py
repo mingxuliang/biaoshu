@@ -52,6 +52,7 @@ class Project(Base):
     code = Column(String, nullable=False)
     name = Column(String, nullable=False)
     type = Column(String, nullable=False)
+    category = Column(String, default="软件服务类")  # 软件服务类 | 工程类：决定招标解析用哪套指标骨架
     owner = Column(String, default="")
     owner_id = Column(String, ForeignKey("users.id"), nullable=True)
     budget = Column(String, default="待定")
@@ -133,6 +134,8 @@ class ReviewRun(Base):
 
     levels_json = Column(JSON, default=list)
     dimensions_json = Column(JSON, default=list)
+    tech_modules_json = Column(JSON, default=list)  # 技术评分 8 模块逐项打分明细，供预审报告展示
+    tender_rules_json = Column(JSON, default=dict)  # 招标书自带商务/技术评分规则的模拟评标报告
 
     error_message = Column(Text, nullable=True)
     started_at = Column(DateTime, default=datetime.utcnow)

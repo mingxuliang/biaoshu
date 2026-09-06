@@ -6,6 +6,7 @@ interface ParseResultsProps {
   checklist: Checklist | null;
   parsing: boolean;
   locking: boolean;
+  category?: "软件服务类" | "工程类" | string;
   onLock: () => void;
   onShare: () => void;
   onDownload: () => void;
@@ -14,6 +15,7 @@ interface ParseResultsProps {
 const DIM_ICONS: Record<string, string> = {
   basic: "ri-information-line",
   qualification: "ri-award-line",
+  evalMethod: "ri-scales-3-line",
   review: "ri-star-line",
   business: "ri-briefcase-line",
   reject: "ri-alarm-warning-line",
@@ -21,10 +23,13 @@ const DIM_ICONS: Record<string, string> = {
   rejectCheck: "ri-file-check-line",
   docReview: "ri-search-eye-line",
   process: "ri-flow-chart",
+  // 工程类专属一级维度
+  envelope: "ri-briefcase-line",
+  quantity: "ri-file-list-3-line",
 };
 
-export default function ParseResults({ checklist, parsing, locking, onLock, onShare, onDownload }: ParseResultsProps) {
-  const dimensions = useMemo(() => mergeParseDimensions(checklist?.dimensions), [checklist]);
+export default function ParseResults({ checklist, parsing, locking, category, onLock, onShare, onDownload }: ParseResultsProps) {
+  const dimensions = useMemo(() => mergeParseDimensions(checklist?.dimensions, category), [checklist, category]);
   const [activeKey, setActiveKey] = useState(dimensions[0]?.key ?? "basic");
   const activeDim = dimensions.find((d) => d.key === activeKey) ?? dimensions[0];
   const [activeItemId, setActiveItemId] = useState(activeDim?.items[0]?.id ?? "");

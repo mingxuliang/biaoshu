@@ -33,7 +33,11 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
   const [error, setError] = useState("");
   const [fileBlob, setFileBlob] = useState<Blob | null>(null);
   const [rendering, setRendering] = useState(false);
+  const [pdfUrl, setPdfUrl] = useState("");
   const hostRef = useRef<HTMLDivElement>(null);
+
+  const displayName = fileName || projectName || projectCode || "招标文件.docx";
+  const isPdf = /\.pdf$/i.test(displayName) || fileBlob?.type === "application/pdf";
 
   useEffect(() => {
     if (paragraphsProp) setParagraphs(paragraphsProp);
@@ -67,8 +71,22 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
     };
   }, [tenderDocumentId]);
 
+  // PDF：走浏览器原生 PDF 渲染，仅需生成 objectURL；docx：走 docx-preview 渲染到 host。
   useEffect(() => {
     if (loading || error || !fileBlob) return;
+    if (!isPdf) {
+      setPdfUrl("");
+      return;
+    }
+    const url = URL.createObjectURL(fileBlob);
+    setPdfUrl(url);
+    return () => {
+      URL.revokeObjectURL(url);
+    };
+  }, [fileBlob, loading, error, isPdf]);
+
+  useEffect(() => {
+    if (loading || error || !fileBlob || isPdf) return;
     const host = hostRef.current;
     if (!host) return;
     let cancelled = false;
@@ -91,7 +109,7 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
     return () => {
       cancelled = true;
     };
-  }, [fileBlob, loading, error]);
+  }, [fileBlob, loading, error, isPdf]);
 
   const clearHits = () => {
     hostRef.current?.querySelectorAll("[data-tender-hit]").forEach((el) => {
@@ -100,6 +118,7 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
   };
 
   const markHits = (query: string) => {
+    if (isPdf) return 0;
     const root = hostRef.current;
     if (!root) return 0;
     clearHits();
@@ -118,6 +137,7 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
   };
 
   const scrollToIndex = useCallback((index: number) => {
+    if (isPdf) return;
     const para = paragraphs.find((p) => p.index === index);
     const root = hostRef.current;
     if (!root || !para?.text) return;
@@ -133,7 +153,7 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
         return;
       }
     }
-  }, [paragraphs]);
+  }, [paragraphs, isPdf]);
 
   useImperativeHandle(ref, () => ({ scrollToIndex }), [scrollToIndex]);
 
@@ -144,53 +164,63 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
   }, [anchorIndex, loading, scrollToIndex]);
 
   useEffect(() => {
-    if (loading) return;
+    if (loading || isPdf) return;
     markHits(searchQuery);
-  }, [searchQuery, loading]);
+  }, [searchQuery, loading, isPdf]);
 
-  const displayName = fileName || projectName || projectCode || "招标文件.docx";
+  const downloadName = /\.(docx|pdf)$/i.test(displayName) ? displayName : `${displayName}${isPdf ? ".pdf" : ".docx"}`;
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-background-300 bg-background-100">
       <div className="flex flex-wrap items-center gap-1 border-b border-background-300 bg-background-50 px-2.5 py-1.5">
-        <select
-          value={zoom}
-          onChange={(e) => setZoom(Number(e.target.value))}
-          className="h-8 cursor-pointer rounded border border-background-300 bg-background-50 px-1.5 text-xs text-foreground-700 outline-none"
-        >
-          {zoomOptions.map((z) => (
-            <option key={z} value={z}>
-              {z}%
-            </option>
-          ))}
-        </select>
-        <span className="mx-1 h-4 w-px bg-background-300" />
+        {!isPdf && (
+          <>
+            <select
+              value={zoom}
+              onChange={(e) => setZoom(Number(e.target.value))}
+              className="h-8 cursor-pointer rounded border border-background-300 bg-background-50 px-1.5 text-xs text-foreground-700 outline-none"
+            >
+              {zoomOptions.map((z) => (
+                <option key={z} value={z}>
+                  {z}%
+                </option>
+              ))}
+            </select>
+            <span className="mx-1 h-4 w-px bg-background-300" />
+          </>
+        )}
         {fileBlob && (
           <button
             type="button"
-            onClick={() => triggerFileDownload(fileBlob, displayName.endsWith(".docx") ? displayName : `${displayName}.docx`)}
+            onClick={() => triggerFileDownload(fileBlob, downloadName)}
             className="flex h-8 cursor-pointer items-center gap-1 rounded border border-background-300 bg-background-50 px-2 text-xs text-foreground-700 hover:bg-background-100"
           >
             <i className="ri-download-2-line"></i>
             下载原文件
           </button>
         )}
-        <div className="relative ml-auto flex items-center gap-2">
-          <i className="ri-search-line absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-foreground-400"></i>
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="搜索文档内容…"
-            className="h-8 w-44 rounded-md border border-background-300 bg-background-50 pl-8 pr-3 text-xs text-foreground-700 outline-none transition-all focus:w-56 focus:border-primary-400 focus:ring-1 focus:ring-primary-400/20 placeholder:text-foreground-400"
-          />
-          <span className="flex items-center gap-1 text-[11px] text-primary-600">
-            <i className="ri-lock-2-line"></i>只读预览
+        {isPdf ? (
+          <span className="ml-auto flex items-center gap-1 text-[11px] text-primary-600">
+            <i className="ri-lock-2-line"></i>只读预览 · PDF 由浏览器原生渲染，缩放/搜索请使用其自带工具栏
           </span>
-        </div>
+        ) : (
+          <div className="relative ml-auto flex items-center gap-2">
+            <i className="ri-search-line absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-foreground-400"></i>
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="搜索文档内容…"
+              className="h-8 w-44 rounded-md border border-background-300 bg-background-50 pl-8 pr-3 text-xs text-foreground-700 outline-none transition-all focus:w-56 focus:border-primary-400 focus:ring-1 focus:ring-primary-400/20 placeholder:text-foreground-400"
+            />
+            <span className="flex items-center gap-1 text-[11px] text-primary-600">
+              <i className="ri-lock-2-line"></i>只读预览
+            </span>
+          </div>
+        )}
       </div>
 
-      <div className="relative flex-1 overflow-auto bg-background-200/50 px-4 py-5 md:px-6">
+      <div className={`relative flex-1 overflow-auto bg-background-200/50 ${isPdf ? "" : "px-4 py-5 md:px-6"}`}>
         {(loading || rendering) && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-background-200/80 text-sm text-foreground-500">
             <i className="ri-loader-4-line mr-1.5 animate-spin"></i>
@@ -202,6 +232,15 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
             <i className="ri-file-warning-line text-2xl text-accent-500"></i>
             {error}
           </div>
+        ) : isPdf ? (
+          pdfUrl && (
+            <iframe
+              src={pdfUrl}
+              title="招标文件 PDF 预览"
+              className="h-full w-full border-0"
+              style={{ visibility: loading ? "hidden" : "visible" }}
+            />
+          )
         ) : (
           <div
             className="mx-auto w-fit origin-top"
@@ -214,10 +253,10 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
 
       <div className="flex items-center justify-between border-t border-background-300 bg-background-100 px-4 py-1.5 text-[11px] text-foreground-500">
         <span className="flex min-w-0 items-center gap-1 truncate">
-          <i className="ri-file-word-2-line text-primary-500"></i>
+          <i className={`${isPdf ? "ri-file-pdf-2-line" : "ri-file-word-2-line"} text-primary-500`}></i>
           {displayName}
         </span>
-        <span>上传的原 Word 文档</span>
+        <span>上传的原{isPdf ? " PDF" : " Word"}文档</span>
       </div>
     </div>
   );

@@ -15,6 +15,7 @@ def checklist_to_docx(
     version: int,
     locked: bool,
     data: dict,
+    category: str | None = None,
 ) -> bytes:
     document = docx.Document()
     title = document.add_heading("招标文件解析报告", 0)
@@ -25,7 +26,7 @@ def checklist_to_docx(
     meta.add_run(f"招标编号：{project_code or '—'}\n")
     meta.add_run(f"评标尺子版本：v{version}（{'已锁定' if locked else '草稿'}）")
 
-    for dim in merge_tree(data.get("dimensions")):
+    for dim in merge_tree(data.get("dimensions"), category):
         document.add_heading(dim["label"], level=1)
         for item in dim["items"]:
             document.add_heading(item["label"], level=2)

@@ -34,6 +34,10 @@ function formatTime(iso: string): string {
   return iso.slice(0, 10);
 }
 
+function formatOf(name: string): string {
+  return /\.pdf$/i.test(name) ? "PDF" : "DOCX";
+}
+
 type PreviewDoc = {
   id: string;
   name: string;
@@ -168,12 +172,12 @@ export default function ProjectDocuments({ projectId }: ProjectDocumentsProps) {
                     className="flex w-full cursor-pointer items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-background-50"
                   >
                     <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary-50 text-primary-600">
-                      <i className="ri-file-word-2-line text-base"></i>
+                      <i className={`${/\.pdf$/i.test(doc.name) ? "ri-file-pdf-2-line" : "ri-file-word-2-line"} text-base`}></i>
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium text-foreground-900">{doc.name}</span>
                       <span className="block text-[11px] text-foreground-500">
-                        DOCX · {doc.size} · {doc.sourceLabel} · {doc.updated}
+                        {formatOf(doc.name)} · {doc.size} · {doc.sourceLabel} · {doc.updated}
                       </span>
                     </span>
                     <i className="ri-download-2-line shrink-0 text-sm text-foreground-400"></i>
@@ -219,12 +223,12 @@ export default function ProjectDocuments({ projectId }: ProjectDocumentsProps) {
         open={!!preview}
         onClose={() => setPreview(null)}
         title={preview?.name ?? ""}
-        subtitle={preview ? `${preview.sourceLabel} · DOCX · ${preview.size} · ${preview.updated}` : ""}
+        subtitle={preview ? `${preview.sourceLabel} · ${formatOf(preview.name)} · ${preview.size} · ${preview.updated}` : ""}
       >
         {preview && (
           <div className="space-y-4">
             <div className="rounded-md bg-background-50 px-3 py-2.5 text-sm text-foreground-700">
-              真实文件已落库，可直接下载原始 .docx，系统不生成内容摘要。
+              真实文件已落库，可直接下载原始文件，系统不生成内容摘要。
             </div>
             <div className="flex items-center justify-end gap-2 border-t border-background-200 pt-3">
               <button

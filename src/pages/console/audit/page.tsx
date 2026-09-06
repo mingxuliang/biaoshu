@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams, Link } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import Toast from "../components/Toast";
 import ProgressRing from "../components/ProgressRing";
 import PreReviewReport from "./components/PreReviewReport";
+import TenderRuleReportView from "./components/TenderRuleReport";
 import DocumentSourceGate, { type PreReviewDoc } from "./components/DocumentSourceGate";
 import ProjectSelectionGate from "../components/ProjectSelectionGate";
 import { useProjects } from "@/context/ProjectContext";
@@ -19,12 +20,13 @@ import {
   type TrendPoint,
 } from "@/lib/api";
 
-type TabKey = "result" | "trend" | "report";
+type TabKey = "result" | "trend" | "report" | "tender";
 
 const tabs: { key: TabKey; label: string; icon: string }[] = [
   { key: "result", label: "预审结果", icon: "ri-file-shield-2-line" },
   { key: "trend", label: "历史趋势", icon: "ri-line-chart-line" },
-  { key: "report", label: "预审报告", icon: "ri-file-chart-line" },
+  { key: "report", label: "青天预审报告", icon: "ri-file-chart-line" },
+  { key: "tender", label: "招标规则预审报告", icon: "ri-auction-line" },
 ];
 
 const levelStyle: Record<string, string> = {
@@ -80,8 +82,38 @@ export default function AuditPage() {
   const [trend, setTrend] = useState<TrendPoint[]>([]);
   const [toast, setToast] = useState<ToastState>({ message: "", type: "success", visible: false });
   const [exporting, setExporting] = useState(false);
+  const [loadingReport, setLoadingReport] = useState(false);
 
   const busy = reviewing || secondReviewing;
+
+  // 进入页面/切换项目/确定预审文件后，先尝试读取该项目已完成的最新一轮预审结果，
+  // 而不是每次都要求手动点「发起全量预审」才能看到上次跑的结果；
+  // 只有真正需要新一轮结论（如回改后二次评审）时才会调用 runPrereview 重新起任务。
+  useEffect(() => {
+    if (!currentProject || !docSource) return;
+    let cancelled = false;
+    setLoadingReport(true);
+    setReport(null);
+    (async () => {
+      try {
+        const latest = await getLatestReviewRun(currentProject.id);
+        if (!cancelled) setReport(latest);
+      } catch {
+        // 该项目/文件暂无已完成的预审结果，保持空态，等待用户手动发起
+      } finally {
+        if (!cancelled) setLoadingReport(false);
+      }
+      try {
+        const trendPoints = await getReviewRunTrend(currentProject.id);
+        if (!cancelled) setTrend(trendPoints);
+      } catch {
+        // 趋势加载失败不阻塞主流程
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentProject?.id, docSource?.bidDocumentId]);
 
   const showToast = (message: string, type: ToastState["type"] = "success") => {
     setToast({ message, type, visible: true });
@@ -165,7 +197,7 @@ export default function AuditPage() {
   const copyReportSummary = async () => {
     if (!report || !currentProject) return;
     const lines = [
-      `AI 智能预审报告 · ${currentProject.name}（${currentProject.code}）`,
+      `青天预审报告 · ${currentProject.name}（${currentProject.code}）`,
       `第 ${report.round} 轮 · 综合得分 ${report.overall} · 风险灯 ${report.light}`,
       `废标 ${report.waste} 项 · 扣分 ${report.risk} 项 · 建议 ${report.suggest} 项`,
       ...(report.levels || []).map((lv) => `${lv.key} ${lv.name}：${lv.score} 分，${lv.issues} 项，${lv.status}`),
@@ -374,7 +406,12 @@ export default function AuditPage() {
         ))}
       </div>
 
-      {!report ? (
+      {loadingReport ? (
+        <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-background-300 bg-background-100 px-6 py-16 text-center">
+          <i className="ri-loader-4-line animate-spin text-2xl text-primary-500"></i>
+          <p className="text-sm font-medium text-foreground-800">正在读取上次预审结果…</p>
+        </div>
+      ) : !report ? (
         <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-background-300 bg-background-100 px-6 py-16 text-center">
           <span className="flex h-12 w-12 items-center justify-center rounded-full bg-primary-50 text-primary-500">
             <i className="ri-shield-flash-line text-2xl"></i>
@@ -528,6 +565,44 @@ export default function AuditPage() {
                   </ul>
                 </div>
               </div>
+
+              {/* 技术评分 8 模块逐项核验：与规则页「技术评分」tab 一一对应，
+                  直接展示模块名 + 满分 + 实得分 + 缺项说明，不再只笼统混在问题清单里 */}
+              {report.techModules && report.techModules.length > 0 && (
+                <div className="mt-3 overflow-hidden rounded-lg border border-background-300 bg-background-100">
+                  <div className="border-b border-background-300 bg-background-50 px-4 py-3">
+                    <div className="flex items-center gap-2 text-sm font-medium text-foreground-800">
+                      <i className="ri-cpu-line text-primary-500"></i>
+                      技术评分模块核验 · 第 {report.round} 轮
+                    </div>
+                  </div>
+                  <ul className="grid grid-cols-1 divide-y divide-background-200 sm:grid-cols-2 sm:divide-y-0 lg:grid-cols-4">
+                    {report.techModules.map((m) => (
+                      <li key={m.key} className="border-b border-background-200 px-4 py-3 sm:border-b-0 sm:border-r sm:last:border-r-0 lg:[&:nth-child(4n)]:border-r-0">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-medium text-foreground-900">{m.module}</span>
+                          <span
+                            className={`font-label whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                              m.status === "达标"
+                                ? "bg-primary-50 text-primary-600"
+                                : m.status === "建议"
+                                  ? "bg-secondary-100 text-secondary-600"
+                                  : "bg-accent-50 text-accent-600"
+                            }`}
+                          >
+                            {m.status}
+                          </span>
+                        </div>
+                        <div className="mt-1 flex items-baseline gap-1">
+                          <span className="font-heading text-sm font-bold text-foreground-900">{m.score}</span>
+                          <span className="text-[11px] text-foreground-500">/ 满分 {m.maxScore} 分</span>
+                        </div>
+                        <p className="mt-1 text-[11px] leading-relaxed text-foreground-500">{m.summary}</p>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </>
           )}
 
@@ -574,11 +649,21 @@ export default function AuditPage() {
               levels={report.levels}
               issues={report.issues}
               dimensions={report.dimensions}
+              techModules={report.techModules}
               overall={report.overall}
               round={report.round}
               exporting={exporting}
               onExport={() => { if (!exporting) void exportReport(); }}
               onCopy={() => { void copyReportSummary(); }}
+            />
+          )}
+
+          {activeTab === "tender" && (
+            <TenderRuleReportView
+              projectName={currentProject.name}
+              projectCode={currentProject.code}
+              round={report.round}
+              data={report.tenderRules}
             />
           )}
         </>

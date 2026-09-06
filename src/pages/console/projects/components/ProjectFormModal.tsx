@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import Modal from "../../components/Modal";
-import { projectTypes, type Project, type ProjectType } from "@/mocks/projects";
+import { projectCategories, projectTypes, type Project, type ProjectCategory, type ProjectType } from "@/mocks/projects";
 import { useAuth } from "@/context/AuthContext";
 import { listUsers, type TeamMember } from "@/lib/api";
 
@@ -8,6 +8,7 @@ export interface ProjectFormValues {
   name: string;
   code: string;
   type: ProjectType;
+  category: ProjectCategory;
   budget: string;
   deadline: string;
   owner: string;
@@ -28,7 +29,7 @@ const inputCls =
   "h-9 w-full rounded-md border border-background-300 bg-background-50 px-3 text-sm text-foreground-900 outline-none transition-all focus:border-primary-400 focus:ring-1 focus:ring-primary-400/20 placeholder:text-foreground-500";
 const labelCls = "mb-1.5 block text-xs font-medium text-foreground-600";
 
-const ACCEPT = ".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const ACCEPT = ".docx,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf";
 
 function parseBudget(budget?: string): string {
   if (!budget) return "";
@@ -49,6 +50,7 @@ export default function ProjectFormModal({
     name: "",
     code: "",
     type: "工程" as ProjectType,
+    category: "软件服务类" as ProjectCategory,
     budget: "",
     deadline: "",
     owner: "",
@@ -80,6 +82,7 @@ export default function ProjectFormModal({
       name: initial?.name ?? "",
       code: initial?.code ?? "",
       type: initial?.type ?? "工程",
+      category: initial?.category ?? "软件服务类",
       budget: parseBudget(initial?.budget),
       deadline: initial?.deadline ?? "",
       owner: defaultOwner,
@@ -118,8 +121,8 @@ export default function ProjectFormModal({
   };
 
   const handleTenderPick = (file: File) => {
-    if (!/\.docx$/i.test(file.name)) {
-      setTenderErr("仅支持 .docx 格式的招标文件（暂不支持 .doc / .pdf，请另存为 .docx 后重新上传）");
+    if (!/\.(docx|pdf)$/i.test(file.name)) {
+      setTenderErr("仅支持 .docx 或 .pdf 格式的招标文件（暂不支持旧版 .doc，请另存为 .docx 后重新上传）");
       return;
     }
     setTenderErr(null);
@@ -133,6 +136,7 @@ export default function ProjectFormModal({
       name: form.name,
       code: form.code,
       type: form.type,
+      category: form.category,
       budget: form.budget,
       deadline: form.deadline,
       owner: form.owner,
@@ -200,6 +204,28 @@ export default function ProjectFormModal({
                 </option>
               ))}
             </select>
+          </div>
+          <div>
+            <label className={labelCls} htmlFor="np-category">
+              标书类别 <span className="text-accent-500">*</span>
+            </label>
+            <select
+              id="np-category"
+              value={form.category}
+              onChange={(e) => setForm((f) => ({ ...f, category: e.target.value as ProjectCategory }))}
+              className={`${inputCls} cursor-pointer`}
+            >
+              {projectCategories.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-[11px] text-foreground-500">
+              {form.category === "工程类"
+                ? "工程类：招标解析将按施工类招标书特点抽取评定分离/三信封/清单图纸/异常低价等字段"
+                : "软件服务类：招标解析、AI 预审沿用现有项目字段体系"}
+            </p>
           </div>
           <div>
             <label className={labelCls} htmlFor="np-budget">
@@ -352,7 +378,7 @@ export default function ProjectFormModal({
           <label className={labelCls} htmlFor="np-tender">
             招标文件
             <span className="ml-1 font-normal text-foreground-500">
-              （{isEdit ? "重新选择可替换为真实 .docx 文件" : "可选，后续可在招标解析中上传"}）
+              （{isEdit ? "重新选择可替换为真实 .docx / .pdf 文件" : "可选，后续可在招标解析中上传"}）
             </span>
           </label>
           <input
@@ -374,7 +400,8 @@ export default function ProjectFormModal({
               <div className="min-w-0 flex-1">
                 <div className="truncate text-sm font-medium text-foreground-900">{displayTenderName}</div>
                 <div className="mt-0.5 text-[11px] text-foreground-500">
-                  DOCX{displayTenderSize ? ` · ${displayTenderSize}` : ""}
+                  {/\.pdf$/i.test(displayTenderName) ? "PDF" : "DOCX"}
+                  {displayTenderSize ? ` · ${displayTenderSize}` : ""}
                   {tenderFile ? " · 待上传" : " · 已归档"}
                 </div>
               </div>
@@ -408,7 +435,7 @@ export default function ProjectFormModal({
               className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-background-300 bg-background-50 px-3 py-3 text-sm text-foreground-500 transition-colors hover:border-primary-300 hover:bg-primary-50/40 hover:text-primary-600"
             >
               <i className="ri-upload-cloud-2-line text-base"></i>
-              点击上传招标文件（仅支持 .docx）
+              点击上传招标文件（支持 .docx / .pdf）
             </button>
           )}
           {tenderErr && (

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user, hash_password
+from ..auth import find_user_by_account, get_current_user, hash_password, normalize_account
 from ..db import get_db
 from ..models import ProjectMember, User
 from ..permissions import PERM_MEMBERS, require_perm
@@ -54,19 +54,25 @@ def invite_user(
 ) -> InviteUserOut:
     require_perm(current_user, PERM_MEMBERS)
     name = payload.name.strip()
-    email = payload.email.strip().lower()
-    if not name or not email:
-        raise HTTPException(400, "请填写姓名与邮箱")
+    account = normalize_account(payload.email)
+    if not name or not account:
+        raise HTTPException(400, "请填写姓名与账号")
+    if any(ch.isspace() for ch in account) or len(account) > 64:
+        raise HTTPException(400, "账号不能含空格，且不超过 64 位")
     role = payload.role.strip() or "撰写专家"
     if role not in MEMBER_ROLES:
         raise HTTPException(400, "角色不合法")
-    if db.query(User).filter(User.email == email).first():
-        raise HTTPException(409, "该邮箱已注册")
+    if find_user_by_account(db, account):
+        raise HTTPException(409, "该账号已存在")
+
+    password = (payload.password or "").strip() or DEFAULT_PASSWORD
+    if len(password) < 6:
+        raise HTTPException(400, "密码至少 6 位")
 
     user = User(
         name=name,
-        email=email,
-        password_hash=hash_password(DEFAULT_PASSWORD),
+        email=account,
+        password_hash=hash_password(password),
         phone=payload.phone.strip(),
         role=role,
         position=role,
@@ -75,7 +81,7 @@ def invite_user(
     db.commit()
     db.refresh(user)
     member = _to_member(user, 0)
-    return InviteUserOut(**member.model_dump(), initialPassword=DEFAULT_PASSWORD)
+    return InviteUserOut(**member.model_dump(), initialPassword=password)
 
 
 @router.patch("/users/{user_id}", response_model=TeamMemberOut)

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 import jwt
 from fastapi import Depends, Header, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .config import get_settings
@@ -12,6 +13,18 @@ from .db import get_db
 from .models import User
 
 ALGORITHM = "HS256"
+
+
+def normalize_account(value: str) -> str:
+    """登录账号：邮箱、手机号、工号或任意数字均可，不强制邮箱格式。"""
+    return (value or "").strip().lower()
+
+
+def find_user_by_account(db: Session, account: str) -> User | None:
+    key = normalize_account(account)
+    if not key:
+        return None
+    return db.query(User).filter(func.lower(User.email) == key).first()
 
 
 def hash_password(password: str) -> str:

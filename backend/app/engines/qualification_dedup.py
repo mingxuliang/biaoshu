@@ -8,7 +8,7 @@ import os
 import re
 
 import jieba
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, selectinload
 
 from ..config import get_settings
 from ..models import QualificationAsset, QualificationAssetImage, QualificationSourceDoc, gen_id
@@ -211,8 +211,7 @@ def apply_to_library(
 ) -> dict[str, int]:
     existing = (
         db.query(QualificationAsset)
-        .options(joinedload(QualificationAsset.images))
-        .with_for_update()
+        .options(selectinload(QualificationAsset.images))
         .all()
     )
     stats = {"extracted": 0, "merged": 0, "suspected": 0, "conflicts": 0}

@@ -560,6 +560,7 @@ def run_extract_for_source_doc(db: Session, source_doc_id: str) -> None:
         db.commit()
     except Exception as exc:  # noqa: BLE001
         logger.exception("qualification extract %s failed", source_doc_id)
+        db.rollback()
         doc = db.get(QualificationSourceDoc, source_doc_id)
         if doc:
             doc.status = "failed"

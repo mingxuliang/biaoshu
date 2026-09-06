@@ -370,7 +370,12 @@ def get_tender_document_paragraphs(
     require_project(db, current_user, doc.project_id)
     try:
         with storage.as_local(doc.storage_path) as path:
-            paragraphs = extract_paragraphs(path)
+            # PDF 招标文件没有 docx 段落结构，抽取会失败；前端锚点定位/搜索功能
+            # 对该场景已做容错（原文预览走 PDF 原生渲染，不依赖分段结果）。
+            try:
+                paragraphs = extract_paragraphs(path)
+            except Exception:
+                paragraphs = []
     except FileNotFoundError:
         raise HTTPException(404, "招标文件不存在")
     return [

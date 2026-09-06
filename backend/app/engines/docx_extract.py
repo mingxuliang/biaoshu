@@ -76,38 +76,132 @@ def _paragraph_align(p) -> str:
     return ""
 
 
-def extract_paragraphs(path: str) -> list[dict]:
-    """返回非空段落列表：[{index, text, style, outline_level, align}]。"""
-    document = docx.Document(path)
-    result = []
-    for idx, p in enumerate(document.paragraphs):
-        text = p.text.strip()
-        if not text:
+def _para_dict(p, idx: int, from_table: bool = False) -> dict | None:
+    text = (p.text or "").strip()
+    if not text:
+        return None
+    style_name = p.style.name if p.style is not None else ""
+    try:
+        outline_level = p.paragraph_format.outline_level
+    except Exception:
+        outline_level = None
+    font, size_pt, bold = _first_run_style(p)
+    return {
+        "index": idx,
+        "text": text,
+        "style": style_name,
+        "outline_level": outline_level,
+        "align": _paragraph_align(p),
+        "font": font,
+        "fontSizePt": size_pt,
+        "bold": bold,
+        "fromTable": from_table,
+    }
+
+
+def _table_row_texts(table) -> list[str]:
+    """抽出表格文字：长单元格单独成段（便于 L3 excerpt 命中），短格仍按行拼接。"""
+    rows: list[str] = []
+    for row in table.rows:
+        seen: set[int] = set()
+        cells: list[str] = []
+        for cell in row.cells:
+            key = id(cell._tc)
+            if key in seen:
+                continue
+            seen.add(key)
+            cell_text = " ".join((cell.text or "").split())
+            if cell_text:
+                cells.append(cell_text)
+        if not cells:
             continue
-        style_name = p.style.name if p.style is not None else ""
-        try:
-            outline_level = p.paragraph_format.outline_level
-        except Exception:
-            outline_level = None
-        font, size_pt, bold = _first_run_style(p)
-        result.append(
-            {
-                "index": idx,
-                "text": text,
-                "style": style_name,
-                "outline_level": outline_level,
-                "align": _paragraph_align(p),
-                "font": font,
-                "fontSizePt": size_pt,
-                "bold": bold,
-            }
-        )
+        long_cells = [c for c in cells if len(c) >= 16]
+        if long_cells:
+            rows.extend(long_cells)
+        else:
+            rows.append(" | ".join(cells))
+    return rows
+
+
+def extract_paragraphs(path: str) -> list[dict]:
+    """按正文顺序返回非空块：段落 + 表格行。
+
+    工程类投标书大量正文写在表格里；只抽 document.paragraphs 会只剩标题，
+    预审 E3 用的是含表全文，修改闭环若不含表就会出现「有 L3、锚点全空」。
+    """
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    document = docx.Document(path)
+    result: list[dict] = []
+    idx = 0
+    for child in document.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            item = _para_dict(Paragraph(child, document), idx, False)
+            if item:
+                result.append(item)
+                idx += 1
+            continue
+        if child.tag != qn("w:tbl"):
+            continue
+        table = Table(child, document)
+        for row_text in _table_row_texts(table):
+            result.append(
+                {
+                    "index": idx,
+                    "text": row_text,
+                    "style": "",
+                    "outline_level": None,
+                    "align": "",
+                    "font": "宋体",
+                    "fontSizePt": 12.0,
+                    "bold": False,
+                    "fromTable": True,
+                }
+            )
+            idx += 1
     return result
 
 
 def extract_full_text(path: str) -> str:
+    """招标文件正文抽取的统一入口：按扩展名分发到 docx / pdf 抽取。
+
+    PDF 版招标文件（部分工程标只提供 PDF 招标文件正文，清单/图纸另附）走
+    PyMuPDF 抽取；docx 仍走 python-docx 段落抽取，行为不变。
+    """
+    if (path or "").lower().endswith(".pdf"):
+        return _extract_pdf_full_text(path)
     paragraphs = extract_paragraphs(path)
     return "\n".join(p["text"] for p in paragraphs)
+
+
+def _extract_pdf_full_text(path: str) -> str:
+    """按页抽出正文；表格再补一行结构化文本，避免复杂表只剩断行或漏格。"""
+    import pymupdf as fitz
+
+    chunks: list[str] = []
+    with fitz.open(path) as doc:
+        for page in doc:
+            text = (page.get_text() or "").strip()
+            table_lines: list[str] = []
+            try:
+                found = page.find_tables()
+                for table in found.tables if found else []:
+                    for row in table.extract() or []:
+                        cells = [" ".join(str(c).split()) for c in row if c and str(c).strip()]
+                        if cells:
+                            table_lines.append(" | ".join(cells))
+            except Exception:
+                table_lines = []
+            extra = "\n".join(table_lines)
+            if extra and extra[:60] not in (text or ""):
+                block = f"{text}\n{extra}".strip() if text else extra
+            else:
+                block = text
+            if block:
+                chunks.append(block)
+    return "\n".join(chunks)
 
 
 def extract_document_plain_text(path: str) -> str:

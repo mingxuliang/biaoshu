@@ -1,10 +1,18 @@
 import { parseDimensions, type ParseDimension, type ParseSection, type ParseSubItem } from "@/mocks/parse";
+import { parseDimensionsEngineering } from "@/mocks/parseEngineering";
 
 export type { ParseDimension, ParseSection, ParseSubItem };
 
+export type ParseCategory = "软件服务类" | "工程类" | string | undefined;
+
+/** 按项目标书类别选用对应的固定骨架：软件服务类走 parse.ts，工程类走 parseEngineering.ts。 */
+function baseDimensionsFor(category?: ParseCategory): ParseDimension[] {
+  return category === "工程类" ? parseDimensionsEngineering : parseDimensions;
+}
+
 /** 早期演示的一级/二级指标骨架，内容一律为空，供解析页始终展示。 */
-export function emptyParseDimensions(): ParseDimension[] {
-  return parseDimensions.map((dim) => ({
+export function emptyParseDimensions(category?: ParseCategory): ParseDimension[] {
+  return baseDimensionsFor(category).map((dim) => ({
     ...dim,
     completed: false,
     items: dim.items.map((item) => ({
@@ -17,8 +25,8 @@ export function emptyParseDimensions(): ParseDimension[] {
   }));
 }
 
-export function mergeParseDimensions(filled?: ParseDimension[] | null): ParseDimension[] {
-  const base = emptyParseDimensions();
+export function mergeParseDimensions(filled?: ParseDimension[] | null, category?: ParseCategory): ParseDimension[] {
+  const base = emptyParseDimensions(category);
   if (!filled?.length) return base;
   const byKey = new Map(filled.map((d) => [d.key, d]));
   return base.map((dim) => {

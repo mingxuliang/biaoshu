@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from ..models import BidDocument, ReviewFinding, ReviewRun
 from .. import storage
-from . import e1_veto, e2_business, e3_semantic, e3_tech_modules, e4_duplicate_filler, e5_layout, e_parse_match, rules_config
+from . import e1_veto, e2_business, e3_semantic, e3_tech_modules, e4_duplicate_filler, e5_layout, e_parse_match, e_tender_score, rules_config
 from .docx_extract import extract_document_plain_text, extract_full_text, extract_paragraphs
 from .review_context import load_review_context
 from .rules_data import DIMENSION_LABELS, SEVERITY_PENALTY
@@ -80,7 +80,7 @@ def run_prereview(db: Session, run_id: str) -> None:
         e4 = e4_duplicate_filler.run(paras, word_rules, thresholds, ctx, dup_keys)
         e5 = e5_layout.run(path, paras, ctx, veto_keys, dup_keys, strategy_keys) if path else []
         e3 = e3_semantic.run(text, weights, tech_keys, strategy_keys, dup_keys, checklist.score_rules)
-        tech_findings = e3_tech_modules.run(text, paras, ctx.project_name, tech_keys)
+        tech_findings, tech_modules = e3_tech_modules.evaluate(text, paras, ctx.project_name, tech_keys)
         parse_findings = e_parse_match.run(
             text,
             checklist.score_rules,
@@ -95,17 +95,42 @@ def run_prereview(db: Session, run_id: str) -> None:
         e3_issues = e3["issues"] + tech_findings + [f for f in parse_findings if f["level"] == "L3"]
         e1 = e1 + [f for f in parse_findings if f["level"] == "L1"]
         e5 = e5 + [f for f in parse_findings if f["level"] == "L5"]
-        return paras, text, e1, e2, e4, e5, e3, e3_issues
+        tender_rules = e_tender_score.run(
+            text,
+            checklist.score_rules,
+            checklist.dimensions,
+            headings=[(p.get("text") or "") for p in paras],
+            strategy_keys=strategy_keys,
+        )
+        return paras, text, e1, e2, e4, e5, e3, e3_issues, tech_modules, tender_rules
 
     if doc and doc.storage_path and storage.exists(doc.storage_path):
         with storage.as_local(doc.storage_path) as path:
-            paragraphs, full_text, e1_findings, e2_findings, e4_findings, e5_findings, e3_result, e3_issues = (
-                _run_with_path(path)
-            )
+            (
+                paragraphs,
+                full_text,
+                e1_findings,
+                e2_findings,
+                e4_findings,
+                e5_findings,
+                e3_result,
+                e3_issues,
+                tech_modules,
+                tender_rules,
+            ) = _run_with_path(path)
     else:
-        paragraphs, full_text, e1_findings, e2_findings, e4_findings, e5_findings, e3_result, e3_issues = (
-            _run_with_path(None)
-        )
+        (
+            paragraphs,
+            full_text,
+            e1_findings,
+            e2_findings,
+            e4_findings,
+            e5_findings,
+            e3_result,
+            e3_issues,
+            tech_modules,
+            tender_rules,
+        ) = _run_with_path(None)
 
     all_findings = e1_findings + e2_findings + e4_findings + e5_findings + e3_issues
 
@@ -162,6 +187,8 @@ def run_prereview(db: Session, run_id: str) -> None:
     run.light = light
     run.levels_json = levels_out
     run.dimensions_json = dimensions_out
+    run.tech_modules_json = tech_modules
+    run.tender_rules_json = tender_rules
     run.finished_at = datetime.utcnow()
     db.commit()
 
@@ -177,7 +204,10 @@ def run_prereview(db: Session, run_id: str) -> None:
                 rule=f["rule"],
                 tender_quote=f.get("tenderQuote", ""),
                 suggestion=f["suggestion"],
-                evidence_json={},
+                evidence_json={
+                    "strategyKey": f.get("strategyKey") or "",
+                    "applyText": f.get("applyText") or "",
+                },
                 confidence=f.get("confidence", 1.0),
             )
         )

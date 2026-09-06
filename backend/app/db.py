@@ -44,6 +44,16 @@ def ensure_schema() -> None:
         conn.execute(text("ALTER TABLE bid_revisions ADD COLUMN IF NOT EXISTS layout_json JSON"))
         conn.execute(text("ALTER TABLE bid_revisions ADD COLUMN IF NOT EXISTS resolved_ids_json JSON DEFAULT '[]'::json"))
         conn.execute(
+            text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS category VARCHAR DEFAULT '软件服务类'")
+        )
+        conn.execute(text("UPDATE projects SET category = '软件服务类' WHERE category IS NULL"))
+        conn.execute(
+            text("ALTER TABLE review_runs ADD COLUMN IF NOT EXISTS tech_modules_json JSON DEFAULT '[]'::json")
+        )
+        conn.execute(
+            text("ALTER TABLE review_runs ADD COLUMN IF NOT EXISTS tender_rules_json JSON DEFAULT '{}'::json")
+        )
+        conn.execute(
             text(
                 "UPDATE qualification_assets SET kind = 'cert' "
                 "WHERE kind = 'credit' AND ("

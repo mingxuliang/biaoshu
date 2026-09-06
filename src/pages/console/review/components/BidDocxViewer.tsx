@@ -36,6 +36,32 @@ function normalize(s: string): string {
   return (s || "").replace(/\s+/g, "");
 }
 
+const TOC_DOTS = /[.．…·]{3,}\s*\d{1,4}\s*$/;
+const TOC_PAGE_TAIL = /\s+\d{1,4}\s*$/;
+
+function isTocNode(el: HTMLElement): boolean {
+  const t = (el.textContent || "").replace(/\s+/g, " ").trim();
+  if (!t) return false;
+  const compact = t.replace(/\s+/g, "");
+  if (compact === "目录" || (compact.startsWith("目录") && compact.length <= 8)) return true;
+  if (TOC_DOTS.test(t)) return true;
+  if (TOC_PAGE_TAIL.test(t) && !t.includes("。") && t.length <= 64) {
+    const head = t.replace(TOC_PAGE_TAIL, "").trim();
+    if (/^第[0-9一二三四五六七八九十百零]+[章节篇]/.test(head) || /^\d+\.\d+/.test(head) || /^[一二三四五六七八九十]+、/.test(head)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function pickLast(blocks: HTMLElement[], pred: (el: HTMLElement) => boolean): HTMLElement | undefined {
+  let hit: HTMLElement | undefined;
+  for (const el of blocks) {
+    if (pred(el)) hit = el;
+  }
+  return hit;
+}
+
 const BidDocxViewer = forwardRef<BidDocxViewerHandle, BidDocxViewerProps>(function BidDocxViewer(
   { bidDocumentId, sections, issues, fileName, active = true },
   ref,
@@ -115,8 +141,13 @@ const BidDocxViewer = forwardRef<BidDocxViewerHandle, BidDocxViewerProps>(functi
     const issueMap = new Map(issues.map((i) => [i.id, i]));
 
     sections.forEach((section) => {
-      const headingTarget = blocks.find(
-        (el) => !used.has(el) && normalize(el.textContent || "") === normalize(section.heading),
+      const headingNeedle = normalize(section.heading);
+      const headingTarget = pickLast(
+        blocks,
+        (el) =>
+          !used.has(el) &&
+          !isTocNode(el) &&
+          normalize(el.textContent || "") === headingNeedle,
       );
       if (headingTarget) {
         anchorMap[section.id] = headingTarget;
@@ -127,8 +158,12 @@ const BidDocxViewer = forwardRef<BidDocxViewerHandle, BidDocxViewerProps>(functi
         if (!para.problem) return;
         const needle = normalize(para.problem.highlight);
         if (!needle) return;
-        const target = blocks.find(
-          (el) => !used.has(el) && normalize(el.textContent || "").includes(needle),
+        const target = pickLast(
+          blocks,
+          (el) =>
+            !used.has(el) &&
+            !isTocNode(el) &&
+            normalize(el.textContent || "").includes(needle),
         );
         if (!target) return;
         used.add(target);

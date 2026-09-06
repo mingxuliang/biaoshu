@@ -53,7 +53,7 @@ def run_prereview_task(run_id: str) -> None:
         db.close()
 
 
-@celery_app.task(name="run_tender_parse_task")
+@celery_app.task(name="run_tender_parse_task", soft_time_limit=36 * 60, time_limit=40 * 60)
 def run_tender_parse_task(checklist_id: str) -> None:
     db = SessionLocal()
     try:
@@ -68,9 +68,12 @@ def run_tender_parse_task(checklist_id: str) -> None:
         if not tender_doc:
             raise RuntimeError("招标文件不存在，请重新上传")
 
+        project = db.get(Project, checklist.project_id)
+        category = (project.category if project else None) or "软件服务类"
+
         with storage.as_local(tender_doc.storage_path) as path:
             full_text = extract_full_text(path)
-        result = e0_tender_parse.run(full_text)
+        result = e0_tender_parse.run(full_text, category=category)
 
         checklist.checklist_json = {
             "dimensions": result["dimensions"],

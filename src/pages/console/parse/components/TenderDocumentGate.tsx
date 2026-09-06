@@ -28,7 +28,11 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-const ACCEPT = ".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const ACCEPT = ".docx,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf";
+
+function formatOf(name: string): string {
+  return /\.pdf$/i.test(name) ? "PDF" : "DOCX";
+}
 
 export default function TenderDocumentGate({
   projectId,
@@ -78,15 +82,15 @@ export default function TenderDocumentGate({
       name: doc.filename,
       source: "项目招标文件",
       size: formatSize(doc.sizeBytes),
-      format: "DOCX",
+      format: formatOf(doc.filename),
       tenderDocumentId: doc.id,
     });
   };
 
   const pickUpload = (file: File) => {
-    const valid = /\.docx$/i.test(file.name);
+    const valid = /\.(docx|pdf)$/i.test(file.name);
     if (!valid) {
-      setUploadErr("仅支持 .docx 格式的招标文件（暂不支持 .doc / .pdf，请另存为 .docx 后重新上传）");
+      setUploadErr("仅支持 .docx 或 .pdf 格式的招标文件（暂不支持旧版 .doc，请另存为 .docx 后重新上传）");
       return;
     }
     const mb = (file.size / 1024 / 1024).toFixed(1);
@@ -100,7 +104,7 @@ export default function TenderDocumentGate({
       name: file.name,
       source: "手动上传",
       size: `${mb} MB`,
-      format: "DOCX",
+      format: formatOf(file.name),
       tenderDocumentId: "",
     });
   };
@@ -134,7 +138,7 @@ export default function TenderDocumentGate({
           <div>
             <div className="font-label text-sm font-semibold text-foreground-900">第一步 · 上传招标文件</div>
             <div className="text-xs text-foreground-500">
-              解析前需先确定招标文件：从项目已归档的招标文档中选择，或手动上传 .docx
+              解析前需先确定招标文件：从项目已归档的招标文档中选择，或手动上传 .docx / .pdf
             </div>
           </div>
         </div>
@@ -179,12 +183,12 @@ export default function TenderDocumentGate({
                         selectedProjectFileId === doc.id ? "bg-primary-500 text-background-50" : "bg-secondary-100 text-secondary-600"
                       }`}
                     >
-                      <i className="ri-file-word-2-line text-base"></i>
+                      <i className={`${/\.pdf$/i.test(doc.filename) ? "ri-file-pdf-2-line" : "ri-file-word-2-line"} text-base`}></i>
                     </span>
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-medium text-foreground-800">{doc.filename}</div>
                       <div className="mt-0.5 flex items-center gap-2 text-[11px] text-foreground-500">
-                        <span>DOCX</span>
+                        <span>{formatOf(doc.filename)}</span>
                         <span>·</span>
                         <span>{formatSize(doc.sizeBytes)}</span>
                       </div>
@@ -222,7 +226,7 @@ export default function TenderDocumentGate({
             </span>
             <span className="text-sm font-medium text-foreground-800">手动上传招标文件</span>
             <span className="font-label ml-auto rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700">
-              支持 .docx
+              支持 .docx / .pdf
             </span>
           </div>
           <div className="flex flex-1 flex-col p-4">
@@ -251,7 +255,7 @@ export default function TenderDocumentGate({
                 <>
                   <span className="text-sm font-medium text-foreground-700">点击选择或拖拽招标文件到此处</span>
                   <span className="text-[11px] text-foreground-500">
-                    上传 .docx 格式的招标文件 / 评标办法，AI 将对其抽取评标尺子
+                    上传 .docx 或 .pdf 格式的招标文件 / 评标办法，AI 将对其抽取评标尺子
                   </span>
                 </>
               )}

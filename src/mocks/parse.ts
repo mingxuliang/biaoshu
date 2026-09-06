@@ -205,6 +205,35 @@ export const parseDimensions: ParseDimension[] = [
     ],
   },
   {
+    key: "evalMethod",
+    label: "评标办法",
+    completed: false,
+    items: [
+      {
+        id: "eval-tech",
+        label: "技术评审标准",
+        sections: [
+          {
+            id: "et-1",
+            title: "技术评审标准（完整原文）",
+            rows: [{ label: "评分因素与标准", content: "" }],
+          },
+        ],
+      },
+      {
+        id: "eval-business",
+        label: "商务标评分评审标准",
+        sections: [
+          {
+            id: "eb-1",
+            title: "商务标评分评审标准（完整原文）",
+            rows: [{ label: "评分因素与标准", content: "" }],
+          },
+        ],
+      },
+    ],
+  },
+  {
     key: "review",
     label: "评审要求",
     completed: true,

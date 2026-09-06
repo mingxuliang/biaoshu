@@ -9,6 +9,9 @@ from sqlalchemy.orm import Session
 from ..audit import actor_from_request, project_label, write_audit
 from ..auth import get_current_user
 from ..db import get_db
+from .. import storage
+from ..engines import e_tender_score, rules_config
+from ..engines.docx_extract import extract_document_plain_text, extract_full_text, extract_paragraphs
 from ..engines.review_export import review_run_to_docx
 from ..models import BidDocument, Project, ReviewFinding, ReviewRun, User
 from ..permissions import PERM_REVIEW, require_project
@@ -84,6 +87,10 @@ def get_latest_review_run(
     if not run:
         raise HTTPException(404, "该项目暂无已完成的预审报告")
 
+    tender_rules = run.tender_rules_json or {}
+    if not (isinstance(tender_rules, dict) and tender_rules.get("groups")):
+        tender_rules = _backfill_tender_rules(db, run)
+
     findings = db.query(ReviewFinding).filter(ReviewFinding.run_id == run.id).all()
     issues = [
         {
@@ -108,6 +115,8 @@ def get_latest_review_run(
         light=run.light,
         levels=run.levels_json,
         dimensions=run.dimensions_json,
+        techModules=run.tech_modules_json or [],
+        tenderRules=tender_rules or None,
         issues=issues,
     )
 
@@ -126,6 +135,41 @@ def list_review_runs(
     return [
         TrendPointOut(round=r.round, score=r.overall, issues=(r.waste + r.risk + r.suggest)) for r in runs
     ]
+
+
+def _backfill_tender_rules(db: Session, run: ReviewRun) -> dict:
+    """旧轮次没有招标规则报告时，用已锁定/最新解析结果 + 投标书正文补算并落库。"""
+    checklist = rules_config.load_project_checklist(db, run.project_id)
+    if not checklist.score_rules and not checklist.dimensions:
+        return {}
+    text = ""
+    headings: list[str] = []
+    doc = db.get(BidDocument, run.bid_document_id) if run.bid_document_id else None
+    if doc and doc.storage_path and storage.exists(doc.storage_path):
+        try:
+            with storage.as_local(doc.storage_path) as path:
+                try:
+                    paras = extract_paragraphs(path)
+                    headings = [(p.get("text") or "") for p in paras]
+                except Exception:
+                    paras = []
+                try:
+                    text = extract_document_plain_text(path)
+                except Exception:
+                    text = extract_full_text(path)
+        except Exception:
+            text = ""
+    strategy_keys = rules_config.load_enabled_catalog_keys(db, "strategy")
+    report = e_tender_score.run(
+        text,
+        checklist.score_rules,
+        checklist.dimensions,
+        headings=headings,
+        strategy_keys=strategy_keys,
+    )
+    run.tender_rules_json = report
+    db.commit()
+    return report
 
 
 def _latest_done_run(db: Session, project_id: str) -> ReviewRun:
@@ -180,6 +224,7 @@ def export_latest_review_report(
         levels=run.levels_json or [],
         dimensions=run.dimensions_json or [],
         issues=issues,
+        tech_modules=run.tech_modules_json or [],
         finished_at=run.finished_at,
     )
     write_audit(

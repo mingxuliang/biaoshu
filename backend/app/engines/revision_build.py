@@ -19,10 +19,61 @@ _CN_PAREN = re.compile(r"^[（(]([一二三四五六七八九十]+)[）)]")
 _DOTTED = re.compile(r"^(\d+\.\d+(?:\.\d+)*)")
 _SEQ = re.compile(r"^(\d{1,2})[.．、](?!\d)")
 _ATTACH = re.compile(r"^附件[0-9一二三四五六七八九十]")
+_TOC_DOTS = re.compile(r"[.．…·]{3,}\s*\d{1,4}\s*$")
+_TOC_PAGE_TAIL = re.compile(r"\s+\d{1,4}\s*$")
 
 
 def _normalize(s: str) -> str:
     return _WS_RE.sub("", s or "")
+
+
+def _is_toc_title(text: str) -> bool:
+    t = _normalize(text)
+    return t == "目录" or (t.startswith("目录") and len(t) <= 8)
+
+
+def _looks_like_toc_line(text: str) -> bool:
+    """目录页条目：点线+页码，或「第一章 xxx 12」这类带页码的短行。"""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _is_toc_title(t):
+        return True
+    if _TOC_DOTS.search(t):
+        return True
+    if _TOC_PAGE_TAIL.search(t) and "。" not in t and len(t) <= 64:
+        head = _TOC_PAGE_TAIL.sub("", t).strip()
+        if _CHAPTER.match(head) or _DOTTED.match(head) or _CN_DOT.match(head) or _CN_PAREN.match(head) or _SEQ.match(head):
+            return True
+    return False
+
+
+def mark_toc_on_sections(sections: list[dict]) -> list[dict]:
+    """给已落库的章节树补 isToc，供重新锚定（旧草稿也跳过目录页）。"""
+    in_toc = False
+    for sec in sections:
+        heading = (sec.get("heading") or "").strip()
+        if _is_toc_title(heading):
+            in_toc = True
+            sec["isToc"] = True
+        elif in_toc and not _looks_like_toc_line(heading) and (
+            _CHAPTER.match(heading) or _CN_DOT.match(heading)
+        ):
+            in_toc = False
+            sec["isToc"] = False
+        else:
+            sec["isToc"] = bool(in_toc or _looks_like_toc_line(heading))
+        for para in sec.get("paragraphs") or []:
+            text = para.get("text") or ""
+            para["isToc"] = bool(sec.get("isToc")) or _looks_like_toc_line(text)
+    return sections
+
+
+def _is_anchorable(para: dict) -> bool:
+    if para.get("isToc"):
+        return False
+    text = (para.get("text") or "").strip()
+    return bool(text) and not _looks_like_toc_line(text)
 
 
 def _heading_level(p: dict, body_size_pt: float = 12.0) -> int | None:
@@ -31,6 +82,8 @@ def _heading_level(p: dict, body_size_pt: float = 12.0) -> int | None:
     投标书大量标题并不使用 Word「标题 1/2」样式，只是「第一章 / 一、 / 1.1」编号
     或加粗放大字号。只认样式名会把一级二级标题全部当成正文。
     """
+    if p.get("fromTable"):
+        return None
     style_name = p.get("style") or ""
     m = re.search(r"(?:Heading|标题)\s*(\d+)", style_name, re.IGNORECASE)
     if m:
@@ -91,8 +144,20 @@ def build_sections(paragraphs: list[dict]) -> list[dict]:
     current: dict | None = None
     sec_seq = 0
     para_seq = 0
+    in_toc = False
 
     for p in paragraphs:
+        text = (p.get("text") or "").strip()
+        if _is_toc_title(text):
+            in_toc = True
+            continue
+        if in_toc:
+            if _looks_like_toc_line(text) or not text:
+                continue
+            in_toc = False
+        if _looks_like_toc_line(text):
+            continue
+
         level = _heading_level(p, body_size)
         if level is not None:
             sec_seq += 1
@@ -146,32 +211,58 @@ def _longest_common_span(excerpt: str, text: str) -> tuple[int, int, float]:
     return match.b, match.size, ratio
 
 
+def _prefer_body(candidates: list[dict]) -> dict:
+    """同名片段在目录与正文都会出现时，取更靠后、更长的正文段。"""
+    return max(candidates, key=lambda p: (int(p.get("index") or 0), len(p.get("text") or "")))
+
+
 def _find_target(excerpt: str, all_paragraphs: list[dict], used_para_ids: set[str]) -> tuple[dict | None, str]:
     """依次尝试「原文完全包含 excerpt」「归一化包含」「最长公共子串」三档匹配，
     返回 (命中的段落, 用于前端高亮的 highlight 文本——必须是该段落 text 的真子串)。
+    目录页段落不参与匹配；多候选时取文档后部的正文。
     """
     if not excerpt:
         return None, ""
 
-    for para in all_paragraphs:
-        if para["id"] in used_para_ids:
-            continue
-        if excerpt in para["text"]:
-            return para, excerpt
+    pool = [
+        para
+        for para in all_paragraphs
+        if para["id"] not in used_para_ids and _is_anchorable(para)
+    ]
+    if not pool:
+        return None, ""
+
+    exact = [para for para in pool if excerpt in (para.get("text") or "")]
+    if exact:
+        return _prefer_body(exact), excerpt
+
+    # E3 摘录常带省略或前后多几个字：用前/后 16 字在正文里定位
+    core = excerpt.replace("……", "").replace("...", "").strip()
+    probes = [core]
+    if len(core) >= 16:
+        probes.extend([core[:16], core[-16:]])
+    probe_hits: list[tuple[dict, str]] = []
+    for para in pool:
+        text = para.get("text") or ""
+        for probe in probes:
+            if probe and probe in text:
+                probe_hits.append((para, probe))
+                break
+    if probe_hits:
+        best, highlight = max(probe_hits, key=lambda x: (int(x[0].get("index") or 0), len(x[0].get("text") or "")))
+        return best, highlight
 
     norm_excerpt = _normalize(excerpt)
     if norm_excerpt:
         candidates = []
-        for para in all_paragraphs:
-            if para["id"] in used_para_ids:
-                continue
-            norm_text = _normalize(para["text"])
+        for para in pool:
+            norm_text = _normalize(para.get("text") or "")
             if not norm_text:
                 continue
             if norm_excerpt in norm_text or (len(norm_excerpt) > 8 and norm_text in norm_excerpt):
                 candidates.append(para)
         if candidates:
-            best = min(candidates, key=lambda p: abs(len(p["text"]) - len(excerpt)))
+            best = _prefer_body(candidates)
             start, size, _ = _longest_common_span(excerpt, best["text"])
             highlight = best["text"][start : start + size] if size >= 4 else best["text"]
             return best, highlight
@@ -179,16 +270,17 @@ def _find_target(excerpt: str, all_paragraphs: list[dict], used_para_ids: set[st
     best_para = None
     best_ratio = 0.0
     best_span = (0, 0)
-    for para in all_paragraphs:
-        if para["id"] in used_para_ids:
-            continue
-        start, size, ratio = _longest_common_span(excerpt, para["text"])
+    best_index = -1
+    for para in pool:
+        start, size, ratio = _longest_common_span(excerpt, para.get("text") or "")
         if size < 6:
             continue
-        if ratio > best_ratio:
+        idx = int(para.get("index") or 0)
+        if ratio > best_ratio or (abs(ratio - best_ratio) < 0.02 and idx > best_index):
             best_ratio = ratio
             best_para = para
             best_span = (start, size)
+            best_index = idx
     if best_para is not None and best_ratio >= _LCS_RATIO_THRESHOLD:
         start, size = best_span
         highlight = best_para["text"][start : start + size]
@@ -208,7 +300,8 @@ def anchor_findings(sections: list[dict], issues: list[dict]) -> list[dict]:
     很低，导致大量真实可定位的问题被判定为「无法定位」。全篇级问题（既没有
     段落号，excerpt 也找不到匹配）保持不锚定，交给前端提示用户无法跳转。
     """
-    all_paragraphs = [para for sec in sections for para in sec["paragraphs"]]
+    mark_toc_on_sections(sections)
+    all_paragraphs = [para for sec in sections if not sec.get("isToc") for para in sec.get("paragraphs") or []]
     used_para_ids: set[str] = set()
 
     for issue in issues:
@@ -221,7 +314,7 @@ def anchor_findings(sections: list[dict], issues: list[dict]) -> list[dict]:
         if m:
             idx = int(m.group(1))
             for para in all_paragraphs:
-                if para["index"] == idx and para["id"] not in used_para_ids:
+                if para.get("index") == idx and para["id"] not in used_para_ids and _is_anchorable(para):
                     target = para
                     highlight = excerpt if excerpt and excerpt in para["text"] else para["text"]
                     break
@@ -235,11 +328,26 @@ def anchor_findings(sections: list[dict], issues: list[dict]) -> list[dict]:
         target["problem"] = {"issueId": issue["id"], "highlight": highlight or target["text"]}
         used_para_ids.add(target["id"])
 
-    for sec in sections:
-        for para in sec["paragraphs"]:
-            para.pop("index", None)
-
     return sections
+
+
+def clear_problems(sections: list[dict]) -> list[dict]:
+    for sec in sections:
+        for para in sec.get("paragraphs") or []:
+            para.pop("problem", None)
+    return sections
+
+
+def sections_to_blocks(sections: list[dict]) -> list[dict]:
+    """把章节树展平为 writeback_docx 需要的 heading/paragraph 块。"""
+    blocks: list[dict] = []
+    for sec in sections:
+        heading = (sec.get("heading") or "").strip()
+        if heading and heading != "文档开头":
+            blocks.append({"type": "heading", "level": int(sec.get("level") or 1), "text": heading})
+        for para in sec.get("paragraphs") or []:
+            blocks.append({"type": "paragraph", "text": para.get("text") or ""})
+    return blocks
 
 
 def blocks_to_docx(blocks: list[dict]) -> bytes:

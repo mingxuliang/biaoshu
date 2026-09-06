@@ -22,6 +22,7 @@ def review_run_to_docx(
     levels: list[dict],
     dimensions: list[dict],
     issues: list[dict],
+    tech_modules: list[dict] | None = None,
     finished_at: datetime | None = None,
 ) -> bytes:
     document = docx.Document()
@@ -61,7 +62,20 @@ def review_run_to_docx(
             f"{dim.get('name') or '—'}：{dim.get('score', '—')} 分 / 权重 {dim.get('weight', '—')}%"
         )
 
-    document.add_heading("三、预审问题清单", level=1)
+    if tech_modules:
+        document.add_heading("三、技术评分模块核验（8 项）", level=1)
+        for m in tech_modules:
+            module = m.get("module") or m.get("key") or "—"
+            max_score = m.get("maxScore", "—")
+            score = m.get("score", "—")
+            status = m.get("status") or "—"
+            line = document.add_paragraph()
+            line.add_run(f"{module}（满分 {max_score} 分）：得 {score} 分，{status}").bold = True
+            summary = (m.get("summary") or "").strip()
+            if summary:
+                document.add_paragraph(summary)
+
+    document.add_heading("四、预审问题清单", level=1)
     if not issues:
         document.add_paragraph("本轮无预审问题。")
     for i, issue in enumerate(issues, 1):
@@ -77,7 +91,7 @@ def review_run_to_docx(
         document.add_paragraph(f"招标要求原文：{quote}")
         document.add_paragraph(f"修改建议：{suggestion}")
 
-    document.add_heading("四、预审结论", level=1)
+    document.add_heading("五、预审结论", level=1)
     document.add_paragraph(
         f"本轮预审综合得分 {overall} 分，风险灯为「{light or '—'}」。"
         f"共发现废标 {waste} 项、扣分 {risk} 项、建议 {suggest} 项。"
