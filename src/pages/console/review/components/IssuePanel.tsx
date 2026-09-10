@@ -1,4 +1,5 @@
 import type { PreReviewIssue } from "@/mocks/preReview";
+import { sourceVisibleText, issueRuleLabel, splitBidAndTender } from "@/lib/excerpt";
 
 interface IssuePanelProps {
   issues: PreReviewIssue[];
@@ -16,13 +17,6 @@ const severityStyle: Record<string, string> = {
   降档: "bg-accent-50 text-accent-600 border-accent-200",
   扣分: "bg-secondary-100 text-secondary-600 border-secondary-200",
   建议: "bg-primary-50 text-primary-600 border-primary-200",
-};
-
-const dot: Record<string, string> = {
-  废标: "bg-accent-500",
-  降档: "bg-accent-400",
-  扣分: "bg-secondary-500",
-  建议: "bg-primary-500",
 };
 
 export default function IssuePanel({
@@ -67,6 +61,8 @@ export default function IssuePanel({
           {issues.map((issue) => {
             const active = activeIssueId === issue.id;
             const resolved = !!issue.resolved;
+            const { excerpt: rawExcerpt, tenderQuote } = splitBidAndTender(issue.excerpt, issue.tenderQuote, issue.rule);
+            const excerpt = sourceVisibleText(rawExcerpt) || rawExcerpt;
             return (
               <div
                 key={issue.id}
@@ -114,28 +110,23 @@ export default function IssuePanel({
                             未锚定
                           </span>
                         )}
-                      </span>
-                      <span className="font-label flex items-center gap-1 text-[10px] text-foreground-500">
-                        <span className={`h-1.5 w-1.5 rounded-full ${dot[issue.severity]}`}></span>
-                        {issue.location}
-                        {resolved && <span className="text-primary-600">已修复</span>}
+                        {resolved ? <span className="text-[10px] text-primary-600">已修复</span> : null}
                       </span>
                     </div>
+                    <div className="mt-1.5 rounded border border-secondary-100 bg-secondary-50/70 px-1.5 py-1 text-[10px] leading-relaxed text-secondary-700">
+                      <span className="font-medium">预审规则</span>
+                      {`：${issueRuleLabel(issue)}`}
+                    </div>
                     <p className={`mt-1.5 text-xs leading-relaxed ${resolved ? "text-foreground-400 line-through" : active ? "text-primary-800" : "text-foreground-700"}`}>
-                      「{issue.excerpt}」
+                      {excerpt ? `「${excerpt}」` : "本项为缺项/未响应，投标书中没有可引用的命中句"}
                     </p>
-                    {(issue.strategyCategory || issue.strategyPoint) && (
-                      <div className="mt-1.5 rounded border border-primary-100 bg-primary-50/70 px-1.5 py-1 text-[10px] leading-relaxed text-primary-700">
-                        <span className="font-medium">预审规则 · 高分策略 · {issue.strategyCategory || "高分条款"}</span>
-                        {issue.strategyPoint ? `：${issue.strategyPoint}` : ""}
-                        {issue.strategyClauses && issue.strategyClauses.length > 0 ? (
-                          <span className="block text-primary-600/90">条款：{issue.strategyClauses.slice(0, 3).join("；")}</span>
-                        ) : null}
-                        <span className="block">按此写法可拿高分</span>
-                      </div>
-                    )}
+                    {tenderQuote ? (
+                      <p className="mt-1 text-[10px] leading-relaxed text-primary-700">
+                        对标条款：「{tenderQuote}」
+                      </p>
+                    ) : null}
                     <div className="mt-1.5 text-[11px] leading-relaxed text-foreground-500">
-                      建议：{issue.suggestion}
+                      AI 修改建议：{issue.suggestion || "请按本条预审规则补全可核验的响应内容"}
                     </div>
                     <div className="mt-1.5 flex items-center justify-end">
                       <span
@@ -170,7 +161,7 @@ export default function IssuePanel({
       <div className="border-t border-background-300 bg-background-50 px-4 py-2.5">
         <p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-foreground-500">
           <i className="ri-lightbulb-flash-line mt-0.5 shrink-0 text-primary-500"></i>
-          点击问题跳到正文（不落目录）。建议已标明高分策略条款；「写入原文」会按该条款改写对应段落。勾选已修复并保存版本后，再进入二次评审。
+          点击问题跳到正文（不落目录）。规则与建议均来自本册最新一轮 AI 预审；「写入原文」会按该条预审规则改写对应段落。勾选已修复并保存版本后，再进入二次评审。
         </p>
       </div>
     </div>

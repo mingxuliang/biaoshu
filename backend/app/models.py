@@ -74,7 +74,8 @@ class BidDocument(Base):
     filename = Column(String, nullable=False)
     storage_path = Column(String, nullable=False)
     size_bytes = Column(Integer, default=0)
-    source = Column(String, default="upload")  # upload | workbench
+    source = Column(String, default="upload")  # upload | workbench | writer | revision
+    kind = Column(String, default="combined")  # business | tech | combined
     uploaded_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -88,6 +89,7 @@ class TenderDocument(Base):
     filename = Column(String, nullable=False)
     storage_path = Column(String, nullable=False)
     size_bytes = Column(Integer, default=0)
+    kind = Column(String, default="main")  # main | addendum | boq | quote | drawing
     uploaded_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -125,6 +127,7 @@ class ReviewRun(Base):
     bid_document_id = Column(String, ForeignKey("bid_documents.id"), nullable=False)
     round = Column(Integer, nullable=False)
     status = Column(String, default="queued")  # queued | running | done | failed
+    scope = Column(String, default="full")  # business | tech | full
 
     overall = Column(Float, default=0)
     waste = Column(Integer, default=0)
@@ -221,17 +224,19 @@ class ReviewFinding(Base):
 
 
 class BidRevision(Base):
-    """修改闭环的工作草稿，每个项目仅维护一份（project_id 唯一）。
+    """修改闭环工作草稿：每个项目按分册各一份（商务标 / 技术标）。
 
-    首次创建时基于该项目最新一轮 done 的 ReviewRun：解析投标书真实段落 + 把
+    首次创建时基于该分册最新一轮 done 的 ReviewRun：解析投标书真实段落 + 把
     ReviewFinding 锚定回具体段落，写入 sections_json / issues_json；
     之后编辑器的每次改动持续覆盖 content_state_json（Lexical 序列化状态）。
     """
 
     __tablename__ = "bid_revisions"
+    __table_args__ = (UniqueConstraint("project_id", "scope", name="uq_bid_revisions_project_scope"),)
 
     id = Column(String, primary_key=True, default=lambda: gen_id("rev"))
-    project_id = Column(String, index=True, nullable=False, unique=True)
+    project_id = Column(String, index=True, nullable=False)
+    scope = Column(String, nullable=False, default="business")  # business | tech
     bid_document_id = Column(String, ForeignKey("bid_documents.id"), nullable=False)
     review_run_id = Column(String, ForeignKey("review_runs.id"), nullable=False)
     sections_json = Column(JSON, default=list)

@@ -344,7 +344,12 @@ export const parseDimensionsEngineering: ParseDimension[] = [
             title: "图纸另册",
             rows: [
               { label: "图纸章节位置与图号图名", content: "" },
+              { label: "图纸目录（图号 / 图名 / 专业 / 比例 / 页码）", content: "" },
+              { label: "设计说明与施工要点", content: "" },
+              { label: "主要工程内容与结构形式", content: "" },
+              { label: "关键尺寸、材料与图面注记", content: "" },
               { label: "图纸与技术标准冲突时的处理原则", content: "" },
+              { label: "解读范围说明（读了哪些页、哪些页未送视觉）", content: "" },
             ],
           },
         ],

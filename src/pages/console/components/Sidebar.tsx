@@ -1,5 +1,6 @@
 import { NavLink } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
+import { hideWriter } from "@/lib/flags";
 import { hasAnyPerm, type RolePerm } from "@/lib/permissions";
 
 const navGroups: {
@@ -64,7 +65,7 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
           </div>
           <div>
             <div className="font-heading text-[15px] font-bold tracking-wider text-foreground-950">
-              智标云
+              慧投标
             </div>
             <div className="font-label text-[10px] text-foreground-500">
               AI 标书系统
@@ -75,7 +76,10 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
         {/* Nav */}
         <nav className="flex-1 overflow-y-auto px-3 py-3">
           {navGroups.map((group) => {
-            const items = group.items.filter((item) => !item.anyOf || hasAnyPerm(user?.role, item.anyOf));
+            const items = group.items.filter((item) => {
+              if (hideWriter && item.to === "/console/writer") return false;
+              return !item.anyOf || hasAnyPerm(user?.role, item.anyOf);
+            });
             if (items.length === 0) return null;
             return (
             <div key={group.label}>

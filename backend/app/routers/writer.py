@@ -12,7 +12,6 @@ from ..auth import get_current_user
 from ..db import get_db
 from ..engines import e_writer
 from ..engines.ark_image import ArkImageError, generate_and_save
-from ..engines.docx_extract import extract_paragraphs
 from ..engines.tender_form import extract_forms_from_storage, needs_form_recopy
 from ..engines.tender_style import extract_tender_typography_from_storage
 from ..engines.writer_export import chapters_to_docx
@@ -370,10 +369,10 @@ def get_tender_document_paragraphs(
     require_project(db, current_user, doc.project_id)
     try:
         with storage.as_local(doc.storage_path) as path:
-            # PDF 招标文件没有 docx 段落结构，抽取会失败；前端锚点定位/搜索功能
-            # 对该场景已做容错（原文预览走 PDF 原生渲染，不依赖分段结果）。
             try:
-                paragraphs = extract_paragraphs(path)
+                from ..engines.tender_package import extract_as_paragraphs
+
+                paragraphs = extract_as_paragraphs(path, doc.filename)
             except Exception:
                 paragraphs = []
     except FileNotFoundError:

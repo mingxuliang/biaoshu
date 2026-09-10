@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from ..auth import get_current_user
 from ..db import get_db
-from ..engines.llm import ping_model
+from ..engines.llm import looks_like_vision_model, ping_model
 from ..llm_catalog import PRESETS, PROVIDER_KINDS, load_providers, mask_key, preset_for, provider_ready
 from ..models import LlmModel, LlmProvider, User, gen_id
 from ..permissions import PERM_SETTINGS, PERM_WRITER, require_perm
@@ -38,7 +38,7 @@ def _model_to_out(model: LlmModel, provider: LlmProvider) -> LlmModelOut:
         isDefault=bool(model.is_default),
         ctx=model.ctx or "",
         speed=model.speed or "",
-        vision=provider.kind == "doubao",
+        vision=looks_like_vision_model(model.api_model or "", name=model.name or ""),
         ready=provider_ready(provider) and bool((model.api_model or "").strip()),
     )
 

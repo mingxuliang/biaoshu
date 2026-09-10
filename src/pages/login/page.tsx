@@ -84,7 +84,7 @@ export default function LoginPage() {
             </div>
             <div>
               <div className="font-heading text-xl font-bold tracking-widest text-foreground-950">
-                智标云
+                慧投标
               </div>
               <div className="font-label text-[11px] text-foreground-500">
                 AI 智能标书系统
@@ -165,7 +165,7 @@ export default function LoginPage() {
           </div>
           <div>
             <div className="font-heading text-lg font-bold tracking-widest text-foreground-950">
-              智标云
+              慧投标
             </div>
             <div className="font-label text-[11px] text-foreground-500">
               AI 智能标书系统
@@ -179,7 +179,7 @@ export default function LoginPage() {
               {mode === "login" ? "欢迎回来" : "创建你的账号"}
             </h2>
             <p className="font-label mt-1.5 text-sm text-foreground-500">
-              {mode === "login" ? "登录你的智标云工作台，继续高效的投标之旅" : "注册新账号，开启智能标书之旅"}
+              {mode === "login" ? "登录你的慧投标工作台，继续高效的投标之旅" : "注册新账号，开启智能标书之旅"}
             </p>
           </div>
 
@@ -365,7 +365,7 @@ export default function LoginPage() {
 
         {/* 底部版权 */}
         <p className="font-label mt-auto pt-8 text-center text-xs text-foreground-500">
-          © 2026 智标云 · 让每一次投标更从容
+          © 2026 慧投标 · 让每一次投标更从容
         </p>
       </div>
     </div>

@@ -33,7 +33,7 @@ with SessionLocal() as _seed_db:
     seed_rules(_seed_db)
     seed_llm(_seed_db)
 
-app = FastAPI(title="智标云 AI 预审引擎")
+app = FastAPI(title="慧投标 AI 预审引擎")
 
 app.add_middleware(
     CORSMiddleware,

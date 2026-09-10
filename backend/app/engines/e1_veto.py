@@ -13,6 +13,8 @@ enabled_keys：管理员在「规则页 / 一票否决」tab 关闭某条时，�
 import re
 from datetime import datetime
 
+from .excerpt_guard import hit_sentence
+
 VALIDITY_KEYWORDS = ["投标有效期"]
 VALIDITY_NUMBER_PATTERN = re.compile(r"(\d{1,3})\s*(日历天|天)")
 
@@ -34,6 +36,16 @@ LOW_PRICE_EXPLANATION_KEYWORDS = ("说明", "分析", "承诺", "让利", "薄�
 _CJK_RUN = re.compile(r"[\u4e00-\u9fff]{4,}")
 _GENERIC_PREFIXES = ("必须", "应当", "须", "应", "提交", "提供", "出具", "附上")
 _VETO_TYPE_HINTS = ("星号", "废标")
+SENTENCE_SPLIT = re.compile(r"[。！？；\n]")
+
+CERT_NAMES = ("营业执照", "安全生产许可证", "资质证书")
+CERT_PROOF = {
+    "营业执照": ("统一社会信用代码", "信用代码", "营业执照副本", "登记机关", "经营范围"),
+    "安全生产许可证": ("安全生产许可证号", "许可范围", "安许证"),
+    "资质证书": ("资质证书编号", "资质等级", "施工总承包", "专业承包", "证书编号"),
+}
+STAFF_PROOF = ("证书编号", "注册证书", "执业资格", "建造师", "职称证")
+SOCIAL_PROOF = ("社保证明", "社保缴纳", "参保", "养老保险", "缴纳单位")
 
 
 def _now() -> datetime:
@@ -84,6 +96,19 @@ def _is_veto_clause(item: dict) -> bool:
     return any(hint in kind for hint in _VETO_TYPE_HINTS)
 
 
+def _hit_excerpt(full_text: str, paragraphs: list[dict] | None, keywords: tuple[str, ...] | list[str]) -> str:
+    return hit_sentence(full_text, paragraphs, keywords, skip_score_voice=True)
+
+
+def _hit_tender(combined_req: str, keywords: tuple[str, ...] | list[str]) -> str:
+    hit = hit_sentence(combined_req, None, keywords, skip_reject=True)
+    return hit or hit_sentence(combined_req, None, keywords)
+
+
+def _has_any(text: str, keys: tuple[str, ...]) -> bool:
+    return any(k in (text or "") for k in keys)
+
+
 def run(
     paragraphs: list[dict],
     checklist_params: dict | None = None,
@@ -130,7 +155,7 @@ def run(
                 _finding(
                     severity="废标",
                     location=f"投标文件 / 段落 {p['index']}",
-                    excerpt=text[:150],
+                    excerpt=_hit_excerpt(text, [{"text": text}], PRICE_KEYWORDS),
                     rule="F02.01 报价不得为负数",
                     suggestion="投标报价出现负数，属于报价废标情形，须重新核对并更正报价表",
                 )
@@ -148,7 +173,7 @@ def run(
                         _finding(
                             severity="废标",
                             location=f"投标文件 / 段落 {p['index']}",
-                            excerpt=text[:150],
+                            excerpt=_hit_excerpt(text, [{"text": text}], PRICE_KEYWORDS),
                             rule="F02.01 投标报价不得超过预算上限（评标尺子）",
                             suggestion=f"投标报价 {price_wan} 万元超过招标文件预算上限 {budget_cap_wan} 万元，须重新核对报价",
                             tender_quote=f"预算上限 {budget_cap_wan} 万元",
@@ -172,7 +197,7 @@ def run(
                         _finding(
                             severity="废标",
                             location=f"投标文件 / 段落 {p['index']}",
-                            excerpt=text[:150],
+                            excerpt=_hit_excerpt(text, [{"text": text}], (kw,)),
                             rule="F02.02 资质证书须在有效期内",
                             suggestion=f"「{kw}」已于 {y}-{mo:02d}-{d:02d} 过期，须更新为有效证书后重新提交",
                         )
@@ -185,7 +210,7 @@ def run(
                         _finding(
                             severity="降档",
                             location=f"投标文件 / 段落 {p['index']}",
-                            excerpt=text[:150],
+                            excerpt=_hit_excerpt(text, [{"text": text}], (kw,)),
                             rule="F02.05 签字盖章须实质性完成",
                             suggestion=f"检测到「{kw}」附近存在占位符（下划线/空括号），请确认已实际签字盖章",
                         )
@@ -196,7 +221,7 @@ def run(
                 _finding(
                     severity="废标",
                     location=f"投标文件 / 段落 {p['index']}",
-                    excerpt=text[:150],
+                    excerpt=_hit_excerpt(text, [{"text": text}], PRICE_KEYWORDS),
                     rule="F02.01 报价不得漏项",
                     suggestion="报价栏仍为占位符，属于漏项废标情形，请填入完整投标总价",
                 )
@@ -214,7 +239,7 @@ def run(
                         _finding(
                             severity="扣分",
                             location=f"投标文件 / 段落 {p['index']}",
-                            excerpt=text[:150],
+                            excerpt=_hit_excerpt(text, [{"text": text}], ("暂列金额",)),
                             rule="F02.01 暂列金额须按招标文件固定填写",
                             suggestion=f"招标文件固定暂列金额为 {provisional_amount_wan} 万元，投标文件填写为 {prov_wan} 万元，须核对一致",
                             tender_quote=f"暂列金额 {provisional_amount_wan} 万元",
@@ -227,9 +252,9 @@ def run(
                 _finding(
                     severity="废标",
                     location="投标文件 / 投标函",
-                    excerpt="投标有效期条款未填写明确天数",
+                    excerpt=_hit_excerpt(full_text, paragraphs, VALIDITY_KEYWORDS),
                     rule="F02.03 实质性条款须明确响应",
-                    suggestion="补填投标有效期的具体天数（如 90 日历天）并加盖公章",
+                    suggestion="投标有效期条款未填写明确天数。请补填具体天数（如 90 日历天）并加盖公章",
                 )
             )
         elif (
@@ -243,7 +268,7 @@ def run(
                 _finding(
                     severity="废标",
                     location="投标文件 / 投标函",
-                    excerpt=f"投标有效期填写为 {seen_validity_days} 日历天",
+                    excerpt=_hit_excerpt(full_text, paragraphs, VALIDITY_KEYWORDS),
                     rule="F02.03 实质性条款须明确响应（评标尺子）",
                     suggestion=f"招标文件要求投标有效期不少于 {validity_days_required} 日历天，当前填写 {seen_validity_days} 天不满足要求",
                     tender_quote=f"投标有效期不少于 {validity_days_required} 日历天",
@@ -254,9 +279,9 @@ def run(
                 _finding(
                     severity="建议",
                     location="投标文件 / 投标函",
-                    excerpt="全文未检测到「投标有效期」条款",
+                    excerpt="",
                     rule="F02.03 实质性条款须明确响应",
-                    suggestion="请人工确认投标函是否包含投标有效期条款",
+                    suggestion="投标书全文未检出「投标有效期」条款。请人工确认投标函是否包含投标有效期并写明天数",
                 )
             )
 
@@ -277,7 +302,7 @@ def run(
                         _finding(
                             severity="废标",
                             location="投标文件 / 投标报价",
-                            excerpt=f"投标报价 {price_wan} 万元，基准价 {base_wan} 万元，低于基准价 {deviation:.1f}%",
+                            excerpt=f"{m_price.group(0)}；{m_base.group(0)}",
                             rule="F02.01 恶意低价须提供说明",
                             suggestion=(
                                 f"投标报价低于评标基准价 {malicious_threshold}% 以上且未见成本说明/分析/承诺等解释性文字，"
@@ -300,31 +325,30 @@ def run(
                 findings.append(
                     _finding(
                         severity="废标",
-                        location="投标文件 / 星号条款响应",
-                        excerpt=clause[:150],
+                        location=f"投标文件 / 星号条款响应 / {item.get('original') or '未标注'}",
+                        excerpt="",
                         rule="F02.06 星号条款必须全部响应",
                         suggestion="招标文件标记的实质性条款未在投标文件中检出对应响应，任何一条不响应即废标",
-                        tender_quote=str(item.get("original") or ""),
+                        tender_quote=clause[:500],
                     )
                 )
 
     findings.extend(
-        _context_findings(full_text, must_respond or [], context, checklist_params, enabled_keys)
+        _context_findings(full_text, paragraphs, must_respond or [], context, checklist_params, enabled_keys)
     )
     return findings
 
 
 def _context_findings(
     full_text: str,
+    paragraphs: list[dict],
     must_respond: list,
     context,
     checklist_params: dict,
     enabled_keys: set[str] | None,
 ) -> list[dict]:
-    if context is None:
-        return []
     extra: list[dict] = []
-    tender = getattr(context, "tender_text", "") or ""
+    tender = getattr(context, "tender_text", "") or "" if context is not None else ""
     combined_req = tender + "\n" + " ".join(
         str(item.get("clause") or item.get("text") or "") for item in must_respond if isinstance(item, dict)
     )
@@ -333,8 +357,6 @@ def _context_findings(
     personnel_enabled = _enabled("personnel", enabled_keys)
     qualification_enabled = _enabled("qualification", enabled_keys)
     content_match_enabled = _enabled("content_match", enabled_keys)
-
-    quals = list(getattr(context, "quals", []) or [])
 
     if (
         bid_elements_enabled
@@ -345,18 +367,17 @@ def _context_findings(
             _finding(
                 severity="废标",
                 location="投标文件 / 投标保证金",
-                excerpt="招标文件要求提交投标保证金，投标文件未检出「保证金」表述",
+                excerpt="",
                 rule="F02.05 投标保证金须按招标要求提交",
-                suggestion="请在投标文件中写明保证金金额、形式与递交凭证，并附缴款证明",
-                tender_quote="招标文件含保证金要求",
+                suggestion="招标文件要求提交投标保证金，投标书未检出「保证金」表述。请在投标文件中写明保证金金额、形式与递交凭证，并附缴款证明",
+                tender_quote=_hit_tender(combined_req, ("投标保证金", "保证金")),
             )
         )
 
-    if bid_elements_enabled and checklist_params.get("anonymity_required"):
-        certs = [q for q in quals if q.kind == "cert"]
+    if bid_elements_enabled and checklist_params.get("anonymity_required") and context is not None:
         bidder_name = ""
-        for q in certs:
-            if "营业执照" in (q.name or "") and (q.owner or "").strip():
+        for q in getattr(context, "quals", []) or []:
+            if getattr(q, "kind", "") == "cert" and "营业执照" in (getattr(q, "name", "") or "") and (getattr(q, "owner", "") or "").strip():
                 bidder_name = q.owner.strip()
                 break
         if bidder_name and len(bidder_name) >= 4 and bidder_name in full_text:
@@ -364,70 +385,88 @@ def _context_findings(
                 _finding(
                     severity="降档",
                     location="投标文件 / 暗标残留",
-                    excerpt=f"招标文件要求暗标评审，正文检出本企业名称「{bidder_name}」",
+                    excerpt=_hit_excerpt(full_text, paragraphs, (bidder_name,)),
                     rule="F02.05 暗标文件不得出现单位名称",
-                    suggestion="请删除正文中出现的本企业名称、徽标等可识别身份信息，避免暗标评审违规",
+                    suggestion=f"招标要求暗标评审，投标书正文出现本企业名称「{bidder_name}」。请删除单位名称、徽标等可识别身份信息",
                 )
             )
 
-    personnel_topics = (("项目经理", "建造师"), ("安全员", "安全员"), ("八大员", "八大员"), ("社保", "社保"))
-    if personnel_enabled and any(topic in full_text or topic in combined_req for topic, _hint in personnel_topics):
-        people = [q for q in quals if q.kind == "people"]
-        if "社保" in combined_req or "社保" in full_text:
-            has_social = any("社保" in (q.blob or "") for q in people) or "社保" in full_text
-            if not has_social:
+    if personnel_enabled:
+        if "社保" in full_text:
+            if not _has_any(full_text, SOCIAL_PROOF):
                 extra.append(
                     _finding(
                         severity="降档",
                         location="资格文件 / 人员社保",
-                        excerpt="招标或正文涉及社保，但资质库人员条目与投标文件均未检出社保证明关键词",
+                        excerpt=_hit_excerpt(full_text, paragraphs, ("社保",)),
                         rule="F02.02 人员核查-社保证明",
-                        suggestion="请在资质证照库录入人员及社保证明，并在投标文件中附对应材料。本系统不联网社保局，只核验已入库材料与正文关键词",
+                        suggestion="投标书写到社保，但未检出缴纳证明、参保或养老保险等可核验表述。请在资格文件中附社保证明",
                     )
                 )
-        if "项目经理" in full_text or "项目经理" in combined_req:
-            if not any("项目经理" in (q.blob or "") or "建造师" in (q.blob or "") for q in people):
+        elif "社保" in combined_req:
+            extra.append(
+                _finding(
+                    severity="降档",
+                    location="资格文件 / 人员社保",
+                    excerpt="",
+                    rule="F02.02 人员核查-社保证明",
+                    suggestion="招标要求提供社保证明，投标书未检出相关表述。请在资格文件中附人员社保证明",
+                    tender_quote=_hit_tender(combined_req, ("社保",)),
+                )
+            )
+        if "项目经理" in full_text:
+            if not _has_any(full_text, STAFF_PROOF):
                 extra.append(
                     _finding(
                         severity="降档",
                         location="资格文件 / 项目经理",
-                        excerpt="正文或招标要求项目经理，但企业资质库未录入对应人员证书",
+                        excerpt=_hit_excerpt(full_text, paragraphs, ("项目经理",)),
                         rule="F02.02 人员核查-项目经理证书",
-                        suggestion="请在资质证照库录入项目经理/注册建造师证书后再提交",
+                        suggestion="投标书写到项目经理，但未检出建造师/证书编号或注册信息。请在资格文件中附项目经理证书",
                     )
                 )
+        elif "项目经理" in combined_req:
+            extra.append(
+                _finding(
+                    severity="降档",
+                    location="资格文件 / 项目经理",
+                    excerpt="",
+                    rule="F02.02 人员核查-项目经理证书",
+                    suggestion="招标要求配备项目经理，投标书未检出该岗位。请在资格文件中列明项目经理及证书",
+                    tender_quote=_hit_tender(combined_req, ("项目经理",)),
+                )
+            )
 
     if qualification_enabled:
-        cert_names = ("营业执照", "安全生产许可证", "资质证书")
-        certs = [q for q in quals if q.kind == "cert"]
-        for cert_name in cert_names:
-            if cert_name not in full_text and cert_name not in combined_req:
+        for cert_name in CERT_NAMES:
+            in_bid = cert_name in full_text
+            in_tender = cert_name in combined_req
+            if not in_bid and not in_tender:
                 continue
-            matched = [q for q in certs if cert_name in (q.name or "") or cert_name in (q.blob or "")]
-            if not matched and cert_name == "资质证书":
-                matched = [q for q in certs if "施工" in (q.name or "") or "承包" in (q.name or "")]
-            if not matched:
+            if in_bid and not _has_any(full_text, CERT_PROOF.get(cert_name, ())):
                 extra.append(
                     _finding(
                         severity="降档",
                         location=f"资格文件 / {cert_name}",
-                        excerpt=f"投标文件或招标要求涉及「{cert_name}」，企业资质库未找到对应条目",
-                        rule="F02.02 资质证书须入库可核验",
-                        suggestion=f"请在资质证照库录入有效的「{cert_name}」扫描件，预审按库内材料核验，不编造证号",
+                        excerpt=_hit_excerpt(full_text, paragraphs, (cert_name,)),
+                        rule="F02.02 资质证书须在投标书中可核验",
+                        suggestion=f"投标书写到「{cert_name}」，但未检出证号、有效期或副本等可核验信息。请在资格文件中附扫描件并写明证号与有效期",
+                        tender_quote=_hit_tender(combined_req, (cert_name,)) if in_tender else "",
                     )
                 )
-            elif any(q.expired for q in matched):
+            elif in_tender and not in_bid:
                 extra.append(
                     _finding(
-                        severity="废标",
+                        severity="降档",
                         location=f"资格文件 / {cert_name}",
-                        excerpt=f"资质库中「{matched[0].name}」已过有效期",
-                        rule="F02.02 资质证书须在有效期内",
-                        suggestion="请更新为仍在有效期内的证书后再提交",
+                        excerpt="",
+                        rule="F02.02 资质证书须在投标书中可核验",
+                        suggestion=f"招标要求提供「{cert_name}」，投标书未检出。请在资格文件中附有效扫描件并写明证号与有效期",
+                        tender_quote=_hit_tender(combined_req, (cert_name,)),
                     )
                 )
 
-    if content_match_enabled:
+    if content_match_enabled and context is not None:
         current_name = (getattr(context, "project_name", "") or "").strip()
         for other in getattr(context, "other_project_names", []) or []:
             if not other or other == current_name:
@@ -437,9 +476,9 @@ def _context_findings(
                     _finding(
                         severity="废标",
                         location="投标文件 / 内容错配",
-                        excerpt=other[:80],
+                        excerpt=_hit_excerpt(full_text, paragraphs, (other,)),
                         rule="F02.07 不得出现其他项目名称",
-                        suggestion=f"检出本企业其他项目名称「{other}」，请替换为本项目全称，避免串稿",
+                        suggestion=f"投标书检出本企业其他项目名称「{other}」，请替换为本项目全称，避免串稿",
                     )
                 )
                 break

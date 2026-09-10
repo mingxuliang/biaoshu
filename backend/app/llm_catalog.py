@@ -15,10 +15,11 @@ PRESETS: list[dict] = [
         "label": "DeepSeek",
         "default_base_url": "https://api.deepseek.com",
         "key_required": True,
-        "hint": "在 platform.deepseek.com 创建 API Key。思维链关闭可避免推理模型只输出思考、正文为空。",
+        "hint": "在 platform.deepseek.com 创建 API Key。V4.1 Flash 接口名为 deepseek-flash，官方标明 Vision（可看图）；V4 Pro 当前不支持图片。",
         "sample_models": [
+            {"id": "deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash", "api_model": "deepseek-flash", "thinking": False, "ctx": "1M · 多模态", "speed": "快"},
             {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "api_model": "deepseek-v4-pro", "thinking": False, "ctx": "1M", "speed": "中", "is_default": True},
-            {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "api_model": "deepseek-v4-flash", "thinking": False, "ctx": "1M", "speed": "快"},
+            {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash（兼容）", "api_model": "deepseek-v4-flash", "thinking": False, "ctx": "1M · 已路由到 V4.1", "speed": "快"},
         ],
     },
     {
@@ -110,9 +111,38 @@ def provider_ready(provider: LlmProvider) -> bool:
     return True
 
 
+def ensure_deepseek_v41_flash(db: Session) -> None:
+    """已有 DeepSeek 接入时补上 V4.1 Flash（官方多模态型号 deepseek-flash），不改用户默认模型。"""
+    provider = db.query(LlmProvider).filter(LlmProvider.kind == "deepseek").order_by(LlmProvider.created_at.asc()).first()
+    if provider is None:
+        return
+    models = db.query(LlmModel).filter(LlmModel.provider_id == provider.id).all()
+    apis = {(m.api_model or "").strip().lower() for m in models}
+    ids = {m.id for m in models}
+    if "deepseek-flash" in apis or "deepseek-v4.1-flash" in ids:
+        return
+    max_order = min((m.sort_order or 0) for m in models) if models else 0
+    db.add(
+        LlmModel(
+            id="deepseek-v4.1-flash",
+            provider_id=provider.id,
+            name="DeepSeek V4.1 Flash",
+            api_model="deepseek-flash",
+            thinking=False,
+            enabled=True,
+            is_default=False,
+            ctx="1M · 多模态",
+            speed="快",
+            sort_order=max_order - 1,
+        )
+    )
+    db.commit()
+
+
 def seed_llm_catalog(db: Session) -> None:
     """空表时写入平台模板，并把 .env 里已有的 DeepSeek / 豆包 Key 带进来。"""
     if db.query(LlmProvider).count() > 0:
+        ensure_deepseek_v41_flash(db)
         return
     settings = get_settings()
     env_keys = {

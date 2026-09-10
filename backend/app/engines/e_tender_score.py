@@ -12,6 +12,8 @@ import logging
 import re
 
 from . import parse_schema, rules_data
+from .bid_kind import booklet_of_source
+from .excerpt_guard import hit_sentence
 from .llm import LlmError, chat_complete, get_default_model_id
 
 logger = logging.getLogger(__name__)
@@ -60,8 +62,15 @@ _STRATEGY_BY_THEME = {
 }
 
 
-def _group_of(dimension: str, label: str = "") -> str:
-    """分组名优先用本项目解析二级标题（技术评审标准/商务评审/技术…），不套固定 8 模块名。"""
+def _group_of(dimension: str, label: str = "", source_item_id: str = "") -> str:
+    """分组优先用解析槽（eval-business/eval-tech），没有再回退标题关键词。"""
+    slot = booklet_of_source(source_item_id, f"{dimension}{label}")
+    if slot == "price":
+        return dimension if dimension and any(k in dimension for k in ("报价", "价格")) else "报价"
+    if slot == "business":
+        return dimension or "商务标"
+    if slot == "tech":
+        return dimension or "技术标"
     blob = f"{dimension}{label}"
     if any(k in blob for k in ("报价", "价格", "限价")):
         return dimension if dimension and any(k in dimension for k in ("报价", "价格")) else "报价"
@@ -176,6 +185,7 @@ def _blobs_from_tree(tree: list | None) -> list[dict]:
                             "section": title,
                             "label": label,
                             "content": content,
+                            "sourceItemId": item.get("id") or "",
                         }
                     )
     return out
@@ -203,6 +213,7 @@ def _blobs_from_score_rules(score_rules: list | None) -> list[dict]:
                 "label": label,
                 "content": content,
                 "weight": item.get("weight") or 0,
+                "sourceItemId": item.get("sourceItemId") or "",
             }
         )
     return out
@@ -214,7 +225,7 @@ def expand_score_items(score_rules: list | None, tree: list | None = None) -> li
     items: list[dict] = []
     seq = 0
     for blob in blobs:
-        group = _group_of(blob["dimension"], f"{blob.get('label') or ''}{blob['content'][:20]}")
+        group = _group_of(blob["dimension"], f"{blob.get('label') or ''}{blob['content'][:20]}", blob.get("sourceItemId") or "")
         factors = _split_factors(blob["content"])
         if factors:
             for name, score in factors:
@@ -227,6 +238,7 @@ def expand_score_items(score_rules: list | None, tree: list | None = None) -> li
                         "rule": _rule_for_factor(blob["content"], name),
                         "maxScore": score,
                         "formula": _is_formula(group, name + blob["content"]),
+                        "sourceItemId": blob.get("sourceItemId") or "",
                     }
                 )
             continue
@@ -248,6 +260,7 @@ def expand_score_items(score_rules: list | None, tree: list | None = None) -> li
                 "rule": blob["content"],
                 "maxScore": weight,
                 "formula": _is_formula(group, blob["content"]),
+                "sourceItemId": blob.get("sourceItemId") or "",
             }
         )
     return items
@@ -301,40 +314,66 @@ _JUDGE_TIMEOUT = 180
 _DIGEST = 36000
 
 
-def _windows(name: str, rule: str, bid: str) -> str:
-    """从全文检索与本评分点相关的段落，供评委阅读（先扫完全文再截取）。"""
+def _windows(name: str, rule: str, bid: str, paragraphs: list[dict] | None = None) -> str:
+    """句级检索与本评分点相关的段落；找不到则空，禁止退回文首。
+
+    检索窗若只命中短标题、附近无表无图，按未定位（空窗），不把目录当证据。
+    """
     if not (bid or "").strip():
         return ""
-    keys = [k for k in (name, *(re.findall(r"[\u4e00-\u9fff]{4,}", name or ""))) if k]
+    keys = [k for k in (name, *(re.findall(r"[\u4e00-\u9fff]{4,}", name or "")[:6])) if k]
+    sent = hit_sentence(bid, paragraphs, keys, skip_score_voice=True)
+    if not sent:
+        return ""
+    raw = [p for p in (paragraphs or []) if isinstance(p, dict) and (p.get("text") or "").strip()]
+    if raw:
+        for i, p in enumerate(raw):
+            para = (p.get("text") or "").strip()
+            if sent in para or any(k in para for k in keys if len(k) >= 4):
+                nearby = raw[max(0, i - 1) : i + 3]
+                if _heading_only_evidence(p, nearby):
+                    continue
+                chunk = "\n".join((x.get("text") or "").strip() for x in nearby)
+                return chunk[:_WINDOW]
+        return ""
     paras = [p.strip() for p in re.split(r"\n+", bid) if p.strip()]
-    hits: list[str] = []
     for i, para in enumerate(paras):
-        if any(k in para for k in keys):
-            chunk = "\n".join(paras[max(0, i - 1) : i + 3])
-            if chunk not in hits:
-                hits.append(chunk)
-        if sum(len(h) for h in hits) >= _WINDOW:
-            break
-    if hits:
-        return "\n\n----\n\n".join(hits)[:_WINDOW]
-    token = (name or "")[:4]
-    idx = bid.find(token) if len(token) >= 4 else -1
-    if idx >= 0:
-        return bid[max(0, idx - 500) : idx + _WINDOW - 500]
+        if sent in para or any(k in para for k in keys if len(k) >= 4):
+            nearby = paras[max(0, i - 1) : i + 3]
+            if _plain_heading_only(para, nearby):
+                continue
+            chunk = "\n".join(nearby)
+            return chunk[:_WINDOW]
     return ""
 
 
-def _digest(bid: str, headings: list[str] | None) -> str:
-    toc = [h.strip() for h in (headings or []) if h and 2 <= len(h.strip()) <= 80][:100]
-    head = "目录/标题：\n" + "\n".join(toc) if toc else ""
-    body = bid or ""
-    if len(body) <= _DIGEST:
-        return f"{head}\n\n投标文件全文：\n{body}".strip()
-    mid = len(body) // 2
-    return (
-        f"{head}\n\n投标文件全文（已通读后分段送审，首部+中部+尾部）：\n"
-        f"{body[: _DIGEST // 2]}\n\n……\n\n{body[mid : mid + _DIGEST // 4]}\n\n……\n\n{body[-_DIGEST // 4 :]}"
+def _heading_only_evidence(hit: dict, nearby: list[dict]) -> bool:
+    para = (hit.get("text") or "").strip()
+    has_table = any(x.get("fromTable") for x in nearby)
+    has_img = any(x.get("isImage") or "【附图" in (x.get("text") or "") for x in nearby)
+    body = "".join(
+        (x.get("text") or "")
+        for x in nearby
+        if not x.get("isHeading") and not x.get("isImage") and not x.get("fromTable")
     )
+    hit_heading = bool(hit.get("isHeading")) or (len(para) <= 48 and "。" not in para)
+    if hit_heading and not has_table and not has_img and len(body.strip()) < 40:
+        return True
+    return False
+
+
+def _plain_heading_only(para: str, nearby: list[str]) -> bool:
+    body = "".join(p for p in nearby if p != para and not (len(p) <= 48 and "。" not in p))
+    if "【附图" in "\n".join(nearby) or " | " in "\n".join(nearby):
+        return False
+    return len(para) <= 48 and "。" not in para and len(body.strip()) < 40
+
+
+def _digest(headings: list[str] | None) -> str:
+    toc = [h.strip() for h in (headings or []) if h and 2 <= len(h.strip()) <= 80][:100]
+    if not toc:
+        return "目录/标题：（未能抽出目录）"
+    return "目录/标题：\n" + "\n".join(toc)
 
 
 def _loads(raw: str) -> dict:
@@ -370,21 +409,22 @@ def _judge_batch(
                 "name": item["name"],
                 "maxScore": item["maxScore"],
                 "rule": item["rule"],
-                "evidenceFromBid": item.get("window") or "（全文未定位到明显对应段落，请结合下面全文节选判断；没有依据则 0 分）",
+                "evidenceFromBid": item.get("window") or "（未定位到对应段落，不得引用文首或其他无关承诺）",
             }
         )
     system = (
         "你是本项目评标委员会成员，正在对一份投标文件做详细评审打分。\n"
         "必须且只能使用用户给出的「本项目招标评分规则」和档次公式，"
         "禁止套用其他招标项目、禁止使用青天/通用技术模块标准。\n"
-        "你已经获得投标文件通读材料（目录+全文节选）以及各评分点检索到的对应段落。\n"
+        "你已经获得投标文件目录（仅作定位，不得当证据），以及各评分点检索到的对应段落。\n"
         "要求：\n"
-        "1. 先根据投标原文判断该评分因素是否响应；没有对应内容必须 0 分，档次为未响应；\n"
-        "2. 有档次公式（优/良/一般或分值区间）时，先定档，再在该档区间内给具体分数；\n"
-        "3. 分数不得超出 maxScore，保留 1 位小数；\n"
-        "4. reason 必须引用投标书原文依据，说明为何是这一档/这一分；\n"
-        "5. suggestion 针对本条招标规则说明怎样改才能升到更高档；\n"
-        "6. 不得编造投标书中不存在的内容。\n"
+        "1. 只能依据 evidenceFromBid 中的投标原文判断；该栏标明未定位则必须 0 分、档次为未响应；\n"
+        "2. 禁止使用目录或招标规则原文冒充投标书依据，禁止引用未给出的文首承诺；\n"
+        "3. 有档次公式（优/良/一般或分值区间）时，先定档，再在该档区间内给具体分数；\n"
+        "4. 分数不得超出 maxScore，保留 1 位小数；\n"
+        "5. reason 必须引用投标书原文依据，说明为何是这一档/这一分；\n"
+        "6. suggestion 针对本条招标规则说明怎样改才能升到更高档；\n"
+        "7. 不得编造投标书中不存在的内容。\n"
         "只返回 JSON：{\"scores\":[{\"id\":\"\",\"score\":0,\"grade\":\"优|良|一般|未响应\",\"reason\":\"\",\"suggestion\":\"\",\"evidence\":\"投标原文依据\"}]}"
     )
     user = (
@@ -432,6 +472,25 @@ def _formula_entry(raw: dict, strategies: list[dict]) -> dict:
         "reason": f"本条是该招标文件的报价/公式规则「{raw['name']}」，已按原文收录。模拟评委不估算实际报价得分，需代入本项目公式核算。规则原文：{raw['rule']}",
         "suggestion": f"按本项目招标公式核算报价。高分策略：" + "；".join(f"{s['category']}：{s['point']}" for s in strategies),
         "strategies": strategies,
+        "sourceItemId": raw.get("sourceItemId") or "",
+    }
+
+
+def _unanswered_entry(raw: dict, strategies: list[dict]) -> dict:
+    return {
+        "id": raw["id"],
+        "group": raw["group"],
+        "name": raw["name"],
+        "rule": raw["rule"],
+        "maxScore": raw["maxScore"],
+        "score": 0.0,
+        "status": "未响应",
+        "grade": "未响应",
+        "evidence": "",
+        "reason": "投标书未定位到与本评分点对应的原文。",
+        "suggestion": f"请在本册投标文件中写入可核验的「{raw['name']}」响应内容后再送审。",
+        "strategies": strategies,
+        "sourceItemId": raw.get("sourceItemId") or "",
     }
 
 
@@ -449,6 +508,7 @@ def _failed_entry(raw: dict, strategies: list[dict], err: str) -> dict:
         "reason": f"模拟评委未能完成本条评审（{err}）。本条招标规则：{raw['rule']}",
         "suggestion": f"请重试全量预审。仍应按本项目招标「{raw['name']}」原文准备响应。",
         "strategies": strategies,
+        "sourceItemId": raw.get("sourceItemId") or "",
     }
 
 
@@ -481,6 +541,7 @@ def _judged_entry(raw: dict, judged: dict, strategies: list[dict]) -> dict:
         "reason": reason,
         "suggestion": suggestion or f"按本项目招标「{raw['name']}」原文补强。",
         "strategies": strategies,
+        "sourceItemId": raw.get("sourceItemId") or "",
     }
 
 
@@ -490,26 +551,32 @@ def run(
     tree: list | None = None,
     headings: list[str] | None = None,
     strategy_keys: set[str] | None = None,
+    paragraphs: list[dict] | None = None,
 ) -> dict:
     bid = full_text or ""
     raw_items = expand_score_items(score_rules, tree)
     grade_book = _collect_grade_book(tree)
-    digest = _digest(bid, headings)
+    digest = _digest(headings)
 
     judged_map: dict[str, dict] = {}
     to_judge = [it for it in raw_items if not it["formula"]]
-    if to_judge:
+    located: list[dict] = []
+    for it in to_judge:
+        it["window"] = _windows(it["name"], it["rule"], bid, paragraphs)
+        if it["window"]:
+            located.append(it)
+        else:
+            judged_map[it["id"]] = {"_unanswered": True}
+    if located:
         try:
             model_id = get_default_model_id()
         except Exception as exc:  # noqa: BLE001
             model_id = ""
-            for it in to_judge:
+            for it in located:
                 judged_map[it["id"]] = {"_error": f"未配置可用大模型（{exc}）"}
         if model_id:
-            for i in range(0, len(to_judge), _BATCH):
-                batch = to_judge[i : i + _BATCH]
-                for it in batch:
-                    it["window"] = _windows(it["name"], it["rule"], bid)
+            for i in range(0, len(located), _BATCH):
+                batch = located[i : i + _BATCH]
                 try:
                     judged_map.update(_judge_batch(model_id, batch, digest, grade_book))
                 except Exception as exc:  # noqa: BLE001
@@ -524,7 +591,9 @@ def run(
             entry = _formula_entry(raw, strategies)
         else:
             judged = judged_map.get(raw["id"]) or {}
-            if judged.get("_error") or not judged:
+            if judged.get("_unanswered"):
+                entry = _unanswered_entry(raw, strategies)
+            elif judged.get("_error") or not judged:
                 entry = _failed_entry(raw, strategies, str(judged.get("_error") or "无评委返回"))
             else:
                 entry = _judged_entry(raw, judged, strategies)

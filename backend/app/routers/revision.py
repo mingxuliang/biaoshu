@@ -6,22 +6,26 @@ from sqlalchemy.orm import Session
 from ..audit import actor_from_request, project_label, write_audit
 from ..auth import get_current_user
 from ..db import get_db
+from ..engines.bid_kind import BOOKLET_LEVELS, SCOPE_BUSINESS, SCOPE_TECH, normalize_scope
 from ..engines.docx_extract import extract_paragraphs
 from ..engines.revision_build import (
     anchor_findings,
-    blocks_to_docx,
     build_sections,
     clear_problems,
-    sections_to_blocks,
+    patch_docx_paragraph,
     writeback_docx,
 )
+from ..engines.excerpt_guard import chapter_from_location, display_rule, source_visible_text, split_bid_and_tender
+from ..engines.e_business_vision import is_transport_stub_finding
 from ..engines.revision_suggest import (
     apply_text_to_paragraph,
     enrich_issue,
+    fallback_suggestion,
     heuristic_apply_text,
     llm_rewrite_paragraph,
+    llm_write_suggestion,
     patch_lexical_text,
-    pick_strategy,
+    strip_strategy_overlay,
 )
 from ..engines.tender_style import extract_bid_typography
 from ..models import BidDocument, BidRevision, BidRevisionVersion, ReviewFinding, ReviewRun, User
@@ -41,18 +45,20 @@ router = APIRouter(prefix="/api", tags=["revision"])
 
 def _finding_to_issue_dict(f: ReviewFinding) -> dict:
     extra = f.evidence_json if isinstance(f.evidence_json, dict) else {}
+    excerpt, quote = split_bid_and_tender(f.excerpt or "", f.tender_quote or "", f.rule or "")
+    excerpt = source_visible_text(excerpt) or excerpt
     return enrich_issue(
         {
             "id": f.id,
             "level": f.level,
             "severity": f.severity,
-            "location": f.location,
-            "excerpt": f.excerpt,
-            "rule": f.rule,
-            "tenderQuote": f.tender_quote,
-            "suggestion": f.suggestion,
-            "strategyKey": extra.get("strategyKey") or "",
+            "location": chapter_from_location(f.location or ""),
+            "excerpt": excerpt,
+            "rule": display_rule(f.rule or "", f.suggestion or "", extra.get("strategyKey") or ""),
+            "tenderQuote": quote,
+            "suggestion": f.suggestion or "",
             "applyText": extra.get("applyText") or "",
+            "strategyKey": extra.get("strategyKey") or "",
         }
     )
 
@@ -66,16 +72,43 @@ def _reanchor_sections(sections: list[dict], issues: list[dict]) -> list[dict]:
     return anchor_findings(sections, issues)
 
 
-def _latest_done_run(db: Session, project_id: str) -> ReviewRun:
-    run = (
-        db.query(ReviewRun)
-        .filter(ReviewRun.project_id == project_id, ReviewRun.status == "done")
-        .order_by(ReviewRun.round.desc(), ReviewRun.finished_at.desc(), ReviewRun.started_at.desc())
-        .first()
-    )
+def _latest_done_run(db: Session, project_id: str, scope: str | None = None) -> ReviewRun:
+    q = db.query(ReviewRun).filter(ReviewRun.project_id == project_id, ReviewRun.status == "done")
+    if scope in (SCOPE_BUSINESS, SCOPE_TECH):
+        run = q.filter(ReviewRun.scope == scope).order_by(
+            ReviewRun.round.desc(), ReviewRun.finished_at.desc(), ReviewRun.started_at.desc()
+        ).first()
+        if run:
+            return run
+        full = q.filter(ReviewRun.scope == "full").order_by(
+            ReviewRun.round.desc(), ReviewRun.finished_at.desc(), ReviewRun.started_at.desc()
+        ).first()
+        if full:
+            return full
+        label = "技术标" if scope == SCOPE_TECH else "商务标"
+        raise HTTPException(404, f"该项目暂无已完成的{label}预审，请先在「AI 预审中心」完成该分册预审")
+    run = q.order_by(ReviewRun.round.desc(), ReviewRun.finished_at.desc(), ReviewRun.started_at.desc()).first()
     if not run:
         raise HTTPException(404, "该项目暂无已完成的预审记录，请先在「AI 预审中心」完成一次预审")
     return run
+
+
+def _findings_for_scope(run: ReviewRun, scope: str) -> list[ReviewFinding]:
+    rows = list(run.findings or [])
+    if scope in BOOKLET_LEVELS and (getattr(run, "scope", None) or "full") == "full":
+        keys = set(BOOKLET_LEVELS[scope])
+        rows = [f for f in rows if (f.level or "") in keys]
+    return rows
+
+
+def _revision_kind(revision: BidRevision) -> str:
+    raw = (getattr(revision, "scope", None) or SCOPE_BUSINESS).strip().lower()
+    return raw if raw in (SCOPE_BUSINESS, SCOPE_TECH) else SCOPE_BUSINESS
+
+
+def _revision_filename(revision: BidRevision, suffix: str) -> str:
+    label = "技术标" if _revision_kind(revision) == SCOPE_TECH else "商务标"
+    return f"{label}{suffix}"
 
 
 def _sync_revision_to_run(revision: BidRevision, run: ReviewRun, sections: list[dict], issues: list[dict], layout: dict) -> bool:
@@ -95,7 +128,7 @@ def _sync_revision_to_run(revision: BidRevision, run: ReviewRun, sections: list[
     return switched
 
 
-def _build_revision_content(db: Session, run: ReviewRun) -> tuple[list[dict], list[dict], dict]:
+def _build_revision_content(db: Session, run: ReviewRun, scope: str) -> tuple[list[dict], list[dict], dict]:
     bid_doc = db.get(BidDocument, run.bid_document_id)
     if not bid_doc:
         raise HTTPException(404, "预审对应的投标文件不存在")
@@ -108,7 +141,11 @@ def _build_revision_content(db: Session, run: ReviewRun) -> tuple[list[dict], li
                 layout = {}
     except FileNotFoundError:
         raise HTTPException(404, "预审对应的投标文件不存在")
-    issues = [_finding_to_issue_dict(f) for f in run.findings]
+    issues = [
+        _finding_to_issue_dict(f)
+        for f in _findings_for_scope(run, scope)
+        if not is_transport_stub_finding(f.location or "", f.suggestion or "")
+    ]
     _SEV = {"废标": 0, "降档": 1, "扣分": 2, "建议": 3}
     issues.sort(key=lambda x: _SEV.get(x.get("severity") or "", 9))
     sections = build_sections(paragraphs)
@@ -116,7 +153,12 @@ def _build_revision_content(db: Session, run: ReviewRun) -> tuple[list[dict], li
     return sections, issues, layout
 
 
-def _revision_to_out(revision: BidRevision, run: ReviewRun | None = None, run_switched: bool = False) -> BidRevisionOut:
+def _revision_to_out(
+    revision: BidRevision,
+    run: ReviewRun | None = None,
+    run_switched: bool = False,
+    db: Session | None = None,
+) -> BidRevisionOut:
     resolved = [x for x in (revision.resolved_ids_json or []) if isinstance(x, str)]
     resolved_set = set(resolved)
     issues = []
@@ -124,10 +166,19 @@ def _revision_to_out(revision: BidRevision, run: ReviewRun | None = None, run_sw
         item = dict(raw)
         item["resolved"] = item.get("id") in resolved_set
         issues.append(item)
+    source_id = (run.bid_document_id if run is not None else "") or revision.bid_document_id
+    source_name = ""
+    if db is not None and source_id:
+        src = db.get(BidDocument, source_id)
+        if src:
+            source_name = src.filename or ""
     return BidRevisionOut(
         id=revision.id,
         projectId=revision.project_id,
+        scope=_revision_kind(revision),
         bidDocumentId=revision.bid_document_id,
+        sourceBidDocumentId=source_id,
+        sourceFileName=source_name,
         reviewRunId=revision.review_run_id,
         reviewRound=run.round if run is not None else None,
         sections=revision.sections_json or [],
@@ -149,23 +200,32 @@ def _require_revision(db, user: User, revision_id: str) -> BidRevision:
 
 @router.get("/projects/{project_id}/bid-revision", response_model=BidRevisionOut)
 def get_or_create_bid_revision(
-    project_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    project_id: str,
+    scope: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> BidRevisionOut:
     require_project(db, current_user, project_id, PERM_WRITER)
-    run = _latest_done_run(db, project_id)
-    revision = db.query(BidRevision).filter(BidRevision.project_id == project_id).first()
-    # 始终按最新一轮预审 Finding + 含表格正文重建章节/锚点。
-    # 工程标正文常在表内：沿用旧 sections 会只剩标题，L3 全部无法命中。
-    sections, issues, layout = _build_revision_content(db, run)
+    booklet = normalize_scope(scope, SCOPE_BUSINESS)
+    if booklet not in (SCOPE_BUSINESS, SCOPE_TECH):
+        booklet = SCOPE_BUSINESS
+    run = _latest_done_run(db, project_id, booklet)
+    revision = (
+        db.query(BidRevision)
+        .filter(BidRevision.project_id == project_id, BidRevision.scope == booklet)
+        .first()
+    )
+    sections, issues, layout = _build_revision_content(db, run, booklet)
     switched = False
     if revision:
         switched = _sync_revision_to_run(revision, run, sections, issues, layout)
         db.commit()
         db.refresh(revision)
-        return _revision_to_out(revision, run, switched)
+        return _revision_to_out(revision, run, switched, db)
 
     revision = BidRevision(
         project_id=project_id,
+        scope=booklet,
         bid_document_id=run.bid_document_id,
         review_run_id=run.id,
         sections_json=sections,
@@ -175,7 +235,7 @@ def get_or_create_bid_revision(
     db.add(revision)
     db.commit()
     db.refresh(revision)
-    return _revision_to_out(revision, run)
+    return _revision_to_out(revision, run, db=db)
 
 
 @router.post("/bid-revisions/{revision_id}/regenerate", response_model=BidRevisionOut)
@@ -187,8 +247,9 @@ def regenerate_bid_revision(
 ) -> BidRevisionOut:
     revision = _require_revision(db, current_user, revision_id)
 
-    run = _latest_done_run(db, revision.project_id)
-    sections, issues, layout = _build_revision_content(db, run)
+    booklet = _revision_kind(revision)
+    run = _latest_done_run(db, revision.project_id, booklet)
+    sections, issues, layout = _build_revision_content(db, run, booklet)
     switched = _sync_revision_to_run(revision, run, sections, issues, layout)
     revision.content_state_json = None
     revision.resolved_ids_json = []
@@ -202,7 +263,7 @@ def regenerate_bid_revision(
     )
     db.commit()
     db.refresh(revision)
-    return _revision_to_out(revision, run, switched)
+    return _revision_to_out(revision, run, switched, db)
 
 
 @router.patch("/bid-revisions/{revision_id}/content", response_model=BidRevisionOut)
@@ -216,7 +277,7 @@ def autosave_bid_revision_content(
     revision.content_state_json = payload.contentState
     db.commit()
     db.refresh(revision)
-    return _revision_to_out(revision)
+    return _revision_to_out(revision, db=db)
 
 
 @router.post("/bid-revisions/{revision_id}/issues/{issue_id}/apply", response_model=BidRevisionOut)
@@ -247,19 +308,22 @@ def apply_issue_suggestion(
         if target:
             break
     if not target:
-        raise HTTPException(400, "未能定位到正文段落（锚点不在目录或该条为全篇级检查），请手工在「改写」中修改")
+        raise HTTPException(400, "未能定位到正文段落（锚点不在目录或该条为全篇级检查），请在原文中核对后手工修改源文件")
 
     old_text = target.get("text") or ""
     old_highlight = (target.get("problem") or {}).get("highlight") or issue.get("excerpt") or ""
-    suggestion = issue.get("suggestion") or ""
+    suggestion = strip_strategy_overlay(issue.get("suggestion") or "")
+    if len(suggestion) < 8:
+        suggestion = llm_write_suggestion(issue) or fallback_suggestion(issue)
+        issue["suggestion"] = suggestion
     apply_text = (issue.get("applyText") or "").strip() or heuristic_apply_text(old_highlight, suggestion)
     new_text = apply_text_to_paragraph(old_text, old_highlight, suggestion, apply_text)
     if new_text.strip() == old_text.strip() or not new_text.strip():
-        rewritten = llm_rewrite_paragraph(old_text, old_highlight, suggestion, pick_strategy(issue))
+        rewritten = llm_rewrite_paragraph(old_text, old_highlight, suggestion, issue)
         if rewritten:
             new_text = rewritten
     if not new_text.strip() or new_text.strip() == old_text.strip():
-        raise HTTPException(400, "未能生成可写入原文的改写句，请手工在「改写」中修改")
+        raise HTTPException(400, "未能生成可写入原文的改写句，请核对建议后手工修改源文件")
 
     target["text"] = new_text
     new_highlight = apply_text if apply_text and apply_text in new_text else new_text
@@ -284,14 +348,15 @@ def apply_issue_suggestion(
     if base_doc and storage.exists(base_doc.storage_path):
         try:
             with storage.as_local(base_doc.storage_path) as path:
-                docx_bytes = writeback_docx(path, sections_to_blocks(sections))
+                docx_bytes = patch_docx_paragraph(path, old_text, new_text)
             key = storage.put_bytes(f"bid-documents/{revision.project_id}", docx_bytes, ".docx")
             new_doc = BidDocument(
                 project_id=revision.project_id,
-                filename="投标书修改稿.docx",
+                filename=_revision_filename(revision, "修改稿.docx"),
                 storage_path=key,
                 size_bytes=len(docx_bytes),
                 source="revision",
+                kind=_revision_kind(revision),
             )
             db.add(new_doc)
             db.flush()
@@ -310,7 +375,7 @@ def apply_issue_suggestion(
     db.commit()
     db.refresh(revision)
     run = db.get(ReviewRun, revision.review_run_id)
-    return _revision_to_out(revision, run)
+    return _revision_to_out(revision, run, db=db)
 
 
 @router.patch("/bid-revisions/{revision_id}/issues/{issue_id}/resolve", response_model=BidRevisionOut)
@@ -334,7 +399,7 @@ def patch_issue_resolved(
     db.commit()
     db.refresh(revision)
     run = db.get(ReviewRun, revision.review_run_id)
-    return _revision_to_out(revision, run)
+    return _revision_to_out(revision, run, db=db)
 
 
 @router.post("/bid-revisions/{revision_id}/versions", response_model=BidRevisionVersionOut)
@@ -360,17 +425,19 @@ def create_bid_revision_version(
         except Exception:
             docx_bytes = None
     if docx_bytes is None:
-        if not blocks:
-            raise HTTPException(400, "没有可保存的正文，请先在「改写」中编辑或保留原文后重试")
-        docx_bytes = blocks_to_docx(blocks)
+        if base_doc and storage.exists(base_doc.storage_path):
+            docx_bytes = storage.get_bytes(base_doc.storage_path)
+        else:
+            raise HTTPException(400, "没有可保存的原文，请确认已上传投标文件")
     key = storage.put_bytes(f"bid-documents/{revision.project_id}", docx_bytes, ".docx")
 
     new_doc = BidDocument(
         project_id=revision.project_id,
-        filename="投标书修改版.docx",
+        filename=_revision_filename(revision, "修改版.docx"),
         storage_path=key,
         size_bytes=len(docx_bytes),
         source="revision",
+        kind=_revision_kind(revision),
     )
     db.add(new_doc)
 

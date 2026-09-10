@@ -11,6 +11,16 @@ from .celery_app import celery_app
 from .db import SessionLocal
 from .engines import e0_tender_parse, e_writer
 from .engines.docx_extract import extract_document_plain_text, extract_full_text
+from .engines.tender_package import (
+    KIND_DRAWING,
+    attach_extracts,
+    compose_parse_text,
+    effective_kind,
+    extract_file_text,
+    extra_fills_from_package,
+    package_slots,
+)
+from .engines.drawing_intel import analyze_drawings, merge_drawing_fills
 from .engines.knowledge_retrieval import list_knowledge_headings, retrieve_by_doc_and_headings, retrieve_for_chapter
 from .engines.orchestrator import run_prereview
 from .engines.product_extract import run_extract_for_source_doc
@@ -43,12 +53,16 @@ def run_prereview_task(run_id: str) -> None:
         run_prereview(db, run_id)
     except Exception as exc:  # noqa: BLE001 —— 任一引擎异常都要把任务状态置为 failed，而不是让 worker 静默丢失
         logger.exception("prereview run %s failed", run_id)
-        run = db.get(ReviewRun, run_id)
-        if run:
-            run.status = "failed"
-            run.error_message = str(exc)
-            run.finished_at = datetime.utcnow()
-            db.commit()
+        try:
+            db.rollback()
+            run = db.get(ReviewRun, run_id)
+            if run:
+                run.status = "failed"
+                run.error_message = str(exc)
+                run.finished_at = datetime.utcnow()
+                db.commit()
+        except Exception:
+            logger.exception("prereview run %s could not mark failed after rollback", run_id)
     finally:
         db.close()
 
@@ -64,16 +78,51 @@ def run_tender_parse_task(checklist_id: str) -> None:
         checklist.status = "running"
         db.commit()
 
-        tender_doc = db.get(TenderDocument, checklist.tender_document_id)
-        if not tender_doc:
+        pending = checklist.checklist_json or {}
+        package_ids = [str(x) for x in (pending.get("packageDocIds") or []) if x]
+        if not package_ids and checklist.tender_document_id:
+            package_ids = [checklist.tender_document_id]
+
+        docs: list[TenderDocument] = []
+        seen: set[str] = set()
+        for doc_id in package_ids:
+            if doc_id in seen:
+                continue
+            seen.add(doc_id)
+            found = db.get(TenderDocument, doc_id)
+            if found and found.project_id == checklist.project_id:
+                docs.append(found)
+        if not docs:
             raise RuntimeError("招标文件不存在，请重新上传")
 
         project = db.get(Project, checklist.project_id)
         category = (project.category if project else None) or "软件服务类"
 
-        with storage.as_local(tender_doc.storage_path) as path:
-            full_text = extract_full_text(path)
-        result = e0_tender_parse.run(full_text, category=category)
+        parts: list[dict] = []
+        drawing_refs: dict[str, str] = {}
+        drawing_names: dict[str, str] = {}
+        for tender_doc in docs:
+            kind = effective_kind(tender_doc.kind, tender_doc.filename)
+            if kind == KIND_DRAWING and tender_doc.storage_path:
+                drawing_refs[tender_doc.id] = tender_doc.storage_path
+                drawing_names[tender_doc.id] = tender_doc.filename or "未命名"
+            with storage.as_local(tender_doc.storage_path) as path:
+                text = extract_file_text(path, kind=kind, filename=tender_doc.filename)
+            parts.append({"kind": kind, "filename": tender_doc.filename, "text": text})
+
+        full_text, notes = compose_parse_text(parts)
+        extra_fills = extra_fills_from_package(parts, notes)
+        if drawing_refs:
+            try:
+                with storage.as_local_map(drawing_refs) as local_paths:
+                    drawing_files = [
+                        {"path": local_paths[doc_id], "filename": drawing_names.get(doc_id) or "未命名"}
+                        for doc_id in local_paths
+                    ]
+                    extra_fills = merge_drawing_fills(extra_fills, analyze_drawings(drawing_files))
+            except Exception:
+                logger.exception("drawing intel failed for checklist %s", checklist_id)
+        result = e0_tender_parse.run(full_text, category=category, extra_fills=extra_fills)
 
         checklist.checklist_json = {
             "dimensions": result["dimensions"],
@@ -81,6 +130,8 @@ def run_tender_parse_task(checklist_id: str) -> None:
             "mustRespond": result["mustRespond"],
             "qualification": result["qualification"],
             "formatRequirements": result["formatRequirements"],
+            "packageDocIds": [d.id for d in docs],
+            "package": attach_extracts(package_slots(docs), parts),
         }
         checklist.engine_params_json = result["vetoParams"]
         checklist.error = result.get("error")

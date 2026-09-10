@@ -29,11 +29,16 @@ _MEDIA = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".doc": "application/msword",
     ".pdf": "application/pdf",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
     ".webp": "image/webp",
     ".gif": "image/gif",
+    ".bmp": "image/bmp",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
 }
 
 
@@ -216,12 +221,15 @@ def http_response(
     name = filename or os.path.basename(ref) or "file"
     media = media_type or media_type_of(name)
     encoded = urllib.parse.quote(name)
+    ascii_name = "".join(ch if 32 <= ord(ch) < 127 and ch not in '\\"' else "_" for ch in os.path.splitext(name)[0]) or "file"
+    ascii_name = f"{ascii_name}{os.path.splitext(name)[1]}"
     disposition = "inline" if inline else "attachment"
     return Response(
         content=data,
         media_type=media,
         headers={
-            "Content-Disposition": f"{disposition}; filename=\"file\"; filename*=UTF-8''{encoded}",
+            "Content-Disposition": f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded}",
             "Cache-Control": "private, max-age=86400",
+            "X-Content-Type-Options": "nosniff",
         },
     )

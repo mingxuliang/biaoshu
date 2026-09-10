@@ -9,6 +9,7 @@ import AuthImage from "../components/AuthImage";
 import { useAuth } from "@/context/AuthContext";
 import { useProductCatalog } from "@/context/ProductCatalogContext";
 import { hasPerm } from "@/lib/permissions";
+import { hideWriter } from "@/lib/flags";
 import { pollProductExtractJobUntilDone, uploadProductSourceDocs } from "@/lib/api";
 import { PRODUCT_KINDS, type ProductImage, type ProductItem, type ProductKind, type ProductStatus } from "@/mocks/products";
 
@@ -1103,6 +1104,7 @@ export default function ProductLibraryDetailPage() {
               <i className="ri-file-copy-2-line text-sm"></i>
               复制全部
             </button>
+            {!hideWriter && (
             <button
               type="button"
               onClick={() => {
@@ -1114,6 +1116,7 @@ export default function ProductLibraryDetailPage() {
               <i className="ri-edit-2-line text-sm"></i>
               去撰写工作台
             </button>
+            )}
           </div>
         </div>
       </Modal>

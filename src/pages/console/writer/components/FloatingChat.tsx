@@ -32,7 +32,7 @@ export default function FloatingChat({ projectName, draftId, chapterTitle, chapt
     {
       id: 0,
       role: "assistant",
-      content: `我是智标云撰写助手，当前项目「${projectName}」。可结合已解析的评分点与目录回答撰写问题。`,
+      content: `我是慧投标撰写助手，当前项目「${projectName}」。可结合已解析的评分点与目录回答撰写问题。`,
     },
   ]);
   const [input, setInput] = useState("");

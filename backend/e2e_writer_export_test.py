@@ -161,7 +161,7 @@ def main() -> None:
         "POST",
         f"/api/projects/{PROJECT_ID}/prereview-jobs",
         token=token,
-        json_body={"bid_document_id": writer_doc_id, "scope": "full"},
+        json_body={"bid_document_id": writer_doc_id, "scope": "tech"},
     )
     assert status == 200, f"创建预审任务失败: {status} {body}"
     job = json.loads(body)

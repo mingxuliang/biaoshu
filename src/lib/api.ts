@@ -67,6 +67,8 @@ export interface TenderRuleReport {
   note: string;
 }
 
+export type BidScope = "business" | "tech" | "full";
+
 export interface ReviewReport {
   round: number;
   overall: number;
@@ -74,6 +76,7 @@ export interface ReviewReport {
   risk: number;
   suggest: number;
   light: "绿" | "橙" | "红";
+  scope?: BidScope;
   levels: PreReviewLevel[];
   dimensions: DimensionScore[];
   techModules: TechModuleScore[];
@@ -81,10 +84,17 @@ export interface ReviewReport {
   issues: PreReviewIssue[];
 }
 
+export interface ReviewReportPair {
+  business: ReviewReport | null;
+  tech: ReviewReport | null;
+  full: ReviewReport | null;
+}
+
 export interface TrendPoint {
   round: number;
   score: number;
   issues: number;
+  scope?: BidScope | string;
 }
 
 export interface UploadedDoc {
@@ -92,6 +102,7 @@ export interface UploadedDoc {
   filename: string;
   size_bytes: number;
   source: "upload" | "workbench";
+  kind?: string;
 }
 
 export interface JobStatus {
@@ -105,6 +116,7 @@ export interface TenderUploadedDoc {
   id: string;
   filename: string;
   size_bytes: number;
+  kind?: string;
 }
 
 export interface TenderParseJobStatus {
@@ -179,6 +191,24 @@ export interface ParseDimension {
   items: ParseSubItem[];
 }
 
+export interface TenderPackageFile {
+  id: string;
+  filename: string;
+  sizeBytes: number;
+  kind: string;
+}
+
+export interface TenderPackageSlot {
+  kind: string;
+  label: string;
+  uploaded: boolean;
+  missingHint: string;
+  files: TenderPackageFile[];
+  excerpt?: string;
+  displayIn?: string;
+  jumpKey?: string;
+}
+
 export interface Checklist {
   id: string;
   project_id: string;
@@ -192,6 +222,7 @@ export interface Checklist {
   formatRequirements: FormatItem[];
   dimensions: ParseDimension[];
   vetoParams: VetoParams;
+  package?: TenderPackageSlot[];
   error?: string | null;
 }
 
@@ -224,10 +255,15 @@ async function request<T>(path: string, init?: Parameters<typeof fetch>[1]): Pro
   return res.json() as Promise<T>;
 }
 
-export async function uploadBidDocument(projectId: string, file: File): Promise<UploadedDoc> {
+export async function uploadBidDocument(
+  projectId: string,
+  file: File,
+  kind?: "business" | "tech" | "combined",
+): Promise<UploadedDoc> {
   const form = new FormData();
   form.append("project_id", projectId);
   form.append("file", file);
+  if (kind) form.append("kind", kind);
   return request<UploadedDoc>("/api/bid-documents", { method: "POST", body: form });
 }
 
@@ -243,17 +279,26 @@ export interface BidDocumentSummary {
   source: string;
   sizeBytes: number;
   uploadedAt: string;
+  kind?: string;
 }
 
 export async function listProjectBidDocuments(projectId: string): Promise<BidDocumentSummary[]> {
   return request<BidDocumentSummary[]>(`/api/projects/${projectId}/bid-documents`);
 }
 
-export async function createPrereviewJob(projectId: string, bidDocumentId: string): Promise<JobStatus> {
+export async function getBidDocument(docId: string): Promise<BidDocumentSummary> {
+  return request<BidDocumentSummary>(`/api/bid-documents/${docId}`);
+}
+
+export async function createPrereviewJob(
+  projectId: string,
+  bidDocumentId: string,
+  scope: BidScope,
+): Promise<JobStatus> {
   return request<JobStatus>(`/api/projects/${projectId}/prereview-jobs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ bid_document_id: bidDocumentId, scope: "full" }),
+    body: JSON.stringify({ bid_document_id: bidDocumentId, scope }),
   });
 }
 
@@ -261,16 +306,23 @@ export async function getJobStatus(jobId: string): Promise<JobStatus> {
   return request<JobStatus>(`/api/prereview-jobs/${jobId}`);
 }
 
-export async function getLatestReviewRun(projectId: string): Promise<ReviewReport> {
-  return request<ReviewReport>(`/api/projects/${projectId}/review-runs/latest`);
+export async function getLatestReviewRun(projectId: string, scope?: BidScope): Promise<ReviewReport> {
+  const q = scope ? `?scope=${scope}` : "";
+  return request<ReviewReport>(`/api/projects/${projectId}/review-runs/latest${q}`);
 }
 
-export async function exportLatestReviewReport(projectId: string): Promise<Blob> {
-  return fetchBlob(`/api/projects/${projectId}/review-runs/latest/export`);
+export async function getLatestReviewPair(projectId: string): Promise<ReviewReportPair> {
+  return request<ReviewReportPair>(`/api/projects/${projectId}/review-runs/latest-pair`);
 }
 
-export async function getReviewRunTrend(projectId: string): Promise<TrendPoint[]> {
-  return request<TrendPoint[]>(`/api/projects/${projectId}/review-runs`);
+export async function exportLatestReviewReport(projectId: string, scope?: BidScope): Promise<Blob> {
+  const q = scope ? `?scope=${scope}` : "";
+  return fetchBlob(`/api/projects/${projectId}/review-runs/latest/export${q}`);
+}
+
+export async function getReviewRunTrend(projectId: string, scope?: BidScope): Promise<TrendPoint[]> {
+  const q = scope ? `?scope=${scope}` : "";
+  return request<TrendPoint[]>(`/api/projects/${projectId}/review-runs${q}`);
 }
 
 /** 轮询任务直至完成/失败，intervalMs 控制轮询间隔，timeoutMs 控制最长等待时间。 */
@@ -291,21 +343,35 @@ export async function pollJobUntilDone(
 
 // 招标文件解析与评标尺子锁定（P1）相关请求。
 
-export async function uploadTenderDocument(projectId: string, file: File): Promise<TenderUploadedDoc> {
+export async function uploadTenderDocument(
+  projectId: string,
+  file: File,
+  kind?: string,
+): Promise<TenderUploadedDoc> {
   const form = new FormData();
   form.append("project_id", projectId);
   form.append("file", file);
+  if (kind) form.append("kind", kind);
   return request<TenderUploadedDoc>("/api/tender-documents", { method: "POST", body: form });
+}
+
+export async function deleteTenderDocument(id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/api/tender-documents/${id}`, { method: "DELETE" });
 }
 
 export async function createTenderParseJob(
   projectId: string,
   tenderDocumentId: string,
+  tenderDocumentIds?: string[],
 ): Promise<TenderParseJobStatus> {
+  const ids = tenderDocumentIds?.length ? tenderDocumentIds : tenderDocumentId ? [tenderDocumentId] : [];
   return request<TenderParseJobStatus>(`/api/projects/${projectId}/tender-parse-jobs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tender_document_id: tenderDocumentId }),
+    body: JSON.stringify({
+      tender_document_id: tenderDocumentId || ids[0] || "",
+      tender_document_ids: ids,
+    }),
   });
 }
 
@@ -880,7 +946,10 @@ export interface BidLayout {
 export interface BidRevision {
   id: string;
   projectId: string;
+  scope?: BidScope | string;
   bidDocumentId: string;
+  sourceBidDocumentId?: string;
+  sourceFileName?: string;
   reviewRunId: string;
   reviewRound?: number | null;
   sections: BidSection[];
@@ -915,8 +984,9 @@ export interface CreateVersionPayload {
   author?: string;
 }
 
-export async function getOrCreateBidRevision(projectId: string): Promise<BidRevision> {
-  return request<BidRevision>(`/api/projects/${projectId}/bid-revision`);
+export async function getOrCreateBidRevision(projectId: string, scope?: BidScope): Promise<BidRevision> {
+  const q = scope ? `?scope=${scope}` : "";
+  return request<BidRevision>(`/api/projects/${projectId}/bid-revision${q}`);
 }
 
 export async function regenerateBidRevision(revisionId: string): Promise<BidRevision> {
@@ -1076,6 +1146,7 @@ export interface TenderDocumentSummary {
   filename: string;
   sizeBytes: number;
   uploadedAt: string;
+  kind?: string;
 }
 
 export interface ProjectDocuments {
@@ -1353,11 +1424,18 @@ async function fetchBlob(path: string): Promise<Blob> {
     }
     throw new ApiError(message, res.status);
   }
-  return res.blob();
+  const buf = await res.arrayBuffer();
+  const type = (res.headers.get("content-type") || "").split(";")[0].trim() || "application/octet-stream";
+  return new Blob([buf], { type });
 }
 
-export async function downloadTenderDocument(id: string): Promise<Blob> {
-  return fetchBlob(`/api/tender-documents/${id}/download`);
+export async function downloadTenderDocument(id: string, inline = true): Promise<Blob> {
+  const q = inline ? "?inline=1" : "";
+  return fetchBlob(`/api/tender-documents/${id}/download${q}`);
+}
+
+export async function getTenderPreviewMeta(id: string): Promise<{ pageCount: number; kind: string; filename?: string }> {
+  return request(`/api/tender-documents/${id}/preview-meta`);
 }
 
 export async function downloadBidDocumentFile(id: string): Promise<Blob> {
@@ -1372,11 +1450,12 @@ export function triggerFileDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = filename;
+  a.download = filename || "download";
+  a.rel = "noopener";
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
 // 预审规则真实后端接入相关请求。

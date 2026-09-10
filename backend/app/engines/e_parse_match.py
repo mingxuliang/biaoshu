@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import re
 
+from .bid_kind import booklet_of_source
+
 _CJK_RUN = re.compile(r"[\u4e00-\u9fff]{4,}")
 _GENERIC = ("必须", "应当", "须", "应", "提交", "提供", "出具", "附上", "要求", "投标人", "招标人")
 
@@ -25,7 +27,7 @@ def _finding(level: str, severity: str, location: str, excerpt: str, rule: str, 
         "location": location,
         "excerpt": excerpt[:200],
         "rule": rule,
-        "tenderQuote": quote[:200],
+        "tenderQuote": quote[:500],
         "suggestion": suggestion,
         "confidence": 0.75,
     }
@@ -48,29 +50,72 @@ def _keys(text: str) -> list[str]:
     return [w for w in windows if len(w) >= 4][:16]
 
 
+def _substance_blob(full_text: str, paragraphs: list[dict] | None) -> str:
+    """覆盖判定只用表格文字、附图占位和非标题段落，目录标题不算已响应。"""
+    if not paragraphs:
+        return full_text or ""
+    parts: list[str] = []
+    for p in paragraphs:
+        if not isinstance(p, dict):
+            continue
+        t = (p.get("text") or "").strip()
+        if not t:
+            continue
+        if p.get("isImage") or p.get("fromTable"):
+            parts.append(t)
+            continue
+        if p.get("isHeading"):
+            continue
+        if len(t) < 20:
+            continue
+        parts.append(t)
+    if parts:
+        return "\n".join(parts)
+    if paragraphs:
+        return ""
+    return full_text or ""
+
+
 def _title_covered(title: str, bid: str, heading_blob: str) -> bool:
+    """保留函数名供兼容；标题出现在目录不再视为已覆盖。"""
     t = (title or "").strip()
-    if len(t) < 2:
+    if len(t) < 8:
         return False
-    if t in bid or t in heading_blob:
+    if t in heading_blob and t not in bid:
+        return False
+    return t in bid
+
+
+def _score_unanswered(item: dict, bid: str, heading_blob: str) -> bool:
+    """评分点未覆盖：不能凭目录短标题就算已响应，须正文/表格/附图命中。"""
+    title = str(item.get("dimension") or "").strip()
+    detail = str(item.get("detail") or "")
+    if title and len(title) >= 8 and title in bid and title not in heading_blob:
+        return False
+    if title and len(title) >= 8 and title in bid:
+        # 标题同时出现在目录和正文时，仍须细则窗口命中，避免空壳章节。
+        keys = [k for k in _keys(detail) if len(k) >= 6]
+        if any(len(k) >= 8 and k in bid for k in keys) or len([k for k in keys if k in bid]) >= 2:
+            return False
         return True
-    if len(t) >= 4 and t[:4] in heading_blob:
-        return True
-    return False
+    keys = [k for k in _keys(detail) if len(k) >= 6]
+    long_hits = [k for k in keys if len(k) >= 8 and k in bid]
+    if long_hits:
+        return False
+    short_hits = [k for k in keys if k in bid]
+    if len(short_hits) >= 3:
+        return False
+    return True
 
 
 def _unanswered(text: str, bid: str, title: str = "", heading_blob: str = "") -> bool:
-    """未覆盖：标题未出现，且约定原文也没有足够长的窗口命中。
-
-    单个 4–6 字短窗口命中容易误报（招标套话与标书套话重叠），因此要求：
-    命中一段 ≥8 字，或至少两个不同窗口。标题出现在正文或目录则直接视为已覆盖。
-    """
-    if _title_covered(title, bid, heading_blob):
-        return False
+    """未覆盖：须在实质正文中命中窗口；仅目录标题不算已覆盖。"""
     keys = _keys(text)
-    if not keys:
+    title_keys = _keys(title) if title else []
+    pool = keys or title_keys
+    if not pool:
         return False
-    hits = [k for k in keys if k in bid]
+    hits = [k for k in pool if k in bid]
     if any(len(k) >= 8 for k in hits):
         return False
     if len(hits) >= 2:
@@ -97,9 +142,10 @@ def run(
     veto_keys: set[str] | None = None,
     strategy_keys: set[str] | None = None,
     headings: list[str] | None = None,
+    paragraphs: list[dict] | None = None,
 ) -> list[dict]:
-    bid = full_text or ""
     heading_blob = "".join(h for h in (headings or []) if h)
+    bid = _substance_blob(full_text or "", paragraphs)
     findings: list[dict] = []
 
     if _enabled("star_clause", veto_keys):
@@ -121,10 +167,10 @@ def run(
                     "L1",
                     "降档",
                     "投标文件 / 实质性条款",
-                    clause,
+                    "",
                     "招标解析约定：实质性条款须响应",
                     "招标解析抽出的实质性条款未在投标书中检出对应表述，请按招标原文补写响应",
-                    str(item.get("original") or ""),
+                    clause,
                 )
             )
 
@@ -145,10 +191,10 @@ def run(
                     "L1",
                     "废标" if star else "降档",
                     f"资格条件 / {item.get('title') or '未标注'}",
-                    blob,
+                    "",
                     "招标解析约定：资格条件须响应",
                     "招标解析列出的资格条件未在投标书中检出，请补充证书、人员或对应承诺",
-                    str(item.get("source") or ""),
+                    blob,
                 )
             )
 
@@ -170,10 +216,10 @@ def run(
                     "L5",
                     "废标" if fatal else "建议",
                     f"格式约定 / {item.get('title') or '未标注'}",
-                    blob,
+                    "",
                     "招标解析约定：投标文件格式/递交要求",
                     "招标解析抽出的格式或递交约定未在投标书中体现，请按招标文件格式部分补全",
-                    str(item.get("source") or ""),
+                    blob,
                 )
             )
 
@@ -183,21 +229,23 @@ def run(
             if not isinstance(item, dict):
                 continue
             blob = _item_text(item, "dimension", "detail")
-            if not blob or not _unanswered(blob, bid, str(item.get("dimension") or ""), heading_blob):
+            if not blob or not _score_unanswered(item, bid, heading_blob):
                 continue
             n += 1
-            if n > 10:
+            if n > 16:
                 break
             dim = item.get("dimension") or "评分点"
+            slot = booklet_of_source(str(item.get("sourceItemId") or ""), str(dim))
+            level = "L2" if slot in ("business", "price") else "L3"
             findings.append(
                 _finding(
-                    "L3",
+                    level,
                     "扣分",
                     f"评分细则 / {dim}",
-                    blob,
+                    "",
                     "招标解析约定：评分点须在投标书中响应",
-                    f"招标解析抽出的评分点「{dim}」未在投标书中检出对应内容，技术标完整性将被扣分",
-                    str(item.get("sectionPath") or ""),
+                    f"招标解析抽出的评分点「{dim}」未在投标书中检出对应内容，请按本册规则补写响应",
+                    blob,
                 )
             )
 

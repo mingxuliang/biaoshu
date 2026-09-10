@@ -37,6 +37,8 @@ from ..schemas import (
     UpdateProjectIn,
 )
 from .documents import _bid_doc_to_summary
+from ..engines.bid_kind import booklet_overall
+from ..engines.tender_package import effective_kind
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -111,8 +113,33 @@ def _outline_progress(outline: list[dict]) -> tuple[int, int]:
     return done, total
 
 
+def _latest_done_run(db: Session, project_id: str, scope: str) -> ReviewRun | None:
+    return (
+        db.query(ReviewRun)
+        .filter(ReviewRun.project_id == project_id, ReviewRun.status == "done", ReviewRun.scope == scope)
+        .order_by(ReviewRun.round.desc(), ReviewRun.finished_at.desc())
+        .first()
+    )
+
+
+def _prereview_booklet_desc(db: Session, project_id: str, fallback: ReviewRun) -> str:
+    """时间线只展示商务/技术分册得分，不用 L1–L5 加权综合分。"""
+    full = _latest_done_run(db, project_id, "full")
+    parts: list[str] = []
+    for scope, label in (("business", "商务标"), ("tech", "技术标")):
+        run = _latest_done_run(db, project_id, scope) or full
+        if not run:
+            continue
+        run_scope = getattr(run, "scope", None) or "full"
+        score = booklet_overall(run.levels_json or [], scope) if run_scope == "full" else run.overall
+        parts.append(f"{label} {score} 分")
+    if parts:
+        return "；".join(parts)
+    return f"本册 {fallback.overall} 分"
+
+
 def _live_metrics(db: Session, project_ids: list[str]) -> dict[str, tuple[int, float]]:
-    """进度来自真实流程节点，预测得分取最新一轮已完成预审 overall。"""
+    """进度来自真实流程节点；预测得分取最新分册预审，不用综合分。"""
     if not project_ids:
         return {}
     metrics: dict[str, tuple[int, float]] = {pid: (0, 0.0) for pid in project_ids}
@@ -142,6 +169,9 @@ def _live_metrics(db: Session, project_ids: list[str]) -> dict[str, tuple[int, f
     )
     scores: dict[str, float] = {}
     for run in runs:
+        run_scope = getattr(run, "scope", None) or "full"
+        if run_scope not in ("business", "tech"):
+            continue
         scores.setdefault(run.project_id, float(run.overall or 0))
 
     revision_ids = {
@@ -344,7 +374,11 @@ def list_project_tender_documents(
     )
     return [
         TenderDocumentSummaryOut(
-            id=d.id, filename=d.filename, sizeBytes=d.size_bytes, uploadedAt=d.uploaded_at.isoformat()
+            id=d.id,
+            filename=d.filename,
+            sizeBytes=d.size_bytes,
+            uploadedAt=d.uploaded_at.isoformat(),
+            kind=effective_kind(d.kind, d.filename),
         )
         for d in docs
     ]
@@ -375,7 +409,11 @@ def get_project_documents(
     return ProjectDocumentsOut(
         tenderDocuments=[
             TenderDocumentSummaryOut(
-                id=d.id, filename=d.filename, sizeBytes=d.size_bytes, uploadedAt=d.uploaded_at.isoformat()
+                id=d.id,
+                filename=d.filename,
+                sizeBytes=d.size_bytes,
+                uploadedAt=d.uploaded_at.isoformat(),
+                kind=effective_kind(d.kind, d.filename),
             )
             for d in tender_docs
         ],
@@ -490,7 +528,7 @@ def get_project_timeline(
                 if (latest_run.finished_at or latest_run.started_at)
                 else "",
                 status="已完成",
-                desc=f"综合得分 {latest_run.overall} 分，{latest_run.waste} 项废标风险",
+                desc=_prereview_booklet_desc(db, project_id, latest_run),
             )
         )
     elif latest_run and latest_run.status in ("queued", "running"):

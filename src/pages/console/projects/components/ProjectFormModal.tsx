@@ -3,6 +3,7 @@ import Modal from "../../components/Modal";
 import { projectCategories, projectTypes, type Project, type ProjectCategory, type ProjectType } from "@/mocks/projects";
 import { useAuth } from "@/context/AuthContext";
 import { listUsers, type TeamMember } from "@/lib/api";
+import { formatOf } from "@/lib/tenderPackage";
 
 export interface ProjectFormValues {
   name: string;
@@ -29,7 +30,8 @@ const inputCls =
   "h-9 w-full rounded-md border border-background-300 bg-background-50 px-3 text-sm text-foreground-900 outline-none transition-all focus:border-primary-400 focus:ring-1 focus:ring-primary-400/20 placeholder:text-foreground-500";
 const labelCls = "mb-1.5 block text-xs font-medium text-foreground-600";
 
-const ACCEPT = ".docx,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf";
+const ACCEPT =
+  ".docx,.pdf,.xlsx,.xls,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/png,image/jpeg";
 
 function parseBudget(budget?: string): string {
   if (!budget) return "";
@@ -121,8 +123,8 @@ export default function ProjectFormModal({
   };
 
   const handleTenderPick = (file: File) => {
-    if (!/\.(docx|pdf)$/i.test(file.name)) {
-      setTenderErr("仅支持 .docx 或 .pdf 格式的招标文件（暂不支持旧版 .doc，请另存为 .docx 后重新上传）");
+    if (!/\.(docx|pdf|xlsx|xls|png|jpe?g|webp|tif{1,2}|bmp)$/i.test(file.name)) {
+      setTenderErr("支持 Word、PDF、Excel 与常见图片；旧版 .doc 请另存为 .docx");
       return;
     }
     setTenderErr(null);
@@ -378,7 +380,7 @@ export default function ProjectFormModal({
           <label className={labelCls} htmlFor="np-tender">
             招标文件
             <span className="ml-1 font-normal text-foreground-500">
-              （{isEdit ? "重新选择可替换为真实 .docx / .pdf 文件" : "可选，后续可在招标解析中上传"}）
+              （{isEdit ? "重新选择可替换招标文件包中的主文件" : "可选；图纸/清单/答疑请到招标解析页分类上传"}）
             </span>
           </label>
           <input
@@ -400,7 +402,7 @@ export default function ProjectFormModal({
               <div className="min-w-0 flex-1">
                 <div className="truncate text-sm font-medium text-foreground-900">{displayTenderName}</div>
                 <div className="mt-0.5 text-[11px] text-foreground-500">
-                  {/\.pdf$/i.test(displayTenderName) ? "PDF" : "DOCX"}
+                  {formatOf(displayTenderName)}
                   {displayTenderSize ? ` · ${displayTenderSize}` : ""}
                   {tenderFile ? " · 待上传" : " · 已归档"}
                 </div>

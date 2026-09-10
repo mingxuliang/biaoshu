@@ -78,7 +78,7 @@ export default function Topbar({ title, onMenuOpen }: TopbarProps) {
       </button>
 
       <div className="flex items-center gap-1.5 text-sm">
-        <span className="font-heading text-foreground-500">智标云</span>
+        <span className="font-heading text-foreground-500">慧投标</span>
         <i className="ri-arrow-right-s-line text-foreground-400 text-xs"></i>
         <span className="font-label font-medium text-foreground-900">{title}</span>
       </div>

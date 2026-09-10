@@ -30,20 +30,47 @@ export default function ConsoleLayout() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const location = useLocation();
 
+  const lockViewport = location.pathname.startsWith("/console/review");
+
   useEffect(() => {
     setMobileOpen(false);
   }, [location.pathname]);
 
+  useEffect(() => {
+    if (!lockViewport) return;
+    const html = document.documentElement;
+    const prevHtml = html.style.overflow;
+    const prevBody = document.body.style.overflow;
+    html.style.overflow = "hidden";
+    document.body.style.overflow = "hidden";
+    return () => {
+      html.style.overflow = prevHtml;
+      document.body.style.overflow = prevBody;
+    };
+  }, [lockViewport]);
+
   return (
-    <div className="relative min-h-screen bg-background-50 text-foreground-950">
+    <div className={`relative bg-background-50 text-foreground-950 ${lockViewport ? "h-screen overflow-hidden" : "min-h-screen"}`}>
       <Sidebar mobileOpen={mobileOpen} onClose={() => setMobileOpen(false)} />
 
-      <div className="relative lg:pl-[220px]">
+      <div className={`relative lg:pl-[220px] ${lockViewport ? "h-full" : ""}`}>
         <Topbar title={getTitle(location.pathname)} onMenuOpen={() => setMobileOpen(true)} />
-        <main className="min-h-[calc(100vh-3.5rem)] px-5 py-5">
+        <main
+          className={
+            lockViewport
+              ? "flex h-[calc(100vh-3.5rem)] flex-col overflow-hidden px-5 py-5"
+              : "min-h-[calc(100vh-3.5rem)] px-5 py-5"
+          }
+        >
           <ProjectProvider>
             <ProductCatalogProvider>
-              <Outlet />
+              {lockViewport ? (
+                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                  <Outlet />
+                </div>
+              ) : (
+                <Outlet />
+              )}
             </ProductCatalogProvider>
           </ProjectProvider>
         </main>

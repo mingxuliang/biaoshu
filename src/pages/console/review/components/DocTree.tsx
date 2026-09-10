@@ -82,7 +82,7 @@ export default function DocTree({ sections, activeSectionId, activeIssueId, onSe
       <div className="border-t border-background-300 bg-background-50 px-4 py-2.5">
         <p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-foreground-500">
           <i className="ri-map-pin-2-line mt-0.5 shrink-0 text-primary-500"></i>
-          点击章节锚定到编辑区对应位置；数字为该章节待整改问题数。
+          点击章节锚定到源文件对应位置；数字为该章节待整改问题数。
         </p>
       </div>
     </div>

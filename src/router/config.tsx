@@ -21,6 +21,7 @@ import RulesPage from "../pages/console/rules/page";
 import AuditLogPage from "../pages/console/auditlog/page";
 import ModelsPage from "../pages/console/models/page";
 import LoginPage from "../pages/login/page";
+import { hideWriter } from "../lib/flags";
 
 const routes: RouteObject[] = [
   {
@@ -44,7 +45,9 @@ const routes: RouteObject[] = [
       { path: "projects/:id", element: <ProjectDetailPage /> },
       {
         path: "writer",
-        element: (
+        element: hideWriter ? (
+          <Navigate to="/console/projects" replace />
+        ) : (
           <RequirePerm anyOf={["writer"]}>
             <WriterPage />
           </RequirePerm>

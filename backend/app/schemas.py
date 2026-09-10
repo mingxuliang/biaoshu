@@ -8,6 +8,7 @@ class UploadDocOut(BaseModel):
     filename: str
     size_bytes: int
     source: str
+    kind: str = "combined"
 
 
 class BidDocumentSummaryOut(BaseModel):
@@ -16,11 +17,12 @@ class BidDocumentSummaryOut(BaseModel):
     source: str
     sizeBytes: int
     uploadedAt: str
+    kind: str = "combined"
 
 
 class CreateJobIn(BaseModel):
     bid_document_id: str
-    scope: Literal["full"] = "full"
+    scope: Literal["full", "business", "tech"] | None = None
 
 
 class JobStatusOut(BaseModel):
@@ -49,10 +51,10 @@ class PreReviewIssueOut(BaseModel):
     id: str
     level: str
     severity: Literal["废标", "降档", "扣分", "建议"]
-    location: str
-    excerpt: str
+    location: str = ""
+    excerpt: str = ""
     rule: str
-    tenderQuote: str
+    tenderQuote: str = ""
     suggestion: str
     resolved: bool = False
     strategyKey: str = ""
@@ -127,6 +129,7 @@ class ReviewReportOut(BaseModel):
     risk: int
     suggest: int
     light: Literal["绿", "橙", "红"]
+    scope: Literal["full", "business", "tech"] = "full"
     levels: list[PreReviewLevelOut]
     dimensions: list[DimensionOut]
     techModules: list[TechModuleOut] = []
@@ -134,10 +137,17 @@ class ReviewReportOut(BaseModel):
     issues: list[PreReviewIssueOut]
 
 
+class ReviewReportPairOut(BaseModel):
+    business: ReviewReportOut | None = None
+    tech: ReviewReportOut | None = None
+    full: ReviewReportOut | None = None
+
+
 class TrendPointOut(BaseModel):
     round: int
     score: float
     issues: int
+    scope: str = "full"
 
 
 # 以下模型对应招标文件解析与评标尺子锁定（P1），字段严格对齐前端 src/mocks/parse.ts 的
@@ -148,10 +158,12 @@ class TenderUploadOut(BaseModel):
     id: str
     filename: str
     size_bytes: int
+    kind: str = "main"
 
 
 class CreateTenderParseJobIn(BaseModel):
-    tender_document_id: str
+    tender_document_id: str = ""
+    tender_document_ids: list[str] = []
 
 
 class TenderParseJobOut(BaseModel):
@@ -226,6 +238,24 @@ class VetoParamsOut(BaseModel):
     anonymity_required: bool = False
 
 
+class TenderPackageFileOut(BaseModel):
+    id: str
+    filename: str
+    sizeBytes: int = 0
+    kind: str = "main"
+
+
+class TenderPackageSlotOut(BaseModel):
+    kind: str
+    label: str
+    uploaded: bool
+    missingHint: str = ""
+    files: list[TenderPackageFileOut] = []
+    excerpt: str = ""
+    displayIn: str = ""
+    jumpKey: str = ""
+
+
 class ChecklistOut(BaseModel):
     id: str
     project_id: str
@@ -239,6 +269,7 @@ class ChecklistOut(BaseModel):
     formatRequirements: list[FormatItemOut] = []
     dimensions: list[ParseDimensionOut] = []
     vetoParams: VetoParamsOut = VetoParamsOut()
+    package: list[TenderPackageSlotOut] = []
     error: Optional[str] = None
 
 
@@ -569,7 +600,10 @@ class BidSectionOut(BaseModel):
 class BidRevisionOut(BaseModel):
     id: str
     projectId: str
+    scope: str = "business"
     bidDocumentId: str
+    sourceBidDocumentId: str = ""
+    sourceFileName: str = ""
     reviewRunId: str
     reviewRound: Optional[int] = None
     sections: list[BidSectionOut] = []
@@ -857,6 +891,7 @@ class TenderDocumentSummaryOut(BaseModel):
     filename: str
     sizeBytes: int
     uploadedAt: str
+    kind: str = "main"
 
 
 class ProjectDocumentsOut(BaseModel):

@@ -1,106 +1,89 @@
-"""修改闭环：把预审 Finding 挂到「预审规则 · 高分策略」条款，并生成可回写原文的改写句。"""
+"""修改闭环：沿用 AI 预审 Finding 的规则与建议，生成可回写原文的改写句。"""
 
 from __future__ import annotations
 
 import json
 import re
 
-from .rules_data import HIGH_SCORE_STRATEGIES
-
 _QUOTE_RE = re.compile(r"[「“\"]([^」”\"]{6,})[」”\"]")
 _PREFIX_RE = re.compile(r"^【预审规则[^\n】]*】")
-
-_STRATEGY_HINTS: dict[str, tuple[str, ...]] = {
-    "quantify": ("虚词", "空话", "加强", "确保", "力争", "量化", "态度词", "万能动词"),
-    "originality": ("查重", "相似", "模板", "雷同", "原创"),
-    "structured_layout": ("目录", "标题", "修订", "批注", "页码", "跳级", "版式"),
-    "chart_meta": ("作者", "元数据", "暗标", "文档属性"),
-    "local_first": ("本地", "属地", "售后", "网点", "分支"),
-    "data_loop": ("宿舍", "临建", "人均", "高峰人数", "交叉验"),
-    "code_cite": ("规范", "条文", "废止", "GB/", "JGJ"),
-    "zero_veto": ("废标", "星号", "有效期", "保证金", "资质", "报价", "签字", "盖章"),
-    "checklist_map": ("评分点", "未覆盖", "缺项", "未响应", "对照"),
-}
+_TRAILING_STRATEGY_RE = re.compile(r"[。；\s]*高分策略[：:].+$")
+_CLAUSE_LEAD_RE = re.compile(r"^条款：[^。]*。\s*")
+_SCORE_LEAD_RE = re.compile(r"^按此写法可拿高分。\s*")
 
 
-def _strategy_by_key(key: str) -> dict | None:
-    for item in HIGH_SCORE_STRATEGIES:
-        if item.get("key") == key:
-            return item
-    return None
+def strip_strategy_overlay(text: str) -> str:
+    """去掉历史上挂上的「高分策略库」前缀/后缀，保留预审引擎自己的建议。"""
+    raw = (text or "").strip()
+    raw = _PREFIX_RE.sub("", raw).strip()
+    raw = _CLAUSE_LEAD_RE.sub("", raw).strip()
+    raw = _SCORE_LEAD_RE.sub("", raw).strip()
+    raw = _TRAILING_STRATEGY_RE.sub("", raw).strip()
+    return raw
 
 
-def pick_strategy(issue: dict) -> dict | None:
-    """按问题原文/规则/层级选一条高分策略。已有 strategyKey 时复用。"""
-    existing = (issue.get("strategyKey") or "").strip()
-    if existing:
-        found = _strategy_by_key(existing)
-        if found:
-            return found
+def fallback_suggestion(issue: dict) -> str:
+    rule = str(issue.get("rule") or "").strip() or "本条预审规则"
+    quote = str(issue.get("tenderQuote") or "").strip()
+    excerpt = str(issue.get("excerpt") or "").strip()
+    if excerpt:
+        return f"请按预审规则「{rule}」改写命中句，补全可核验的响应内容，删除空话与未响应表述。"
+    if quote:
+        return f"投标书未定位到对应句。请按预审规则「{rule}」补写对标响应，落实招标要求：「{quote[:80]}」。"
+    return f"请按预审规则「{rule}」补全可核验的响应内容。"
 
-    blob = "".join(
-        str(issue.get(k) or "")
-        for k in ("rule", "location", "excerpt", "suggestion", "level", "severity")
+
+def llm_write_suggestion(issue: dict) -> str:
+    """预审未给出建议时，按该条预审规则补一条可执行的改写建议。"""
+    from .llm import LlmError, chat_complete, get_default_model_id
+
+    rule = str(issue.get("rule") or "").strip()
+    quote = str(issue.get("tenderQuote") or "").strip()
+    excerpt = str(issue.get("excerpt") or "").strip()
+    location = str(issue.get("location") or "").strip()
+    severity = str(issue.get("severity") or "").strip()
+    prompt = (
+        "你是投标文件预审整改编辑。请只根据【本条 AI 预审规则】给出一条可执行的修改建议，不要引用「高分策略库」。\n"
+        "要求：指出改哪一句、改成什么样（尽量带数量、时限、频次、百分比或规范条文号）；不要输出标题或前缀。\n"
+        f"层级/严重度：{issue.get('level') or ''} / {severity}\n"
+        f"定位：{location}\n"
+        f"预审规则：{rule}\n"
+        f"招标对标原文：{quote or '（无，投标书自洽核验）'}\n"
+        f"投标书命中句：{excerpt or '（缺项/未定位）'}\n"
     )
-    level = str(issue.get("level") or "")
-    if level == "L1" or issue.get("severity") == "废标":
-        return _strategy_by_key("zero_veto")
-
-    scored: list[tuple[int, dict]] = []
-    for item in HIGH_SCORE_STRATEGIES:
-        key = item.get("key") or ""
-        hints = _STRATEGY_HINTS.get(key) or ()
-        hits = sum(1 for h in hints if h and h in blob)
-        if hits:
-            scored.append((hits, item))
-    if scored:
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return scored[0][1]
-
-    if level == "L4":
-        return _strategy_by_key("quantify")
-    if level == "L5":
-        return _strategy_by_key("structured_layout")
-    if level == "L2":
-        return _strategy_by_key("local_first")
-    return _strategy_by_key("checklist_map") or _strategy_by_key("quantify")
-
-
-def _clause_text(strategy: dict) -> str:
-    items = [str(x) for x in (strategy.get("items") or []) if x]
-    return "；".join(items[:3]) if items else (strategy.get("point") or "")
-
-
-def format_strategy_suggestion(issue: dict, strategy: dict | None) -> str:
-    raw = (issue.get("suggestion") or "").strip()
-    if not strategy:
-        return raw
-    if "预审规则" in raw and "高分策略" in raw:
-        return raw
-    category = strategy.get("category") or strategy.get("key") or ""
-    point = strategy.get("point") or ""
-    clauses = _clause_text(strategy)
-    prefix = (
-        f"【预审规则 · 高分策略 · {category}】"
-        f"条款：{point}"
-        f"{('（' + clauses + '）') if clauses and clauses != point else ''}。"
-        f"按此写法可拿高分。"
-    )
-    return f"{prefix} {raw}".strip()
+    try:
+        raw = chat_complete(
+            model_id=get_default_model_id(),
+            messages=[
+                {"role": "system", "content": "只输出一条中文修改建议，不要解释。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+            timeout=30,
+            max_tokens=280,
+        )
+    except (LlmError, Exception):
+        return ""
+    text = strip_strategy_overlay((raw or "").strip().strip('"').strip("“”"))
+    if len(text) < 8 or text.startswith("{") or text.startswith("【"):
+        return ""
+    return text[:500]
 
 
 def enrich_issue(issue: dict) -> dict:
-    """给闭环 issue 补策略字段，并改写 suggestion 使其点名高分条款。"""
+    """沿用预审规则与建议；去掉高分策略库字段；缺建议时给出按该条规则的修改说明。"""
     out = dict(issue)
-    strategy = pick_strategy(out)
-    if strategy:
-        out["strategyKey"] = strategy.get("key") or ""
-        out["strategyCategory"] = strategy.get("category") or ""
-        out["strategyPoint"] = strategy.get("point") or ""
-        out["strategyClauses"] = list(strategy.get("items") or [])
-        out["suggestion"] = format_strategy_suggestion(out, strategy)
+    sk = str(out.get("strategyKey") or "")
+    out["strategyKey"] = sk
+    out["strategyCategory"] = str(out.get("strategyCategory") or "")
+    out["strategyPoint"] = str(out.get("strategyPoint") or "")
+    out["strategyClauses"] = list(out.get("strategyClauses") or []) if isinstance(out.get("strategyClauses"), list) else []
+    suggestion = strip_strategy_overlay(str(out.get("suggestion") or ""))
+    if len(suggestion) < 8:
+        suggestion = fallback_suggestion(out)
+    out["suggestion"] = suggestion
     if not out.get("applyText"):
-        derived = heuristic_apply_text(out.get("excerpt") or "", out.get("suggestion") or "")
+        derived = heuristic_apply_text(out.get("excerpt") or "", suggestion)
         if derived:
             out["applyText"] = derived
     return out
@@ -108,9 +91,7 @@ def enrich_issue(issue: dict) -> dict:
 
 def heuristic_apply_text(excerpt: str, suggestion: str) -> str:
     """从建议里抽出可直接替换 excerpt 的句子；抽不到则返回空，交给 LLM。"""
-    text = _PREFIX_RE.sub("", suggestion or "").strip()
-    text = re.sub(r"^条款：[^。]*。", "", text).strip()
-    text = re.sub(r"^按此写法可拿高分。", "", text).strip()
+    text = strip_strategy_overlay(suggestion or "")
     quotes = [q.strip() for q in _QUOTE_RE.findall(suggestion or "") if q.strip()]
     for q in quotes:
         if q in ("预审规则",) or "高分策略" in q:
@@ -138,29 +119,28 @@ def replace_in_paragraph(paragraph: str, excerpt: str, replacement: str) -> str:
 def apply_text_to_paragraph(paragraph: str, excerpt: str, suggestion: str, apply_text: str = "") -> str:
     replacement = (apply_text or "").strip() or heuristic_apply_text(excerpt, suggestion)
     if not replacement:
-        replacement = (suggestion or "").strip()
-        replacement = _PREFIX_RE.sub("", replacement).strip()
-        replacement = re.sub(r"^条款：[^。]*。", "", replacement).strip()
-        replacement = re.sub(r"^按此写法可拿高分。", "", replacement).strip()
+        replacement = strip_strategy_overlay(suggestion or "")
     return replace_in_paragraph(paragraph, excerpt, replacement)
 
 
-def llm_rewrite_paragraph(paragraph: str, excerpt: str, suggestion: str, strategy: dict | None) -> str:
-    """把建议落成可替换的整段正文；失败时返回空串。"""
+def llm_rewrite_paragraph(paragraph: str, excerpt: str, suggestion: str, issue: dict | None = None) -> str:
+    """按本条预审规则把建议落成可替换的整段正文；失败时返回空串。"""
     from .llm import LlmError, chat_complete, get_default_model_id
 
-    clause = ""
-    if strategy:
-        clause = f"{strategy.get('category') or ''}：{strategy.get('point') or ''}（{_clause_text(strategy)}）"
+    info = issue or {}
+    rule = str(info.get("rule") or "").strip()
+    quote = str(info.get("tenderQuote") or "").strip()
     prompt = (
-        "你是投标文件改写编辑。请按预审整改建议改写【当前段落】，直接输出改写后的整段正文，不要解释。\n"
+        "你是投标文件改写编辑。请按【本条 AI 预审规则】和整改建议改写【当前段落】，直接输出改写后的整段正文，不要解释。\n"
         "要求：\n"
-        "1. 必须落实高分策略条款，用数量、时限、频次、百分比、规范条文号等可核验表述替换空话。\n"
-        "2. 只改与 excerpt 相关的句子，其余事实、项目名称、已有数据不得编造或删除。\n"
-        "3. 不要输出目录行、不要输出「建议：」前缀。\n"
-        f"高分策略条款：{clause or '数据代替定性空话'}\n"
+        "1. 只落实本条预审规则与招标对标原文，不要套用「高分策略库」。\n"
+        "2. 用数量、时限、频次、百分比、规范条文号等可核验表述替换空话。\n"
+        "3. 只改与 excerpt 相关的句子，其余事实、项目名称、已有数据不得编造或删除。\n"
+        "4. 不要输出目录行、不要输出「建议：」前缀。\n"
+        f"预审规则：{rule or '（未标注规则名）'}\n"
+        f"招标对标原文：{quote or '（无，按预审建议自洽修改）'}\n"
         f"问题摘录：{excerpt}\n"
-        f"整改建议：{suggestion}\n"
+        f"整改建议：{strip_strategy_overlay(suggestion)}\n"
         f"当前段落：{paragraph}\n"
     )
     try:

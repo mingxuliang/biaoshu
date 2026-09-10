@@ -342,6 +342,7 @@ export default function ModelsPage() {
                           <tr>
                             <th className="py-1.5 font-medium">显示名</th>
                             <th className="py-1.5 font-medium">接口模型名</th>
+                            <th className="py-1.5 font-medium">能力</th>
                             <th className="py-1.5 font-medium">思维链</th>
                             <th className="py-1.5 font-medium">撰写可选</th>
                             <th className="py-1.5 font-medium">默认</th>
@@ -353,6 +354,13 @@ export default function ModelsPage() {
                             <tr key={model.id} className="border-t border-background-200">
                               <td className="py-2 font-medium text-foreground-800">{model.name}</td>
                               <td className="py-2 font-mono text-[11px] text-foreground-600">{model.apiModel}</td>
+                              <td className="py-2">
+                                {model.vision ? (
+                                  <span className="inline-flex items-center rounded-full bg-primary-50 px-2 py-0.5 text-[10px] font-medium text-primary-700">多模态看图</span>
+                                ) : (
+                                  <span className="inline-flex items-center rounded-full bg-secondary-100 px-2 py-0.5 text-[10px] text-secondary-600">文本</span>
+                                )}
+                              </td>
                               <td className="py-2">
                                 <button
                                   type="button"

@@ -8,6 +8,7 @@ import ProjectDocuments from "./components/ProjectDocuments";
 import { useProjects } from "@/context/ProjectContext";
 import { useAuth } from "@/context/AuthContext";
 import { getProjectTimeline, type TimelineStage } from "@/lib/api";
+import { hideWriter } from "@/lib/flags";
 
 type StageStatus = TimelineStage["status"];
 
@@ -138,6 +139,7 @@ export default function ProjectDetailPage() {
               <i className="ri-file-settings-line text-sm"></i>
               招标解析
             </Link>
+            {!hideWriter && (
             <Link
               to={`/console/writer?project=${project.id}`}
               className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-3.5 text-xs font-medium text-background-50 transition-colors hover:bg-primary-600"
@@ -145,6 +147,7 @@ export default function ProjectDetailPage() {
               <i className="ri-edit-2-line text-sm"></i>
               进入撰写工作台
             </Link>
+            )}
             <Link
               to={`/console/audit?project=${project.id}`}
               className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-background-300 bg-background-50 px-3.5 text-xs font-medium text-foreground-700 transition-colors hover:bg-background-200"

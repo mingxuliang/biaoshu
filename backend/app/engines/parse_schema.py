@@ -298,6 +298,7 @@ def derive_engine_fields(tree: list[dict], category: str | None = DEFAULT_CATEGO
                             "sectionPath": title or "未标注",
                             "responseStatus": "未覆盖",
                             "isEssential": False,
+                            "sourceItemId": item_id,
                         }
                     )
             if item_id in must_item_types:
@@ -331,6 +332,7 @@ def derive_engine_fields(tree: list[dict], category: str | None = DEFAULT_CATEGO
                             "desc": content,
                             "source": title or "未标注",
                             "level": level,
+                            "sourceItemId": item_id,
                         }
                     )
 

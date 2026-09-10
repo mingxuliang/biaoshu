@@ -11,6 +11,7 @@ from ..config import get_settings
 from ..db import get_db
 from ..models import BidDocument, User
 from ..permissions import PERM_REVIEW, PERM_WRITER, require_any_perm, require_project
+from ..engines.bid_kind import normalize_kind
 from ..schemas import BidDocumentSummaryOut, UploadDocOut
 from .. import storage
 
@@ -24,6 +25,7 @@ def _bid_doc_to_summary(d: BidDocument) -> BidDocumentSummaryOut:
         source=d.source,
         sizeBytes=d.size_bytes,
         uploadedAt=d.uploaded_at.isoformat(),
+        kind=normalize_kind(getattr(d, "kind", None), d.filename),
     )
 
 
@@ -31,6 +33,7 @@ def _bid_doc_to_summary(d: BidDocument) -> BidDocumentSummaryOut:
 async def upload_bid_document(
     project_id: str = Form(...),
     file: UploadFile = File(...),
+    kind: str = Form(""),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> UploadDocOut:
@@ -51,18 +54,26 @@ async def upload_bid_document(
         raise HTTPException(400, "文档已损坏或无法解析，请重新上传") from exc
 
     key = storage.put_bytes(f"bid-documents/{project_id}", content, ext)
+    resolved_kind = normalize_kind(kind, filename)
     doc = BidDocument(
         project_id=project_id,
         filename=filename,
         storage_path=key,
         size_bytes=len(content),
         source="upload",
+        kind=resolved_kind,
     )
     db.add(doc)
     db.commit()
     db.refresh(doc)
 
-    return UploadDocOut(id=doc.id, filename=doc.filename, size_bytes=doc.size_bytes, source=doc.source)
+    return UploadDocOut(
+        id=doc.id,
+        filename=doc.filename,
+        size_bytes=doc.size_bytes,
+        source=doc.source,
+        kind=resolved_kind,
+    )
 
 
 @router.get("/projects/{project_id}/bid-documents", response_model=list[BidDocumentSummaryOut])
@@ -77,6 +88,17 @@ def list_project_bid_documents(
         .all()
     )
     return [_bid_doc_to_summary(d) for d in docs]
+
+
+@router.get("/bid-documents/{doc_id}", response_model=BidDocumentSummaryOut)
+def get_bid_document(
+    doc_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+) -> BidDocumentSummaryOut:
+    doc = db.get(BidDocument, doc_id)
+    if not doc:
+        raise HTTPException(404, "文件不存在")
+    require_project(db, current_user, doc.project_id)
+    return _bid_doc_to_summary(doc)
 
 
 @router.get("/bid-documents/{doc_id}/download")
@@ -116,9 +138,16 @@ def use_sample_document(
         storage_path=key,
         size_bytes=len(content),
         source="workbench",
+        kind="combined",
     )
     db.add(doc)
     db.commit()
     db.refresh(doc)
 
-    return UploadDocOut(id=doc.id, filename=doc.filename, size_bytes=doc.size_bytes, source=doc.source)
+    return UploadDocOut(
+        id=doc.id,
+        filename=doc.filename,
+        size_bytes=doc.size_bytes,
+        source=doc.source,
+        kind="combined",
+    )

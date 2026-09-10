@@ -504,7 +504,7 @@ const WordEditor = forwardRef<WordEditorHandle, WordEditorProps>(function WordEd
         </div>
       </LexicalComposer>
       <div className="flex items-center justify-between border-t border-background-300 bg-background-100 px-4 py-1.5 text-[11px] text-foreground-500">
-        <span className="flex items-center gap-1"><i className="ri-file-word-2-line text-primary-500"></i>智标云投标书</span>
+        <span className="flex items-center gap-1"><i className="ri-file-word-2-line text-primary-500"></i>慧投标投标书</span>
         <span className="flex items-center gap-3">
           <span>字数 {wordCount}</span>
           <span>第 1 页 / 共 1 页</span>

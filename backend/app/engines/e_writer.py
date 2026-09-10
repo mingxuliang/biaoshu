@@ -1316,7 +1316,7 @@ def _fallback_chapter_content(chapter_title: str, chapter_idea: str, reason: str
     )
 
 
-CHAT_SYSTEM_PROMPT = """你是智标云投标文件撰写助手，只根据用户提供的项目上下文回答。
+CHAT_SYSTEM_PROMPT = """你是慧投标投标文件撰写助手，只根据用户提供的项目上下文回答。
 要求：
 1. 用中文、简洁专业，面向投标文件编写人员；
 2. 可以分析废标风险、优化章节结构、给出撰写建议或改写示例；

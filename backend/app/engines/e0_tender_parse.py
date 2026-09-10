@@ -56,13 +56,19 @@ SYSTEM_PROMPT = """你是招标文件解析专家。必须针对用户给出的�
 """
 
 
-def run(full_text: str, category: str | None = parse_schema.DEFAULT_CATEGORY) -> dict:
+def run(
+    full_text: str,
+    category: str | None = parse_schema.DEFAULT_CATEGORY,
+    extra_fills: dict | None = None,
+) -> dict:
     category = category if category in BATCHES_BY_CATEGORY else parse_schema.DEFAULT_CATEGORY
     tree = parse_schema.empty_tree(category)
     errors: list[str] = []
     try:
         model_id = get_default_model_id()
     except Exception as exc:  # noqa: BLE001
+        if extra_fills:
+            parse_schema.apply_fills(tree, extra_fills, merge=True)
         return _pack(tree, full_text, f"未配置可用大模型（{exc}），请到「模型配置」填写秘钥", category)
 
     chunks = _iter_chunks(full_text)
@@ -79,6 +85,8 @@ def run(full_text: str, category: str | None = parse_schema.DEFAULT_CATEGORY) ->
                 elif index == len(chunks) and batch_errors:
                     errors.append(f"{'+'.join(keys)}有 {batch_errors}/{len(chunks)} 段失败（{exc.__class__.__name__}）")
 
+    if extra_fills:
+        parse_schema.apply_fills(tree, extra_fills, merge=True)
     parse_schema.mark_completed(tree)
     filled, total = parse_schema.filled_row_counts(tree)
     error = None

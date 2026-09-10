@@ -62,6 +62,20 @@ def _enabled(key: str, enabled_keys: set[str] | None) -> bool:
     return enabled_keys is None or key in enabled_keys
 
 
+def _filler_hit_excerpts(sentences: list[str], word_patterns: list[tuple], limit: int = 3) -> str:
+    """摘 2–3 条真正含虚词的投标书句子，禁止把密度百分比写进 excerpt。"""
+    examples: list[str] = []
+    for s in sentences:
+        if not any(w in s for w, _, _, _ in word_patterns):
+            continue
+        snippet = s.strip()[:150]
+        if snippet:
+            examples.append(snippet)
+        if len(examples) >= limit:
+            break
+    return "；".join(examples)
+
+
 def run(
     paragraphs: list[dict],
     word_rules: list[tuple] | None = None,
@@ -94,9 +108,12 @@ def run(
                 _finding(
                     severity="扣分",
                     location="技术标 / 全文虚词密度",
-                    excerpt=f"全文虚词命中句子占比 {density}%（安全线 {filler_density_safe}%）",
+                    excerpt=_filler_hit_excerpts(sentences, word_patterns),
                     rule="F10.02 虚词表-空话承诺",
-                    suggestion="按虚词自查五规则（数字/动作/对象/验证/密度）逐段改写，替换为可量化表述",
+                    suggestion=(
+                        f"全文虚词命中句子占比 {density}%（安全线 {filler_density_safe}%）。"
+                        "按虚词自查五规则（数字/动作/对象/验证/密度）逐段改写，替换为可量化表述"
+                    ),
                 )
             )
 

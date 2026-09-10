@@ -1,6 +1,7 @@
 import io
 import os
 import urllib.parse
+import zipfile
 
 import docx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
@@ -13,6 +14,13 @@ from ..auth import get_current_user
 from ..db import get_db
 from ..engines.parse_export import checklist_to_docx
 from ..engines.parse_schema import merge_tree
+from ..engines.tender_package import (
+    ALLOWED_EXTS,
+    IMAGE_EXTS,
+    effective_kind,
+    normalize_kind,
+    package_slots,
+)
 from ..models import EvaluationChecklist, Project, TenderDocument, User
 from ..permissions import PERM_PROJECT_EDIT, PERM_WRITER, require_any_perm, require_project
 from ..schemas import (
@@ -27,10 +35,22 @@ from .. import storage
 router = APIRouter(prefix="/api", tags=["tender"])
 
 
+def _project_tender_docs(db: Session, project_id: str) -> list[TenderDocument]:
+    return (
+        db.query(TenderDocument)
+        .filter(TenderDocument.project_id == project_id)
+        .order_by(TenderDocument.uploaded_at.desc())
+        .all()
+    )
+
+
 def _checklist_to_out(checklist: EvaluationChecklist, db: Session) -> ChecklistOut:
     data = checklist.checklist_json or {}
     project = db.get(Project, checklist.project_id)
     category = (project.category if project else None) or "软件服务类"
+    pkg = data.get("package")
+    if not pkg:
+        pkg = package_slots(_project_tender_docs(db, checklist.project_id))
     return ChecklistOut(
         id=checklist.id,
         project_id=checklist.project_id,
@@ -44,14 +64,52 @@ def _checklist_to_out(checklist: EvaluationChecklist, db: Session) -> ChecklistO
         formatRequirements=data.get("formatRequirements", []),
         dimensions=merge_tree(data.get("dimensions"), category),
         vetoParams=checklist.engine_params_json or {},
+        package=pkg,
         error=checklist.error,
     )
+
+
+def _validate_upload(ext: str, content: bytes) -> None:
+    if ext == ".docx":
+        try:
+            docx.Document(io.BytesIO(content))
+        except Exception as exc:
+            raise HTTPException(400, "Word 文档已损坏或无法解析，请重新上传") from exc
+        return
+    if ext == ".pdf":
+        import pymupdf as fitz
+
+        try:
+            with fitz.open(stream=content, filetype="pdf") as doc:
+                if doc.page_count < 1:
+                    raise ValueError("空文档")
+        except Exception as exc:
+            raise HTTPException(400, "PDF 文件已损坏或无法解析，请重新上传") from exc
+        return
+    if ext == ".xlsx":
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                if "xl/workbook.xml" not in zf.namelist():
+                    raise ValueError("不是有效的 Excel 工作簿")
+        except Exception as exc:
+            raise HTTPException(400, "Excel 文件已损坏或无法解析，请重新上传") from exc
+        return
+    if ext == ".xls":
+        if len(content) < 8:
+            raise HTTPException(400, "Excel 文件已损坏或无法解析，请重新上传")
+        return
+    if ext in IMAGE_EXTS:
+        if len(content) < 24:
+            raise HTTPException(400, "图片文件已损坏，请重新上传")
+        return
+    raise HTTPException(400, "不支持该文件格式")
 
 
 @router.post("/tender-documents", response_model=TenderUploadOut)
 async def upload_tender_document(
     project_id: str = Form(...),
     file: UploadFile = File(...),
+    kind: str = Form(""),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> TenderUploadOut:
@@ -62,24 +120,12 @@ async def upload_tender_document(
 
     if ext == ".doc":
         raise HTTPException(400, "暂不支持旧版 .doc 格式，请在 Word 中另存为 .docx 后重新上传")
-    if ext not in (".docx", ".pdf"):
-        raise HTTPException(400, "仅支持 .docx 或 .pdf 格式的招标文件")
+    if ext not in ALLOWED_EXTS:
+        raise HTTPException(400, "支持 Word、PDF、Excel 与常见图片格式（.docx / .pdf / .xlsx / .png / .jpg 等）")
 
     content = await file.read()
-    if ext == ".docx":
-        try:
-            docx.Document(io.BytesIO(content))
-        except Exception as exc:
-            raise HTTPException(400, "文档已损坏或无法解析，请重新上传") from exc
-    else:
-        import pymupdf as fitz
-
-        try:
-            with fitz.open(stream=content, filetype="pdf") as doc:
-                if doc.page_count < 1:
-                    raise ValueError("空文档")
-        except Exception as exc:
-            raise HTTPException(400, "PDF 文件已损坏或无法解析，请重新上传") from exc
+    _validate_upload(ext, content)
+    resolved_kind = normalize_kind(kind, filename)
 
     key = storage.put_bytes(f"tender/{project_id}", content, ext)
     doc = TenderDocument(
@@ -87,26 +133,119 @@ async def upload_tender_document(
         filename=filename,
         storage_path=key,
         size_bytes=len(content),
+        kind=resolved_kind,
     )
     db.add(doc)
     db.commit()
     db.refresh(doc)
 
-    return TenderUploadOut(id=doc.id, filename=doc.filename, size_bytes=doc.size_bytes)
+    return TenderUploadOut(id=doc.id, filename=doc.filename, size_bytes=doc.size_bytes, kind=doc.kind)
 
 
 @router.get("/tender-documents/{doc_id}/download")
 def download_tender_document(
-    doc_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    doc_id: str,
+    inline: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> Response:
     doc = db.get(TenderDocument, doc_id)
     if not doc or not storage.exists(doc.storage_path):
         raise HTTPException(404, "文件不存在")
     require_project(db, current_user, doc.project_id)
     try:
-        return storage.http_response(doc.storage_path, filename=doc.filename)
+        return storage.http_response(doc.storage_path, filename=doc.filename, inline=inline)
     except FileNotFoundError:
         raise HTTPException(404, "文件不存在")
+
+
+@router.get("/tender-documents/{doc_id}/preview-meta")
+def tender_preview_meta(
+    doc_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+) -> dict:
+    doc = db.get(TenderDocument, doc_id)
+    if not doc:
+        raise HTTPException(404, "文件不存在")
+    require_project(db, current_user, doc.project_id)
+    ext = os.path.splitext(doc.filename or "")[1].lower()
+    if ext != ".pdf":
+        return {"pageCount": 0, "kind": "other", "filename": doc.filename}
+    try:
+        import pymupdf as fitz
+
+        with storage.as_local(doc.storage_path) as path:
+            with fitz.open(path) as pdf:
+                return {"pageCount": int(pdf.page_count or 0), "kind": "pdf", "filename": doc.filename}
+    except FileNotFoundError:
+        raise HTTPException(404, "文件不存在") from None
+
+
+@router.get("/tender-documents/{doc_id}/preview-page")
+def tender_preview_page(
+    doc_id: str,
+    page: int = 1,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    """把 PDF 单页渲染成 PNG，供页面内 <img> 预览，避免浏览器把 PDF 当成附件下载。"""
+    doc = db.get(TenderDocument, doc_id)
+    if not doc:
+        raise HTTPException(404, "文件不存在")
+    require_project(db, current_user, doc.project_id)
+    ext = os.path.splitext(doc.filename or "")[1].lower()
+    if ext != ".pdf":
+        raise HTTPException(400, "仅 PDF 支持分页预览")
+    try:
+        import pymupdf as fitz
+
+        with storage.as_local(doc.storage_path) as path:
+            with fitz.open(path) as pdf:
+                total = int(pdf.page_count or 0)
+                if total < 1:
+                    raise HTTPException(400, "PDF 没有页面")
+                index = max(1, min(page, total)) - 1
+                pix = pdf[index].get_pixmap(matrix=fitz.Matrix(1.4, 1.4), alpha=False)
+                png = pix.tobytes("png")
+    except FileNotFoundError:
+        raise HTTPException(404, "文件不存在") from None
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(400, "PDF 预览失败") from exc
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={
+            "Content-Disposition": "inline; filename=preview.png",
+            "Cache-Control": "private, max-age=86400",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.delete("/tender-documents/{doc_id}")
+def delete_tender_document(
+    doc_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+) -> dict:
+    doc = db.get(TenderDocument, doc_id)
+    if not doc:
+        raise HTTPException(404, "文件不存在")
+    require_project(db, current_user, doc.project_id)
+    require_any_perm(current_user, PERM_PROJECT_EDIT, PERM_WRITER)
+    referenced = (
+        db.query(EvaluationChecklist.id)
+        .filter(EvaluationChecklist.tender_document_id == doc_id)
+        .first()
+    )
+    if referenced:
+        raise HTTPException(400, "该文件已被解析任务引用，无法删除")
+    try:
+        storage.delete(doc.storage_path)
+    except Exception:
+        pass
+    db.delete(doc)
+    db.commit()
+    return {"ok": True}
 
 
 @router.post("/projects/{project_id}/tender-parse-jobs", response_model=TenderParseJobOut)
@@ -119,9 +258,32 @@ def create_tender_parse_job(
 ) -> TenderParseJobOut:
     require_project(db, current_user, project_id)
     require_any_perm(current_user, PERM_PROJECT_EDIT, PERM_WRITER)
-    tender_doc = db.get(TenderDocument, payload.tender_document_id)
-    if not tender_doc:
-        raise HTTPException(404, "招标文件不存在，请重新上传")
+
+    requested = [str(x) for x in (payload.tender_document_ids or []) if x]
+    if payload.tender_document_id:
+        requested = [payload.tender_document_id] + [i for i in requested if i != payload.tender_document_id]
+
+    project_docs = _project_tender_docs(db, project_id)
+    if requested:
+        by_id = {d.id: d for d in project_docs}
+        docs = [by_id[i] for i in requested if i in by_id]
+        missing = [i for i in requested if i not in by_id]
+        if missing:
+            extra = db.query(TenderDocument).filter(TenderDocument.id.in_(missing)).all()
+            for d in extra:
+                if d.project_id != project_id:
+                    raise HTTPException(400, f"文件不属于当前项目：{d.filename}")
+                docs.append(d)
+            still = [i for i in missing if i not in {d.id for d in docs}]
+            if still:
+                raise HTTPException(404, "招标文件不存在，请重新上传")
+    else:
+        docs = project_docs
+
+    if not docs:
+        raise HTTPException(400, "请先上传招标文件包中的至少一份文件")
+
+    primary = next((d for d in docs if effective_kind(d.kind, d.filename) == "main"), docs[0])
 
     last_version = (
         db.query(func.max(EvaluationChecklist.version))
@@ -131,18 +293,22 @@ def create_tender_parse_job(
 
     checklist = EvaluationChecklist(
         project_id=project_id,
-        tender_document_id=tender_doc.id,
+        tender_document_id=primary.id,
         version=last_version + 1,
         status="queued",
+        checklist_json={"packageDocIds": [d.id for d in docs], "package": package_slots(docs)},
     )
     db.add(checklist)
+    names = "、".join(d.filename for d in docs[:6])
+    if len(docs) > 6:
+        names += f" 等 {len(docs)} 份"
     write_audit(
         db,
         action="解析",
         user_name=actor_from_request(db, request),
-        target=f"{project_label(db, project_id)} / {tender_doc.filename}",
+        target=f"{project_label(db, project_id)} / {names}",
         version=f"v{checklist.version}",
-        detail="发起招标文件解析",
+        detail=f"发起招标文件包解析（{len(docs)} 份）",
     )
     db.commit()
     db.refresh(checklist)

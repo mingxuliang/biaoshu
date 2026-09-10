@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import Modal from "../../components/Modal";
 import { useAuth } from "@/context/AuthContext";
+import { hideWriter } from "@/lib/flags";
 import {
   downloadBidDocumentFile,
   downloadTenderDocument,
@@ -10,6 +11,12 @@ import {
   type BidDocumentSummary,
   type TenderDocumentSummary,
 } from "@/lib/api";
+import {
+  TENDER_KIND_LABELS,
+  effectiveTenderKind,
+  fileIcon,
+  formatOf,
+} from "@/lib/tenderPackage";
 
 interface ProjectDocumentsProps {
   projectId: string;
@@ -32,10 +39,6 @@ function formatSize(bytes: number): string {
 function formatTime(iso: string): string {
   if (!iso) return "—";
   return iso.slice(0, 10);
-}
-
-function formatOf(name: string): string {
-  return /\.pdf$/i.test(name) ? "PDF" : "DOCX";
 }
 
 type PreviewDoc = {
@@ -94,14 +97,14 @@ export default function ProjectDocuments({ projectId }: ProjectDocumentsProps) {
     {
       key: "tender",
       label: "招标文件",
-      desc: "本项目已上传的招标文件，可供招标解析直接选用",
+      desc: "本项目招标文件包：正文、答疑补遗、工程量清单、报价文件、施工图纸",
       icon: "ri-file-list-3-line",
       color: "bg-primary-50 text-primary-600",
       docs: tenderDocs.map((d) => ({
         id: d.id,
         name: d.filename,
         kind: "tender" as const,
-        sourceLabel: "招标文件",
+        sourceLabel: TENDER_KIND_LABELS[effectiveTenderKind(d.kind, d.filename)] || "招标文件",
         size: formatSize(d.sizeBytes),
         updated: formatTime(d.uploadedAt),
       })),
@@ -172,7 +175,7 @@ export default function ProjectDocuments({ projectId }: ProjectDocumentsProps) {
                     className="flex w-full cursor-pointer items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-background-50"
                   >
                     <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary-50 text-primary-600">
-                      <i className={`${/\.pdf$/i.test(doc.name) ? "ri-file-pdf-2-line" : "ri-file-word-2-line"} text-base`}></i>
+                      <i className={`${fileIcon(doc.name)} text-base`}></i>
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium text-foreground-900">{doc.name}</span>
@@ -201,6 +204,7 @@ export default function ProjectDocuments({ projectId }: ProjectDocumentsProps) {
               <i className="ri-file-settings-line text-sm"></i>
               招标解析
             </Link>
+            {!hideWriter && (
             <Link
               to={`/console/writer?project=${projectId}`}
               className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-3.5 text-xs font-medium text-background-50 transition-colors hover:bg-primary-600"
@@ -208,6 +212,7 @@ export default function ProjectDocuments({ projectId }: ProjectDocumentsProps) {
               <i className="ri-edit-2-line text-sm"></i>
               进入撰写工作台
             </Link>
+            )}
             <Link
               to={`/console/audit?project=${projectId}`}
               className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-accent-200 bg-accent-50 px-3.5 text-xs font-medium text-accent-600 transition-colors hover:bg-accent-100"
