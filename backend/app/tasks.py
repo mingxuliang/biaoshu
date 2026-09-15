@@ -12,10 +12,13 @@ from .db import SessionLocal
 from .engines import e0_tender_parse, e_writer
 from .engines.docx_extract import extract_document_plain_text, extract_full_text
 from .engines.tender_package import (
+    KIND_BOQ,
     KIND_DRAWING,
     attach_extracts,
+    compose_addendum_text,
     compose_parse_text,
     effective_kind,
+    extract_boq_items,
     extract_file_text,
     extra_fills_from_package,
     package_slots,
@@ -108,10 +111,18 @@ def run_tender_parse_task(checklist_id: str) -> None:
                 drawing_names[tender_doc.id] = tender_doc.filename or "未命名"
             with storage.as_local(tender_doc.storage_path) as path:
                 text = extract_file_text(path, kind=kind, filename=tender_doc.filename)
-            parts.append({"kind": kind, "filename": tender_doc.filename, "text": text})
+                boq_items = extract_boq_items(path, filename=tender_doc.filename) if kind == KIND_BOQ else []
+            parts.append({"kind": kind, "filename": tender_doc.filename, "text": text, "boqItems": boq_items})
 
-        full_text, notes = compose_parse_text(parts)
-        extra_fills = extra_fills_from_package(parts, notes)
+        full_text, notes = compose_parse_text(parts, include_addendum_body=False)
+        addendum_text = compose_addendum_text(parts)
+        extra_fills = extra_fills_from_package(
+            parts,
+            notes,
+            project_name=project.name if project else "",
+            project_type=project.type if project else "",
+            category=category,
+        )
         if drawing_refs:
             try:
                 with storage.as_local_map(drawing_refs) as local_paths:
@@ -122,7 +133,9 @@ def run_tender_parse_task(checklist_id: str) -> None:
                     extra_fills = merge_drawing_fills(extra_fills, analyze_drawings(drawing_files))
             except Exception:
                 logger.exception("drawing intel failed for checklist %s", checklist_id)
-        result = e0_tender_parse.run(full_text, category=category, extra_fills=extra_fills)
+        result = e0_tender_parse.run(
+            full_text, category=category, extra_fills=extra_fills, addendum_text=addendum_text
+        )
 
         checklist.checklist_json = {
             "dimensions": result["dimensions"],

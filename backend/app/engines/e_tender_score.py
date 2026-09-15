@@ -32,6 +32,11 @@ _SKIP_LABELS = (
     "综合评价等级组合规则（好/较好/一般）",
     "异常低价识别公式与参数",
     "异常低价说明不得作为依据的排除清单",
+    "文件摘要",
+    "否决/废标条款",
+    "资格与门槛补充",
+    "格式与递交要求",
+    "工程专业（市政/房建/公路/水利等）",
 )
 _SKIP_HINTS = ("畸高畸低", "类人评审", "不替代评标委员会", "纵向偏差率", "横向偏差率")
 _PARENT_NAME_HINTS = ("评分标准", "分值构成", "分值组成", "分值分配", "评分办法")
@@ -168,7 +173,7 @@ def _blobs_from_tree(tree: list | None) -> list[dict]:
                     if not isinstance(row, dict):
                         continue
                     label = row.get("label") or ""
-                    content = (row.get("content") or "").strip()
+                    content = (row.get("content") or row.get("original") or "").strip()
                     if not content:
                         continue
                     if content.startswith("分值构成"):
@@ -282,7 +287,7 @@ def _collect_grade_book(tree: list | None) -> str:
                     if not isinstance(row, dict):
                         continue
                     label = row.get("label") or ""
-                    content = (row.get("content") or "").strip()
+                    content = (row.get("content") or row.get("original") or "").strip()
                     if content and ("分档" in label or "赋分" in label):
                         parts.append(content)
     return "\n".join(parts)

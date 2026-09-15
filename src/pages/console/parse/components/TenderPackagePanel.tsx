@@ -88,7 +88,7 @@ export default function TenderPackagePanel({ projectId, docs, loading, onDocsCha
     <div className="overflow-hidden">
       <div className="mb-3 flex items-center justify-between">
         <p className="text-[11px] text-foreground-500">
-          工程标可将正文、施工图纸、答疑补遗、报价文件、工程量清单一并上传并一同解析。支持 Word / PDF / Excel / 图片。未上传的类型将标明「{TENDER_MISSING_HINT}」。
+          工程标可将正文、施工图纸、答疑补遗、工程量清单与其他材料一并上传并一同解析。其他槽支持任意格式。未上传的类型将标明「{TENDER_MISSING_HINT}」。
         </p>
         <span className="font-label ml-3 shrink-0 rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700">
           {loading ? "加载中" : `已上传 ${uploadedCount}/${TENDER_KIND_SLOTS.length} 类`}
@@ -157,7 +157,7 @@ export default function TenderPackagePanel({ projectId, docs, loading, onDocsCha
                   }}
                   type="file"
                   multiple
-                  accept={slot.accept}
+                  accept={slot.accept || undefined}
                   className="hidden"
                   onChange={(e) => {
                     handlePick(slot.key, e.target.files);

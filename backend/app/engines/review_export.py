@@ -85,7 +85,7 @@ def review_run_to_docx(
             )
 
         if tech_modules:
-            document.add_heading("三、技术评分模块核验（8 项）", level=1)
+            document.add_heading("三、技术评分模块核验", level=1)
             heading_n = 4
             for m in tech_modules:
                 module = m.get("module") or m.get("key") or "—"

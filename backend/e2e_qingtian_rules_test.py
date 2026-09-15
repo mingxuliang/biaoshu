@@ -20,6 +20,9 @@ EXPECTED_THRESHOLD_KEYS = {
     "asset_liability_ratio_max",
     "price_deviation_ok",
     "price_deviation_warn",
+    "qty_deviation_ok",
+    "qty_material_mismatch",
+    "excavator_m3_per_shift",
 }
 
 EXPECTED_WORDS = ["贯彻", "周密部署", "精心施工，铸造精品", "为了积极响应", "在百忙之中"]
@@ -88,32 +91,64 @@ def main() -> None:
     for item in catalog:
         by_kind.setdefault(item["kind"], []).append(item)
     assert len(by_kind.get("business", [])) >= 7, f"商务自查不足: {len(by_kind.get('business', []))}"
-    assert len(by_kind.get("tech", [])) >= 8, f"技术评分不足: {len(by_kind.get('tech', []))}"
-    assert len(by_kind.get("dup_check", [])) >= 8, f"专项检查不足: {len(by_kind.get('dup_check', []))}"
+    assert len(by_kind.get("tech", [])) >= 9, f"技术评分不足: {len(by_kind.get('tech', []))}"
+    assert len(by_kind.get("dup_check", [])) >= 7, f"专项检查不足: {len(by_kind.get('dup_check', []))}"
+    assert len(by_kind.get("dup_sim", [])) >= 3, f"查重规则不足: {len(by_kind.get('dup_sim', []))}"
     assert len(by_kind.get("strategy", [])) >= 10, f"高分策略不足: {len(by_kind.get('strategy', []))}"
     business_cats = {i["category"] for i in by_kind["business"]}
     tech_cats = {i["category"] for i in by_kind["tech"]}
     dup_cats = {i["category"] for i in by_kind["dup_check"]}
+    sim_cats = {i["category"] for i in by_kind["dup_sim"]}
     strategy_cats = {i["category"] for i in by_kind["strategy"]}
     assert "企业类似业绩" in business_cats, business_cats
     assert "施工组织总纲" in tech_cats, tech_cats
+    assert "工程量逻辑匹配" in tech_cats, tech_cats
     assert "虚词密度" in dup_cats, dup_cats
+    assert "报价偏离" in dup_cats, dup_cats
+    assert "资产负债率" in dup_cats, dup_cats
+    assert "全文模板查重" not in dup_cats, dup_cats
+    assert "全文模板查重" in sim_cats, sim_cats
+    assert "重难点/四新专项查重" in sim_cats, sim_cats
+    assert "本企业跨项目查重" in sim_cats, sim_cats
     assert "清单化对标响应" in strategy_cats, strategy_cats
     print(
         "catalog ok "
         f"business={len(by_kind['business'])} tech={len(by_kind['tech'])} "
-        f"dup={len(by_kind['dup_check'])} strategy={len(by_kind['strategy'])}"
+        f"dup={len(by_kind['dup_check'])} sim={len(by_kind['dup_sim'])} strategy={len(by_kind['strategy'])}"
     )
 
-    from app.engines import e4_duplicate_filler, e1_veto
+    from app.engines import e1_veto
+    from app.engines.e4_duplicate_filler import findings_from_semantic
 
     paras = [
         {"index": 0, "text": "在项目实施过程中，我方将加强现场管理，确保工程质量和安全，高度重视文明施工，全力以赴按期完成本项目建设任务。", "style": ""},
         {"index": 1, "text": "本工程重难点分析：科学安排施工进度，合理组织劳动力，严格按照国家规范和相关标准施工。", "style": ""},
         {"index": 2, "text": "投标报价 -12 万元，投标有效期 30 天。", "style": ""},
     ]
-    e4 = e4_duplicate_filler.run(paras)
-    assert any("F10.02" in f["rule"] or "F06.05" in f["rule"] for f in e4), f"E4 应命中虚词或查重: {e4}"
+    e4 = findings_from_semantic(
+        {
+            "heading": "施工组织",
+            "text": paras[0]["text"],
+            "vague_ratio": 40,
+            "issues": [
+                {
+                    "excerpt": paras[0]["text"],
+                    "location": "施工组织",
+                    "severity": "扣分",
+                    "kind": "empty_talk",
+                    "reason": "只有态度没有可核验数据",
+                    "need_data": "人数、检查频次、责任岗位",
+                    "rewrite": "由安全员每日班前交底，现场巡检 12 人，每周专项检查 2 次。",
+                }
+            ],
+        },
+        source_text=paras[0]["text"],
+        emit_sentences=True,
+        emit_templates=False,
+        emit_density=True,
+        density_safe=5,
+    )
+    assert any("F10.02" in f["rule"] for f in e4), f"E4 语义问题项应收成 Finding: {e4}"
     e1 = e1_veto.run(paras, {"budget_cap_wan": 100, "validity_days_required": 90}, [{"clause": "必须提交安全生产许可证原件扫描件", "original": "投标人须知", "type": "星号条款"}])
     assert any(f["severity"] == "废标" for f in e1), f"E1 应对负数报价或星号未响应给出废标: {e1}"
     print(f"engine self-check ok e4={len(e4)} e1={len(e1)}")

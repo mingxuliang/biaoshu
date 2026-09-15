@@ -1,3 +1,4 @@
+from datetime import datetime
 import io
 import os
 import urllib.parse
@@ -16,18 +17,22 @@ from ..engines.parse_export import checklist_to_docx
 from ..engines.parse_schema import merge_tree
 from ..engines.tender_package import (
     ALLOWED_EXTS,
+    BLOCKED_EXTS,
     IMAGE_EXTS,
     effective_kind,
     normalize_kind,
     package_slots,
 )
-from ..models import EvaluationChecklist, Project, TenderDocument, User
-from ..permissions import PERM_PROJECT_EDIT, PERM_WRITER, require_any_perm, require_project
+from ..models import EvaluationChecklist, Project, ProjectCustomRule, TenderDocument, User
+from ..permissions import PERM_PROJECT_EDIT, PERM_REVIEW, PERM_WRITER, require_any_perm, require_project
 from ..schemas import (
     ChecklistOut,
     CreateTenderParseJobIn,
+    CustomRuleIn,
+    CustomRuleOut,
     TenderParseJobOut,
     TenderUploadOut,
+    UpdateCustomRuleIn,
 )
 from ..tasks import run_tender_parse_task
 from .. import storage
@@ -102,6 +107,22 @@ def _validate_upload(ext: str, content: bytes) -> None:
         if len(content) < 24:
             raise HTTPException(400, "图片文件已损坏，请重新上传")
         return
+    if ext in {".txt", ".csv", ".md", ".html", ".htm"}:
+        if len(content) < 4:
+            raise HTTPException(400, "文本文件过小或已损坏，请重新上传")
+        return
+    if ext == ".pptx":
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                if not any(n.startswith("ppt/slides/") for n in zf.namelist()):
+                    raise ValueError("不是有效的 PPTX")
+        except Exception as exc:
+            raise HTTPException(400, "PPT 文件已损坏或无法解析，请重新上传") from exc
+        return
+    if ext in {".zip", ".rar", ".7z", ".ppt", ".doc"}:
+        if len(content) < 8:
+            raise HTTPException(400, "文件过小或已损坏，请重新上传")
+        return
     raise HTTPException(400, "不支持该文件格式")
 
 
@@ -118,14 +139,26 @@ async def upload_tender_document(
     filename = file.filename or ""
     ext = os.path.splitext(filename)[1].lower()
 
-    if ext == ".doc":
+    resolved_kind = normalize_kind(kind, filename)
+
+    if ext in BLOCKED_EXTS:
+        raise HTTPException(400, "不支持可执行或脚本文件")
+    if resolved_kind == "quote":
+        if not ext:
+            raise HTTPException(400, "其他材料需要带文件扩展名")
+    elif ext == ".doc":
         raise HTTPException(400, "暂不支持旧版 .doc 格式，请在 Word 中另存为 .docx 后重新上传")
-    if ext not in ALLOWED_EXTS:
+    elif ext not in ALLOWED_EXTS:
         raise HTTPException(400, "支持 Word、PDF、Excel 与常见图片格式（.docx / .pdf / .xlsx / .png / .jpg 等）")
 
     content = await file.read()
-    _validate_upload(ext, content)
-    resolved_kind = normalize_kind(kind, filename)
+    if resolved_kind == "quote":
+        if len(content) < 8:
+            raise HTTPException(400, "文件过小或已损坏，请重新上传")
+        if ext in ALLOWED_EXTS and ext not in {".zip", ".rar", ".7z", ".ppt", ".doc"}:
+            _validate_upload(ext, content)
+    else:
+        _validate_upload(ext, content)
 
     key = storage.put_bytes(f"tender/{project_id}", content, ext)
     doc = TenderDocument(
@@ -419,3 +452,133 @@ def export_checklist_report(
             "Content-Disposition": f"attachment; filename=\"parse-report.docx\"; filename*=UTF-8''{encoded_name}"
         },
     )
+
+
+_CUSTOM_SOURCES = {"tender", "drawing", "mixed"}
+_CUSTOM_SEVERITIES = {"废标", "降档", "扣分", "建议"}
+_CUSTOM_SLOTS = {"main", "addendum", "boq", "quote", "drawing"}
+
+
+def _custom_rule_out(row: ProjectCustomRule) -> CustomRuleOut:
+    sources = [s for s in (row.sources_json or []) if s in _CUSTOM_SLOTS]
+    return CustomRuleOut(
+        id=row.id,
+        projectId=row.project_id,
+        source=row.source if row.source in _CUSTOM_SOURCES else "tender",
+        sources=sources,
+        title=row.title or "",
+        content=row.content or "",
+        severity=row.severity if row.severity in _CUSTOM_SEVERITIES else "扣分",
+        enabled=bool(row.enabled),
+        createdAt=row.created_at.isoformat() if row.created_at else "",
+    )
+
+
+def _clean_custom_content(text: str) -> str:
+    return (text or "").strip()
+
+
+def _clean_custom_sources(source: str, sources: list | None) -> list[str]:
+    if source != "mixed":
+        return []
+    return [s for s in (sources or []) if s in _CUSTOM_SLOTS]
+
+
+@router.get("/projects/{project_id}/custom-rules", response_model=list[CustomRuleOut])
+def list_custom_rules(
+    project_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[CustomRuleOut]:
+    require_project(db, current_user, project_id)
+    rows = (
+        db.query(ProjectCustomRule)
+        .filter(ProjectCustomRule.project_id == project_id)
+        .order_by(ProjectCustomRule.created_at.desc())
+        .all()
+    )
+    return [_custom_rule_out(r) for r in rows]
+
+
+@router.post("/projects/{project_id}/custom-rules", response_model=CustomRuleOut)
+def create_custom_rule(
+    project_id: str,
+    payload: CustomRuleIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> CustomRuleOut:
+    require_project(db, current_user, project_id)
+    require_any_perm(current_user, PERM_PROJECT_EDIT, PERM_WRITER, PERM_REVIEW)
+    content = _clean_custom_content(payload.content)
+    if len(content) < 2:
+        raise HTTPException(400, "请填写规则内容")
+    if len(content) > 4000:
+        raise HTTPException(400, "规则内容请控制在 4000 字以内")
+    title = (payload.title or "").strip()[:80]
+    row = ProjectCustomRule(
+        project_id=project_id,
+        source=payload.source,
+        sources_json=_clean_custom_sources(payload.source, payload.sources),
+        title=title,
+        content=content,
+        severity=payload.severity,
+        enabled=payload.enabled,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return _custom_rule_out(row)
+
+
+@router.patch("/projects/{project_id}/custom-rules/{rule_id}", response_model=CustomRuleOut)
+def update_custom_rule(
+    project_id: str,
+    rule_id: str,
+    payload: UpdateCustomRuleIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> CustomRuleOut:
+    require_project(db, current_user, project_id)
+    require_any_perm(current_user, PERM_PROJECT_EDIT, PERM_WRITER, PERM_REVIEW)
+    row = db.get(ProjectCustomRule, rule_id)
+    if not row or row.project_id != project_id:
+        raise HTTPException(404, "自定义规则不存在")
+    data = payload.model_dump(exclude_unset=True)
+    if "content" in data:
+        content = _clean_custom_content(data["content"])
+        if len(content) < 2:
+            raise HTTPException(400, "请填写规则内容")
+        if len(content) > 4000:
+            raise HTTPException(400, "规则内容请控制在 4000 字以内")
+        row.content = content
+    if "title" in data:
+        row.title = (data["title"] or "").strip()[:80]
+    if "source" in data:
+        row.source = data["source"]
+    if "sources" in data or "source" in data:
+        row.sources_json = _clean_custom_sources(row.source, data.get("sources", row.sources_json))
+    if "severity" in data:
+        row.severity = data["severity"]
+    if "enabled" in data:
+        row.enabled = bool(data["enabled"])
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(row)
+    return _custom_rule_out(row)
+
+
+@router.delete("/projects/{project_id}/custom-rules/{rule_id}")
+def delete_custom_rule(
+    project_id: str,
+    rule_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    require_project(db, current_user, project_id)
+    require_any_perm(current_user, PERM_PROJECT_EDIT, PERM_WRITER, PERM_REVIEW)
+    row = db.get(ProjectCustomRule, rule_id)
+    if not row or row.project_id != project_id:
+        raise HTTPException(404, "自定义规则不存在")
+    db.delete(row)
+    db.commit()
+    return {"ok": True}

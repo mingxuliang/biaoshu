@@ -14,6 +14,7 @@ const navGroups: {
       { to: "/console/parse", label: "招标解析", icon: "ri-file-settings-line", anyOf: ["project_edit", "writer"] },
       { to: "/console/writer", label: "撰写工作台", icon: "ri-edit-2-line", anyOf: ["writer"] },
       { to: "/console/audit", label: "AI 预审中心", icon: "ri-shield-check-line", anyOf: ["review"] },
+      { to: "/console/duplicate", label: "查重分析", icon: "ri-file-copy-2-line", anyOf: ["review"] },
       { to: "/console/review", label: "修改闭环", icon: "ri-loop-left-line", anyOf: ["writer"] },
       { to: "/console/export", label: "Word 导出", icon: "ri-download-2-line", anyOf: ["export"] },
     ],

@@ -15,6 +15,8 @@ import KnowledgeDocumentDetailPage from "../pages/console/knowledge/detail";
 import ProductsPage from "../pages/console/products/page";
 import ProductLibraryDetailPage from "../pages/console/products/detail";
 import AuditPage from "../pages/console/audit/page";
+import DuplicatePage from "../pages/console/duplicate/page";
+import DuplicateResultPage from "../pages/console/duplicate/result";
 import ReviewPage from "../pages/console/review/page";
 import ExportPage from "../pages/console/export/page";
 import RulesPage from "../pages/console/rules/page";
@@ -71,6 +73,22 @@ const routes: RouteObject[] = [
         element: (
           <RequirePerm anyOf={["review"]}>
             <AuditPage />
+          </RequirePerm>
+        ),
+      },
+      {
+        path: "duplicate",
+        element: (
+          <RequirePerm anyOf={["review"]}>
+            <DuplicatePage />
+          </RequirePerm>
+        ),
+      },
+      {
+        path: "duplicate/result",
+        element: (
+          <RequirePerm anyOf={["review"]}>
+            <DuplicateResultPage />
           </RequirePerm>
         ),
       },

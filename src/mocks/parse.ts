@@ -410,6 +410,24 @@ export const parseDimensions: ParseDimension[] = [
       { id: "req-formatrule", label: "格式要求", sections: [{ id: "rq-11", title: "格式要求", rows: [{ label: "格式要求", content: "全篇使用标准打印字体，禁止手写、涂改；\n报价表金额大小写须一致，不一致以大写为准；\n表格与图示清晰可辨，涉及签署处须盖章。" }] }] },
       { id: "req-delivery", label: "递交方式及时间", sections: [{ id: "rq-12", title: "递交方式及时间", rows: [{ label: "递交要求", content: "仅接受现场当面递交，不接受邮寄、快递、电子邮件或传真；\n递交时间以开标室现场签到为准，逾期不候；\n未按指定地点或方式递交的，按无效标处理。" }] }] },
       { id: "req-attachment", label: "已约定附件", sections: [{ id: "rq-13", title: "已约定附件", rows: [{ label: "附件清单", content: "附件一：投标函及投标函附录格式；\n附件二：开标一览表格式；\n附件三：分项报价表格式；\n附件四：商务条款响应表格式；\n附件五：法定代表人授权委托书格式；\n附件六：技术方案书框架及评分细则；\n附件七：售后服务承诺书模板；\n附件八：合同范本（不可偏离条款）。" }] }] },
+      {
+        id: "misc-other",
+        label: "其他材料",
+        sections: [
+          {
+            id: "mo-1",
+            title: "其他文件提炼",
+            rows: [
+              { label: "文件摘要", content: "" },
+              { label: "评分因素与标准", content: "" },
+              { label: "否决/废标条款", content: "" },
+              { label: "资格与门槛补充", content: "" },
+              { label: "格式与递交要求", content: "" },
+              { label: "技术指标与加分项", content: "" },
+            ],
+          },
+        ],
+      },
     ],
   },
   {

@@ -1,14 +1,15 @@
-"""E3 技术评分模块确定性核验（对应青天第三层「技术标核心 AI 评分点」8 个模块）。
+"""E3 技术评分模块确定性核验（对应青天第三层「技术标核心 AI 评分点」）。
 
 与 e3_semantic.py 的大模型五维打分互补：这里只做关键词/正则可判定的完整性核验，
 命中缺项时产生 L3 级别 Finding，供编排层与大模型 issues 合并后一起扣 L3 分。
+「工程量逻辑匹配」委托 e_qty_logic：清单汇总 + 标书数字抽取后确定性比对。
 tech_keys 为 None 表示不做开关过滤（全部启用）；管理员在规则页「技术评分」tab
 关闭某模块后，对应 key 不在集合内，直接跳过该模块的确定性核验（同时也退出 Prompt，见 e3_semantic.py）。
 
 只使用投标文件正文关键词、附图占位与项目名称，不联网核验规范条文真实性。
 声称有「网络图/横道图/动态曲线」但附近没有抽出的原图，按未附图扣分。
 
-run() 除了返回给 L3 合并用的 Finding 列表，还会返回一份「8 模块打分明细」
+run() 除了返回给 L3 合并用的 Finding 列表，还会返回一份模块打分明细
 （module_score()），直接对应 rules_data.TECH_SCORE_MODULES 里配置的满分权重，
 供 AI 预审报告逐模块展示"模块名 N 分，缺项说明"，不再只把结果揉进笼统的 issue 列表。
 """
@@ -351,7 +352,17 @@ _CHECKS = {
 }
 
 # 与 rules_data.TECH_SCORE_MODULES 顺序一致，保证报告里模块顺序稳定。
-_ORDER = ["org_outline", "special_plan", "schedule", "quality", "safety", "environment", "resources", "after_sales"]
+_ORDER = [
+    "org_outline",
+    "special_plan",
+    "schedule",
+    "quality",
+    "safety",
+    "environment",
+    "resources",
+    "after_sales",
+    "qty_logic",
+]
 
 
 def _module_entry(key: str, finding: dict | None) -> dict:
@@ -384,23 +395,33 @@ def evaluate(
     project_name: str = "",
     tech_keys: set[str] | None = None,
     images: list[dict] | None = None,
+    dimensions: list | None = None,
+    thresholds: dict | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """返回 (findings, module_scores)：findings 供 L3 合并扣分；module_scores 供报告逐模块展示。"""
     text = full_text or ""
     findings: list[dict] = []
     modules: list[dict] = []
-    if not text.strip():
-        return findings, modules
 
     for key in _ORDER:
         if not _enabled(key, tech_keys):
+            continue
+        if key == "qty_logic":
+            from . import e_qty_logic
+
+            q_findings, q_module = e_qty_logic.evaluate(text, paragraphs, dimensions, thresholds)
+            findings.extend(q_findings)
+            modules.append(q_module)
+            continue
+        if not text.strip() or key not in _CHECKS:
             continue
         finding = _CHECKS[key](text, paragraphs, project_name, images)
         if finding is not None:
             findings.append(finding)
         modules.append(_module_entry(key, finding))
 
-    findings.extend(_empty_shell_findings(paragraphs))
+    if text.strip():
+        findings.extend(_empty_shell_findings(paragraphs))
     return findings, modules
 
 
@@ -410,7 +431,17 @@ def run(
     project_name: str = "",
     tech_keys: set[str] | None = None,
     images: list[dict] | None = None,
+    dimensions: list | None = None,
+    thresholds: dict | None = None,
 ) -> list[dict]:
     """兼容旧调用：只要 Finding 列表。新调用请使用 evaluate() 同时取模块打分明细。"""
-    findings, _modules = evaluate(full_text, paragraphs, project_name, tech_keys, images=images)
+    findings, _modules = evaluate(
+        full_text,
+        paragraphs,
+        project_name,
+        tech_keys,
+        images=images,
+        dimensions=dimensions,
+        thresholds=thresholds,
+    )
     return findings

@@ -309,7 +309,7 @@ def update_veto_point(
     return _veto_to_out(row)
 
 
-CATALOG_KINDS = ("business", "tech", "dup_check", "strategy")
+CATALOG_KINDS = ("business", "tech", "dup_check", "dup_sim", "strategy")
 
 
 def _catalog_to_out(row: CatalogRule) -> CatalogRuleOut:

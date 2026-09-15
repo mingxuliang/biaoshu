@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..models import BidDocument, ReviewFinding, ReviewRun
 from .. import storage
-from . import e1_veto, e2_business, e3_semantic, e3_tech_modules, e4_duplicate_filler, e5_layout, e_business_vision, e_parse_match, e_tender_score, rules_config
+from . import e1_veto, e2_business, e3_semantic, e3_tech_modules, e4_duplicate_filler, e5_layout, e_business_vision, e_custom_rules, e_parse_match, e_tender_score, rules_config
 from .bid_kind import (
     KIND_COMBINED,
     SCOPE_BUSINESS,
@@ -34,7 +34,7 @@ LEVEL_META = {
     "L1": {"name": "一票否决扫描", "desc": "星号条款、废标条款、资质证件、负数报价、签字盖章"},
     "L2": {"name": "商务客观核验", "desc": "业绩四件套、财务指标、报价偏离、属地细则"},
     "L3": {"name": "技术标五维打分", "desc": "完整性/针对性/合规性/可落地性/规范性"},
-    "L4": {"name": "虚词与模板查重", "desc": "虚词密度、高危句式、相似度比对"},
+    "L4": {"name": "虚词语义", "desc": "大模型阅读原文，找出空话并提示补数据"},
     "L5": {"name": "版式终审", "desc": "标题层级、目录页码、图表编号、空白页"},
 }
 
@@ -145,6 +145,7 @@ def run_prereview(db: Session, run_id: str) -> None:
     word_rules = rules_config.load_enabled_filler_words(db)
     thresholds = rules_config.load_thresholds(db)
     local_items = rules_config.load_enabled_package_items(db)
+    custom_rules = rules_config.load_project_custom_rules(db, run.project_id)
 
     # 管理员规则页开关：关闭的条目在对应引擎里直接跳过检查，不再产生 Finding。
     veto_keys = rules_config.load_enabled_veto_keys(db)
@@ -204,8 +205,8 @@ def run_prereview(db: Session, run_id: str) -> None:
             vis_findings = vision.get("findings") or []
             if vis_paras:
                 biz_paras = list(paras) + vis_paras
-            e1 = e1_veto.run(biz_paras, checklist_params, must_respond, thresholds, ctx, veto_keys)
-            e2 = e2_business.run(biz_paras, checklist_params, thresholds, local_items, ctx, biz_keys, veto_keys, strategy_keys)
+            e1 = e1_veto.run(biz_paras, checklist_params, must_respond, thresholds, ctx, veto_keys, dup_keys)
+            e2 = e2_business.run(biz_paras, checklist_params, thresholds, local_items, ctx, biz_keys, veto_keys, strategy_keys, dup_keys)
             for item in vis_findings:
                 if item.get("level") == "L2":
                     e2.append(item)
@@ -215,7 +216,15 @@ def run_prereview(db: Session, run_id: str) -> None:
             e4 = e4_duplicate_filler.run(paras, word_rules, thresholds, ctx, dup_keys)
             e5 = e5_layout.run(path, paras, ctx, veto_keys, dup_keys, strategy_keys) if path else []
             e3 = e3_semantic.run(text, weights, tech_keys, strategy_keys, dup_keys, scoped_score_rules, images=images)
-            tech_findings, tech_modules = e3_tech_modules.evaluate(text, paras, ctx.project_name, tech_keys, images=images)
+            tech_findings, tech_modules = e3_tech_modules.evaluate(
+                text,
+                paras,
+                ctx.project_name,
+                tech_keys,
+                images=images,
+                dimensions=checklist.dimensions,
+                thresholds=thresholds,
+            )
         parse_paras = biz_paras if scope in (SCOPE_BUSINESS, SCOPE_FULL) else paras
         parse_text = "\n".join((p.get("text") or "") for p in parse_paras) if parse_paras else text
         parse_findings = e_parse_match.run(
@@ -230,6 +239,8 @@ def run_prereview(db: Session, run_id: str) -> None:
             headings=[(p.get("text") or "") for p in parse_paras],
             paragraphs=parse_paras,
         )
+        custom_findings = e_custom_rules.run(parse_text, parse_paras, custom_rules)
+        parse_findings = parse_findings + custom_findings
         if scope == SCOPE_BUSINESS:
             parse_findings = [f for f in parse_findings if f.get("level") in ("L1", "L2")]
         elif scope == SCOPE_TECH:

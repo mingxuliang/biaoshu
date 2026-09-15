@@ -7,6 +7,7 @@ from .routers import (
     auditlog,
     auth,
     documents,
+    duplicate,
     export,
     knowledge,
     llm_config,
@@ -47,6 +48,7 @@ app.include_router(auth.router)
 app.include_router(projects.router)
 app.include_router(documents.router)
 app.include_router(prereview.router)
+app.include_router(duplicate.router)
 app.include_router(tender.router)
 app.include_router(writer.router)
 app.include_router(revision.router)

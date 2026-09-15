@@ -38,18 +38,18 @@ export const TENDER_KIND_SLOTS: TenderKindSlot[] = [
   },
   {
     key: "quote",
-    label: "报价文件",
-    accept: ".xlsx,.xls,.docx,.pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    formats: "Excel / Word / PDF",
-    hint: "报价表、投标报价文件",
-    icon: "ri-money-cny-circle-line",
+    label: "其他",
+    accept: "",
+    formats: "任意格式",
+    hint: "补遗之外的补充材料，评审条款将写入评分尺子",
+    icon: "ri-folder-unknow-line",
   },
   {
     key: "drawing",
     label: "施工图纸",
-    accept: ".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp,.docx,image/png,image/jpeg,application/pdf",
-    formats: "PDF / 图片 / Word",
-    hint: "图纸、图册、扫描件",
+    accept: ".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp,image/png,image/jpeg,image/webp,image/tiff,application/pdf",
+    formats: "PDF / 图片",
+    hint: "只抽取设计说明，不识读图面与国标",
     icon: "ri-image-2-line",
   },
 ];
@@ -59,18 +59,18 @@ export const TENDER_KIND_LABELS: Record<string, string> = Object.fromEntries(
 );
 
 export const TENDER_KIND_DISPLAY: Record<string, string> = {
-  main: "写入右侧全部固定指标（基本信息、资格与门槛、评标办法等）",
-  addendum: "与正文冲突时以补遗为准，覆盖写入各相关维度；原文摘录见「文件包解读」",
-  boq: "「清单、图纸与技术标准」→ 工程量清单规则",
-  quote: "「商务/技术/报价评审」中的报价相关字段",
-  drawing: "「清单、图纸与技术标准」→ 图纸（图号目录、设计说明与施工要点）",
+  main: "写入右侧全部固定指标；专用合同条款中的技术要求与加分项写入「商务评分」",
+  addendum: "与正文冲突时以补遗为准；合同技术指标以答疑最新口径覆盖",
+  boq: "「清单、图纸与其他」→ 工程量清单（项目名称、计量单位、工程数量、备注）",
+  quote: "「其他材料」提炼摘要；含评审条款时写入评分尺子，不写入报价评审",
+  drawing: "「清单、图纸与其他」→ 图纸（仅抽取设计说明，多页合并）",
 };
 
 export const TENDER_KIND_JUMP: Record<string, string> = {
   main: "basic",
   addendum: "basic",
   boq: "quantity",
-  quote: "envelope",
+  quote: "quantity",
   drawing: "quantity",
 };
 
@@ -78,7 +78,7 @@ export const TENDER_KIND_ITEM: Record<string, string> = {
   main: "",
   addendum: "",
   boq: "qty-boq",
-  quote: "env-price",
+  quote: "misc-other",
   drawing: "qty-drawing",
 };
 
@@ -87,8 +87,8 @@ export function parseTargetForKind(kind: string, category?: string): { dimKey: s
   if (kind === "boq") return { dimKey: "quantity", itemId: "qty-boq" };
   if (kind === "drawing") return { dimKey: "quantity", itemId: "qty-drawing" };
   if (kind === "quote") {
-    if (category === "工程类") return { dimKey: "envelope", itemId: "env-price" };
-    return { dimKey: "evalMethod", itemId: "eval-business" };
+    if (category === "工程类") return { dimKey: "quantity", itemId: "misc-other" };
+    return { dimKey: "bidReq", itemId: "misc-other" };
   }
   return { dimKey: "basic", itemId: "" };
 }
@@ -121,13 +121,19 @@ export function fileExt(filename: string): string {
   return m ? m[1] : "";
 }
 
+const BLOCKED_EXTS = new Set([".exe", ".bat", ".cmd", ".com", ".msi", ".dll", ".scr", ".ps1"]);
+
 export function isAllowedTenderFile(filename: string, kind?: TenderKind): boolean {
   const ext = fileExt(filename);
-  if (!ext || ext === ".doc") return false;
+  if (!ext || BLOCKED_EXTS.has(ext)) return false;
+  if (kind === "quote") return true;
+  if (ext === ".doc") return false;
   const allowed = [".docx", ".pdf", ".xlsx", ".xls", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif"];
   if (!allowed.includes(ext)) return false;
   if (!kind) return true;
-  return (SLOT_ACCEPT.get(kind) || "").includes(ext);
+  const accept = SLOT_ACCEPT.get(kind) || "";
+  if (!accept) return true;
+  return accept.includes(ext);
 }
 
 export function formatFileSize(bytes: number): string {
@@ -147,8 +153,11 @@ export function formatOf(filename: string): string {
 export function fileIcon(filename: string): string {
   const ext = fileExt(filename);
   if (ext === ".pdf") return "ri-file-pdf-2-line";
-  if (ext === ".xlsx" || ext === ".xls") return "ri-file-excel-2-line";
+  if (ext === ".xlsx" || ext === ".xls" || ext === ".csv") return "ri-file-excel-2-line";
+  if (ext === ".pptx" || ext === ".ppt") return "ri-file-ppt-2-line";
+  if (ext === ".zip" || ext === ".rar" || ext === ".7z") return "ri-file-zip-line";
   if ([".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif"].includes(ext)) return "ri-image-line";
+  if (ext === ".txt" || ext === ".md" || ext === ".html" || ext === ".htm") return "ri-file-text-line";
   return "ri-file-word-2-line";
 }
 

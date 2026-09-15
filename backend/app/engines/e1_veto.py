@@ -113,9 +113,10 @@ def run(
     paragraphs: list[dict],
     checklist_params: dict | None = None,
     must_respond: list | None = None,
-    thresholds: dict | None = None,  # 目前仅消费 price_deviation_malicious，其余跨投标人阈值不适用于 E1
+    thresholds: dict | None = None,  # 恶意低价线 price_deviation_malicious，由专项检查「报价偏离」开关控制
     context=None,
     enabled_keys: set[str] | None = None,
+    dup_keys: set[str] | None = None,
 ) -> list[dict]:
     findings: list[dict] = []
     today = _now()
@@ -129,6 +130,7 @@ def run(
     anonymity_required = bool(checklist_params.get("anonymity_required"))
 
     price_enabled = _enabled("price", enabled_keys)
+    price_deviation_enabled = _enabled("price_deviation", dup_keys)
     qualification_enabled = _enabled("qualification", enabled_keys)
     bid_elements_enabled = _enabled("bid_elements", enabled_keys)
     star_clause_enabled = _enabled("star_clause", enabled_keys)
@@ -285,7 +287,7 @@ def run(
                 )
             )
 
-    if price_enabled:
+    if price_deviation_enabled:
         m_price = PRICE_WAN_PATTERN.search(full_text)
         m_base = BASE_PRICE_PATTERN.search(full_text)
         if m_price and m_base:

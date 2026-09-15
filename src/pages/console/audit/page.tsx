@@ -727,8 +727,7 @@ export default function AuditPage() {
                 </div>
               </div>
 
-              {/* 技术评分 8 模块逐项核验：与规则页「技术评分」tab 一一对应，
-                  直接展示模块名 + 满分 + 实得分 + 缺项说明，不再只笼统混在问题清单里 */}
+              {/* 技术评分模块逐项核验：与规则页「技术评分」tab 一一对应 */}
               {reportScope === "tech" && view.techModules && view.techModules.length > 0 && (
                 <div className="mt-3 overflow-hidden rounded-lg border border-background-300 bg-background-100">
                   <div className="border-b border-background-300 bg-background-50 px-4 py-3">
@@ -746,7 +745,7 @@ export default function AuditPage() {
                             className={`font-label whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-medium ${
                               m.status === "达标"
                                 ? "bg-primary-50 text-primary-600"
-                                : m.status === "建议"
+                                : m.status === "建议" || m.status === "无法比对"
                                   ? "bg-secondary-100 text-secondary-600"
                                   : "bg-accent-50 text-accent-600"
                             }`}

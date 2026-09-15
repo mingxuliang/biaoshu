@@ -6,8 +6,9 @@
 属地细则：仅在正文已写到对应主题（临边/扫地杆/扬尘）却缺少启用包中的量化要求时扣分，
 不因未写该主题而凭空否决。
 
-biz_keys/veto_keys/strategy_keys：管理员在规则页关闭对应条目时，这里跳过相应检查块；
+biz_keys/veto_keys/strategy_keys/dup_keys：管理员在规则页关闭对应条目时，这里跳过相应检查块；
 传 None 表示不做开关过滤（全部启用，兼容旧调用方）。
+资产负债率上限由专项检查「资产负债率」开关控制，商务自查「财务指标」只核验资料完整性。
 """
 
 import re
@@ -93,6 +94,7 @@ def run(
     biz_keys: set[str] | None = None,
     veto_keys: set[str] | None = None,
     strategy_keys: set[str] | None = None,
+    dup_keys: set[str] | None = None,
 ) -> list[dict]:
     findings: list[dict] = []
     text_blocks = [p["text"] for p in paragraphs]
@@ -109,7 +111,8 @@ def run(
 
     performance_enabled = _enabled("performance", biz_keys)
     finance_enabled = _enabled("finance", biz_keys)
-    price_enabled = _enabled("price", veto_keys)
+    asset_liability_enabled = _enabled("asset_liability", dup_keys)
+    price_deviation_enabled = _enabled("price_deviation", dup_keys)
 
     flagged_windows: set[int] = set()
     if performance_enabled:
@@ -145,7 +148,7 @@ def run(
                     )
                 )
 
-    if finance_enabled:
+    if asset_liability_enabled:
         m = ASSET_LIABILITY_PATTERN.search(full_text)
         if m:
             ratio = float(m.group(1))
@@ -163,6 +166,7 @@ def run(
                         tender_quote=f"资产负债率不高于 {ratio_max}%" if checklist_params.get("asset_liability_ratio_max") is not None else "",
                     )
                 )
+    if finance_enabled:
         if any(k in full_text for k in FINANCE_TOPIC_KEYWORDS):
             missing_finance = [
                 labels[0]
@@ -180,7 +184,7 @@ def run(
                     )
                 )
 
-    if price_enabled:
+    if price_deviation_enabled:
         m_price = PRICE_WAN_PATTERN.search(full_text)
         m_base = BASE_PRICE_PATTERN.search(full_text)
         if m_price and m_base:

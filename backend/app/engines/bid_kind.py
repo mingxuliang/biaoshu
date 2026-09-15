@@ -90,6 +90,16 @@ BUSINESS_SOURCE_IDS = {
 TECH_SOURCE_IDS = {
     "eval-tech",
     "env-tech",
+    "contract-tech",
+    "review-tech",
+    "review-service",
+    "review-after",
+}
+PRICE_SOURCE_IDS = {"business-price", "env-price", "env-calc"}
+TECH_SOURCE_IDS = {
+    "eval-tech",
+    "env-tech",
+    "contract-tech",
     "review-tech",
     "review-service",
     "review-after",
@@ -127,11 +137,13 @@ def booklet_of_format(source_item_id: str, label: str = "") -> str:
     sid = (source_item_id or "").strip()
     blob = label or ""
     if sid == "req-compose" or any(
-        k in blob for k in ("三份文件", "三信封", "信息隔离", "商务文件不得", "不得出现报价")
+        k in blob for k in ("三份文件", "三信封", "信息隔离", "商务文件不得", "不得出现报价", "投标文件组成")
     ):
         return "business"
     if sid in ("req-submit", "req-encrypt", "req-delivery"):
         return ""
+    if sid == "req-qualdocs" or any(k in blob for k in ("资格审查资料",)):
+        return "business"
     if sid in ("req-format", "req-formatrule") or any(k in blob for k in ("暗标", "技术标", "技术文件", "页数", "字体", "装订")):
         if any(k in blob for k in ("商务文件", "报价文件", "三份文件")):
             return "business"

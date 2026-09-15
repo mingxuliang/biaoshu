@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import Toast from "../components/Toast";
@@ -9,6 +9,7 @@ import {
   createTenderParseJob,
   downloadChecklistReport,
   getLatestChecklist,
+  listCustomRules,
   listProjectTenderDocuments,
   lockChecklist,
   pollTenderParseJobUntilDone,
@@ -16,15 +17,11 @@ import {
   type Checklist,
   type TenderDocumentSummary,
 } from "@/lib/api";
-import {
-  TENDER_KIND_LABELS,
-  TENDER_KIND_SLOTS,
-  TENDER_MISSING_HINT,
-  effectiveTenderKind,
-} from "@/lib/tenderPackage";
+import { TENDER_KIND_LABELS, effectiveTenderKind } from "@/lib/tenderPackage";
 import WordViewer from "./components/WordViewer";
 import ParseResults from "./components/ParseResults";
 import TenderPackagePanel from "./components/TenderPackagePanel";
+import CustomRulesPanel from "./components/CustomRulesPanel";
 import Modal from "../components/Modal";
 
 interface ToastState {
@@ -46,6 +43,8 @@ export default function ParsePage() {
   const [docsLoading, setDocsLoading] = useState(false);
   const [activeDocId, setActiveDocId] = useState<string>("");
   const [packageOpen, setPackageOpen] = useState(false);
+  const [rulesOpen, setRulesOpen] = useState(false);
+  const [customRuleCount, setCustomRuleCount] = useState(0);
   const [checklist, setChecklist] = useState<Checklist | null>(null);
   const [toast, setToast] = useState<ToastState>({ message: "", type: "success", visible: false });
 
@@ -54,6 +53,7 @@ export default function ParsePage() {
       setChecklist(null);
       setDocs([]);
       setActiveDocId("");
+      setCustomRuleCount(0);
       return;
     }
     let cancelled = false;
@@ -63,6 +63,13 @@ export default function ParsePage() {
       })
       .catch(() => {
         if (!cancelled) setChecklist(null);
+      });
+    listCustomRules(selectedId)
+      .then((rows) => {
+        if (!cancelled) setCustomRuleCount(rows.length);
+      })
+      .catch(() => {
+        if (!cancelled) setCustomRuleCount(0);
       });
     return () => {
       cancelled = true;
@@ -104,44 +111,12 @@ export default function ParsePage() {
 
   const activeDoc = docs.find((d) => d.id === activeDocId) || docs[0] || null;
 
-  const liveSlots = useMemo(() => {
-    return TENDER_KIND_SLOTS.map((slot) => {
-      const files = docs.filter((d) => effectiveTenderKind(d.kind, d.filename) === slot.key);
-      return {
-        kind: slot.key,
-        label: slot.label,
-        uploaded: files.length > 0,
-        missingHint: files.length ? "" : TENDER_MISSING_HINT,
-        files: files.map((d) => ({
-          id: d.id,
-          filename: d.filename,
-          sizeBytes: d.sizeBytes,
-          kind: slot.key,
-        })),
-      };
-    });
-  }, [docs]);
-
-  const packageSlots = useMemo(() => {
-    const parsed = checklist?.package;
-    if (!parsed?.length) return liveSlots;
-    return liveSlots.map((slot) => {
-      const hit = parsed.find((p) => p.kind === slot.kind);
-      return {
-        ...slot,
-        excerpt: hit?.excerpt || "",
-        displayIn: hit?.displayIn || "",
-        jumpKey: hit?.jumpKey || "",
-      };
-    });
-  }, [liveSlots, checklist]);
-
   const startParse = async () => {
     if (!currentProject || !docs.length || parsing) return;
     const ids = docs.map((d) => d.id);
     const primary = docs.find((d) => effectiveTenderKind(d.kind, d.filename) === "main") || docs[0];
     setParsing(true);
-    showToast(`AI 正在一并解析招标文件包（${docs.length} 份）：按固定指标抽取，并识读施工图纸…`, "info");
+    showToast(`AI 正在一并解析招标文件包（${docs.length} 份）：按固定指标抽取，并提取施工图纸设计说明…`, "info");
     try {
       const job = await createTenderParseJob(currentProject.id, primary.id, ids);
       const finalStatus = await pollTenderParseJobUntilDone(job.job_id, { timeoutMs: 12 * 60 * 1000 });
@@ -189,7 +164,7 @@ export default function ParsePage() {
       <div>
         <PageHeader
           title="招标文件解析与对标清单"
-          description="把招标文件包（正文、图纸、答疑补遗、报价、清单）解析为可执行的评分点与否决项清单。第一步，请先选择要解析的投标项目。"
+          description="把招标文件包（正文、图纸、答疑补遗、清单、其他材料）解析为可执行的评分点与否决项清单。第一步，请先选择要解析的投标项目。"
         />
         <div className="overflow-hidden rounded-lg border border-background-300 bg-background-100">
           <div className="flex items-center gap-2.5 border-b border-background-300 bg-background-50 px-5 py-4">
@@ -251,9 +226,22 @@ export default function ParsePage() {
     <div className="flex h-[calc(100vh-6rem)] flex-col">
       <PageHeader
         title="招标文件解析与对标清单"
-        description="分类上传招标文件包后一并解析。左侧预览原文，右侧查看各类型抽取字段；施工图纸会识读图号目录与施工要点。"
+        description="分类上传招标文件包后一并解析。左侧预览原文，右侧查看各类型抽取字段；施工图纸只抽取设计说明。自定义规则进入 AI 预审。"
         actions={
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setRulesOpen(true)}
+              className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-background-300 bg-background-50 px-3 text-sm font-medium text-foreground-700 transition-colors hover:bg-background-200"
+            >
+              <i className="ri-list-settings-line text-sm"></i>
+              自定义规则
+              {customRuleCount > 0 && (
+                <span className="rounded bg-primary-50 px-1.5 py-0.5 text-[10px] font-medium text-primary-700">
+                  {customRuleCount}
+                </span>
+              )}
+            </button>
             <button
               type="button"
               onClick={() => setPackageOpen(true)}
@@ -300,60 +288,52 @@ export default function ParsePage() {
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <select
-            value={currentProject.id}
-            onChange={(e) => selectProject(e.target.value)}
-            className="h-8 w-full cursor-pointer rounded-md border border-background-300 bg-background-50 px-2.5 text-xs text-foreground-600 outline-none focus:border-primary-400 sm:w-auto sm:max-w-[280px]"
-          >
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-          <span className="hidden shrink-0 items-center gap-1 whitespace-nowrap rounded-md bg-secondary-100 px-2 py-1 text-[11px] font-medium text-secondary-700 md:flex">
-            <i className="ri-check-double-line"></i>
-            已绑定 {currentProject.code}
-          </span>
+        <div className="flex min-w-0 items-center gap-2">
+          {docs.length > 0 ? (
+            <select
+              value={activeDoc?.id || ""}
+              onChange={(e) => setActiveDocId(e.target.value)}
+              className="h-8 max-w-[280px] cursor-pointer rounded-md border border-background-300 bg-background-50 px-2.5 text-xs text-foreground-700 outline-none focus:border-primary-400"
+              title={activeDoc?.filename}
+            >
+              {docs.map((doc) => {
+                const kind = effectiveTenderKind(doc.kind, doc.filename);
+                return (
+                  <option key={doc.id} value={doc.id}>
+                    {doc.filename} · {TENDER_KIND_LABELS[kind] || kind}
+                  </option>
+                );
+              })}
+            </select>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setPackageOpen(true)}
+              className="flex h-8 cursor-pointer items-center rounded-md border border-dashed border-background-300 bg-background-50 px-2.5 text-xs text-foreground-500 hover:border-primary-300 hover:text-primary-700"
+            >
+              尚未上传文件
+            </button>
+          )}
         </div>
       </div>
 
-      <div className="mb-3 flex flex-col gap-2 rounded-lg border border-background-300 bg-background-50 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-1.5 text-[12px]">
-            <span className="font-medium text-foreground-800">招标文件包</span>
-            <span className="font-label rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700">
-              已上传 {liveSlots.filter((s) => s.uploaded).length}/{liveSlots.length} 类
-            </span>
-            {liveSlots.filter((s) => s.uploaded).map((s) => (
-              <span key={s.kind} className="truncate text-foreground-600">
-                {s.label}
-                {s.files[0] ? ` · ${s.files[0].filename}` : ""}
-              </span>
-            ))}
-          </div>
-          {liveSlots.some((s) => !s.uploaded) && (
-            <div className="mt-0.5 text-[11px] text-accent-600">
-              {TENDER_MISSING_HINT}：{liveSlots.filter((s) => !s.uploaded).map((s) => s.label).join("、")}
-            </div>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={() => setPackageOpen(true)}
-          className="flex h-8 shrink-0 cursor-pointer items-center gap-1 whitespace-nowrap rounded-md border border-background-300 bg-background-100 px-2.5 text-xs font-medium text-foreground-700 hover:border-primary-300 hover:text-primary-700"
-        >
-          <i className="ri-folder-upload-line text-sm"></i>
-          上传 / 管理文件
-        </button>
-      </div>
+      <Modal
+        open={rulesOpen}
+        onClose={() => setRulesOpen(false)}
+        title="自定义规则"
+        subtitle="按招标文件、图纸或多种类型补充人工理解的规则，启用后进入 AI 预审"
+        width="max-w-3xl"
+      >
+        {currentProject ? (
+          <CustomRulesPanel projectId={currentProject.id} onCountChange={setCustomRuleCount} onToast={showToast} />
+        ) : null}
+      </Modal>
 
       <Modal
         open={packageOpen}
         onClose={() => setPackageOpen(false)}
         title="上传招标文件包"
-        subtitle="按类型上传正文、答疑补遗、工程量清单、报价文件、施工图纸，关闭后可一并解析"
+        subtitle="按类型上传正文、答疑补遗、工程量清单、其他材料、施工图纸，关闭后可一并解析"
         width="max-w-5xl"
       >
         <TenderPackagePanel
@@ -375,30 +355,6 @@ export default function ParsePage() {
 
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-2">
         <div className="flex min-h-0 flex-col">
-          {docs.length > 0 && (
-            <div className="mb-2 flex gap-1 overflow-x-auto pb-1">
-              {docs.map((doc) => {
-                const kind = effectiveTenderKind(doc.kind, doc.filename);
-                const selected = doc.id === (activeDoc?.id || "");
-                return (
-                  <button
-                    key={doc.id}
-                    type="button"
-                    onClick={() => setActiveDocId(doc.id)}
-                    className={`flex max-w-[220px] shrink-0 cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-[11px] transition-colors ${
-                      selected
-                        ? "bg-primary-50 text-primary-700 ring-1 ring-primary-200"
-                        : "bg-background-100 text-foreground-600 hover:bg-background-200"
-                    }`}
-                    title={doc.filename}
-                  >
-                    <span className="truncate font-medium">{doc.filename}</span>
-                    <span className="shrink-0 text-[10px] text-foreground-400">{TENDER_KIND_LABELS[kind]}</span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
           {activeDoc ? (
             <WordViewer
               projectName={currentProject.name}
@@ -419,9 +375,7 @@ export default function ParsePage() {
             parsing={parsing}
             locking={locking}
             category={currentProject.category}
-            packageSlots={packageSlots}
             focusKind={activeDoc ? effectiveTenderKind(activeDoc.kind, activeDoc.filename) : undefined}
-            focusFileName={activeDoc?.filename}
             focusFileId={activeDoc?.id}
             onLock={handleLock}
             onShare={async () => {

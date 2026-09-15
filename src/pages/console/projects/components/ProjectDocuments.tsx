@@ -97,7 +97,7 @@ export default function ProjectDocuments({ projectId }: ProjectDocumentsProps) {
     {
       key: "tender",
       label: "招标文件",
-      desc: "本项目招标文件包：正文、答疑补遗、工程量清单、报价文件、施工图纸",
+      desc: "本项目招标文件包：正文、答疑补遗、工程量清单、其他材料、施工图纸",
       icon: "ri-file-list-3-line",
       color: "bg-primary-50 text-primary-600",
       docs: tenderDocs.map((d) => ({

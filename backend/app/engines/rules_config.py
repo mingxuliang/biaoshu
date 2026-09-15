@@ -79,6 +79,31 @@ def load_enabled_catalog_keys(db: Session, kind: str) -> set[str]:
     return {r.key for r in rows if r.enabled is not False}
 
 
+def load_project_custom_rules(db: Session, project_id: str) -> list[dict]:
+    """解析页人工补充的启用中自定义规则，供预审引擎逐条对照投标书。"""
+    from ..models import ProjectCustomRule
+
+    rows = (
+        db.query(ProjectCustomRule)
+        .filter(ProjectCustomRule.project_id == project_id, ProjectCustomRule.enabled.is_(True))
+        .order_by(ProjectCustomRule.created_at.asc())
+        .all()
+    )
+    return [
+        {
+            "id": r.id,
+            "source": r.source or "tender",
+            "sources": r.sources_json or [],
+            "title": r.title or "",
+            "content": r.content or "",
+            "severity": r.severity or "扣分",
+            "enabled": True,
+        }
+        for r in rows
+        if (r.content or "").strip()
+    ]
+
+
 def load_locked_checklist(db: Session, project_id: str) -> tuple[dict | None, list]:
     """兼容旧调用方：返回 (engine_params, mustRespond)。
 

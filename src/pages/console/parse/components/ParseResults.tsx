@@ -1,35 +1,141 @@
-import { useEffect, useMemo, useState } from "react";
-import type { Checklist, TenderPackageSlot } from "@/lib/api";
-import { countFilledRows, mergeParseDimensions } from "@/lib/parseDimensions";
-import {
-  TENDER_KIND_DISPLAY,
-  TENDER_KIND_JUMP,
-  TENDER_KIND_LABELS,
-  TENDER_KIND_SLOTS,
-  TENDER_MISSING_HINT,
-  parseTargetForKind,
-} from "@/lib/tenderPackage";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { Checklist } from "@/lib/api";
+import { countFilledRows, mergeParseDimensions, type ParseSection } from "@/lib/parseDimensions";
+import { parseTargetForKind } from "@/lib/tenderPackage";
+
+const BOQ_COLS = ["项目名称", "计量单位", "工程数量", "备注"] as const;
+const ADDENDUM_MARK = "【答疑补遗为准】";
+
+function ContractTechNote({ itemId }: { itemId?: string }) {
+  if (itemId !== "contract-tech") return null;
+  return (
+    <div className="rounded-md border border-primary-100 bg-primary-50/60 px-3 py-2 text-[12px] leading-5 text-foreground-700">
+      已通读全部招标文件中的<strong>专用合同条款 / 发包人要求 / 技术标准</strong>
+      ，提炼与技术评审相关的时限、材料工艺、验收检测等指标。这些条款往往也是技术标加分项，锁定尺子后会进入 AI 预审。
+      市政、房建及其他专业各有一组重点字段，不相关项保持空白。
+    </div>
+  );
+}
+
+function FieldContent({ content }: { content: string }) {
+  const text = content.trim();
+  if (text.startsWith(ADDENDUM_MARK)) {
+    const body = text.slice(ADDENDUM_MARK.length).trim();
+    return (
+      <div>
+        <span className="mb-1 inline-block rounded bg-primary-50 px-1.5 py-0.5 text-[10px] font-medium text-primary-700">
+          答疑补遗为准
+        </span>
+        <div className="whitespace-pre-wrap">{body}</div>
+      </div>
+    );
+  }
+  return <div className="whitespace-pre-wrap">{text}</div>;
+}
+
+function isBoqSection(sec: ParseSection): boolean {
+  const labels = new Set(sec.rows.map((r) => r.label));
+  return BOQ_COLS.every((label) => labels.has(label));
+}
+
+function boqLineItems(sec: ParseSection) {
+  const cols = BOQ_COLS.map((label) => (sec.rows.find((r) => r.label === label)?.content || "").split("\n"));
+  const n = Math.max(0, ...cols.map((c) => c.length));
+  const rows: { name: string; unit: string; qty: string; remark: string }[] = [];
+  for (let i = 0; i < n; i += 1) {
+    const item = {
+      name: (cols[0][i] || "").trim(),
+      unit: (cols[1][i] || "").trim(),
+      qty: (cols[2][i] || "").trim(),
+      remark: (cols[3][i] || "").trim(),
+    };
+    if (item.name || item.unit || item.qty || item.remark) rows.push(item);
+  }
+  return rows;
+}
+
+function SectionFields({ sec }: { sec: ParseSection }) {
+  const items = isBoqSection(sec) ? boqLineItems(sec) : [];
+  if (items.length) {
+    return (
+      <section>
+        <h3 className="mb-2 text-sm font-semibold text-foreground-900">
+          {sec.title}
+          <span className="ml-2 text-[11px] font-normal text-foreground-500">共 {items.length} 条</span>
+        </h3>
+        <div className="max-h-[520px] overflow-auto rounded-md border border-background-200">
+          <table className="w-full min-w-[640px] border-collapse text-[13px]">
+            <thead className="sticky top-0 bg-background-50">
+              <tr>
+                {BOQ_COLS.map((label) => (
+                  <th
+                    key={label}
+                    className="border-b border-background-200 px-2.5 py-2 text-left font-medium text-foreground-700"
+                  >
+                    {label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((row, idx) => (
+                <tr key={`${row.name}-${idx}`} className="align-top">
+                  <td className="border-b border-background-100 px-2.5 py-2 text-foreground-800">{row.name || "—"}</td>
+                  <td className="w-24 whitespace-nowrap border-b border-background-100 px-2.5 py-2 text-foreground-800">
+                    {row.unit || "—"}
+                  </td>
+                  <td className="w-28 whitespace-nowrap border-b border-background-100 px-2.5 py-2 text-foreground-800">
+                    {row.qty || "—"}
+                  </td>
+                  <td className="border-b border-background-100 px-2.5 py-2 text-foreground-700">
+                    {row.remark ? <div className="whitespace-pre-wrap">{row.remark}</div> : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    );
+  }
+  return (
+    <section>
+      <h3 className="mb-2 text-sm font-semibold text-foreground-900">{sec.title}</h3>
+      <table className="w-full border-collapse text-[13px]">
+        <tbody>
+          {sec.rows.map((row) => (
+            <tr key={row.label} className="align-top">
+              <td className="w-40 border border-background-200 bg-background-50 px-2.5 py-2 font-medium text-foreground-700">
+                {row.label}
+              </td>
+              <td className="border border-background-200 px-2.5 py-2 text-foreground-800">
+                {row.content.trim() ? (
+                  <FieldContent content={row.content} />
+                ) : (
+                  <span className="text-foreground-400">未从招标文件中抽取到该项内容</span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+  );
+}
 
 interface ParseResultsProps {
   checklist: Checklist | null;
   parsing: boolean;
   locking: boolean;
   category?: "软件服务类" | "工程类" | string;
-  packageSlots?: TenderPackageSlot[];
   focusKind?: string;
-  focusFileName?: string;
   focusFileId?: string;
   onLock: () => void;
   onShare: () => void;
   onDownload: () => void;
 }
 
-const PACKAGE_TAB = "package";
-const FILE_TAB = "file";
-
 const DIM_ICONS: Record<string, string> = {
-  [PACKAGE_TAB]: "ri-archive-line",
-  [FILE_TAB]: "ri-file-list-2-line",
   basic: "ri-information-line",
   qualification: "ri-award-line",
   evalMethod: "ri-scales-3-line",
@@ -49,104 +155,46 @@ export default function ParseResults({
   parsing,
   locking,
   category,
-  packageSlots,
   focusKind,
-  focusFileName,
   focusFileId,
   onLock,
   onShare,
   onDownload,
 }: ParseResultsProps) {
   const dimensions = useMemo(() => mergeParseDimensions(checklist?.dimensions, category), [checklist, category]);
-  const [activeKey, setActiveKey] = useState(focusKind ? FILE_TAB : PACKAGE_TAB);
+  const [activeKey, setActiveKey] = useState("basic");
   const [activeItemId, setActiveItemId] = useState("");
+  const jumpedFor = useRef("");
 
-  const showingPackage = activeKey === PACKAGE_TAB;
-  const showingFile = activeKey === FILE_TAB;
-  const currentDim = showingPackage || showingFile ? null : dimensions.find((d) => d.key === activeKey) ?? dimensions[0];
-  const currentItem =
-    currentDim?.items.find((i) => i.id === activeItemId) ?? currentDim?.items[0];
+  const currentDim = dimensions.find((d) => d.key === activeKey) ?? dimensions[0];
+  const currentItem = currentDim?.items.find((i) => i.id === activeItemId) ?? currentDim?.items[0];
 
   const hasChecklist = !!checklist && checklist.status === "done";
   const { filled, total } = countFilledRows(dimensions);
 
-  const parsedPackage = checklist?.package?.length ? checklist.package : packageSlots ?? [];
-  const focusSlot = parsedPackage.find((s) => s.kind === focusKind);
-
-  const focusItems = useMemo(() => {
-    if (!focusKind) return [];
-    const { dimKey, itemId } = parseTargetForKind(focusKind, category);
-    const dim = dimensions.find((d) => d.key === dimKey);
-    if (!dim) return [];
-    if (itemId) {
-      const hit = dim.items.find((i) => i.id === itemId);
-      if (focusKind === "quote") {
-        const extras = dim.items.filter((i) => i.id === "env-calc" || i.id === "env-price");
-        return extras.length ? extras : hit ? [hit] : dim.items;
-      }
-      return hit ? [hit] : dim.items;
-    }
-    return dim.items;
-  }, [focusKind, category, dimensions]);
-
   useEffect(() => {
-    if (!focusKind && !focusFileId) return;
-    setActiveKey(FILE_TAB);
-    const first = focusItems[0];
-    if (first) setActiveItemId(first.id);
-  }, [focusKind, focusFileId, focusFileName]);
-
-  const fileItem = focusItems.find((i) => i.id === activeItemId) ?? focusItems[0];
+    const token = `${focusFileId || ""}:${focusKind || ""}`;
+    if (!token.replace(":", "") || !dimensions.length) return;
+    if (token === jumpedFor.current) return;
+    jumpedFor.current = token;
+    const { dimKey, itemId } = parseTargetForKind(focusKind || "", category);
+    const dim = dimensions.find((d) => d.key === dimKey) ?? dimensions.find((d) => d.key === "basic") ?? dimensions[0];
+    if (!dim) return;
+    setActiveKey(dim.key);
+    const preferred = itemId ? dim.items.find((i) => i.id === itemId) : dim.items[0];
+    setActiveItemId(preferred?.id ?? dim.items[0]?.id ?? "");
+  }, [focusKind, focusFileId, category, dimensions]);
 
   const selectDimension = (key: string) => {
     setActiveKey(key);
-    if (key === PACKAGE_TAB || key === FILE_TAB) return;
     const dim = dimensions.find((d) => d.key === key);
     setActiveItemId(dim?.items[0]?.id ?? "");
-  };
-
-  const jumpTo = (slot: TenderPackageSlot) => {
-    const key = slot.jumpKey || TENDER_KIND_JUMP[slot.kind] || "basic";
-    const dim = dimensions.find((d) => d.key === key) ?? dimensions.find((d) => d.key === "basic");
-    if (!dim) return;
-    setActiveKey(dim.key);
-    const preferred =
-      slot.kind === "boq"
-        ? dim.items.find((i) => i.id === "qty-boq")
-        : slot.kind === "drawing"
-          ? dim.items.find((i) => i.id === "qty-drawing")
-          : dim.items[0];
-    setActiveItemId(preferred?.id ?? dim.items[0]?.id ?? "");
   };
 
   return (
     <div className="flex h-full flex-col overflow-hidden rounded-lg border border-background-300 bg-background-100">
       <div className="shrink-0 border-b border-background-300 bg-background-50 px-3 py-2">
         <div className="flex gap-1.5 overflow-x-auto pb-1 scrollbar-thin">
-          <button
-            type="button"
-            onClick={() => selectDimension(FILE_TAB)}
-            className={`flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-medium transition-all ${
-              showingFile
-                ? "bg-primary-500 text-background-50"
-                : "border border-background-300 bg-background-50 text-foreground-600 hover:bg-background-200"
-            }`}
-          >
-            <i className={`${DIM_ICONS[FILE_TAB]} text-sm`}></i>
-            本文件解读
-          </button>
-          <button
-            type="button"
-            onClick={() => selectDimension(PACKAGE_TAB)}
-            className={`flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-medium transition-all ${
-              showingPackage
-                ? "bg-primary-500 text-background-50"
-                : "border border-background-300 bg-background-50 text-foreground-600 hover:bg-background-200"
-            }`}
-          >
-            <i className={`${DIM_ICONS[PACKAGE_TAB]} text-sm`}></i>
-            文件包总览
-          </button>
           {dimensions.map((dim) => {
             const isActive = dim.key === (currentDim?.key ?? "");
             return (
@@ -167,29 +215,6 @@ export default function ParseResults({
             );
           })}
         </div>
-        {showingFile && focusItems.length > 0 && (
-          <div className="mt-2 flex gap-1.5 overflow-x-auto pb-1 scrollbar-thin">
-            {focusItems.map((item) => {
-              const selected = item.id === (focusItems.find((i) => i.id === activeItemId)?.id ?? focusItems[0].id);
-              const itemFilled = item.sections.some((sec) => sec.rows.some((row) => row.content.trim()));
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => setActiveItemId(item.id)}
-                  className={`flex shrink-0 cursor-pointer items-center gap-1 whitespace-nowrap rounded-md px-2.5 py-1 text-[11px] font-medium transition-all ${
-                    selected
-                      ? "bg-primary-50 text-primary-700 ring-1 ring-primary-200"
-                      : "bg-background-100 text-foreground-600 hover:bg-background-200"
-                  }`}
-                >
-                  {item.label}
-                  {itemFilled && <span className="h-1.5 w-1.5 rounded-full bg-secondary-500"></span>}
-                </button>
-              );
-            })}
-          </div>
-        )}
         {currentDim && (
           <div className="mt-2 flex gap-1.5 overflow-x-auto pb-1 scrollbar-thin">
             {currentDim.items.map((item) => {
@@ -218,11 +243,7 @@ export default function ParseResults({
       <div className="shrink-0 flex items-center gap-2 border-b border-background-200/60 bg-background-50/60 px-4 py-2">
         <span className="flex h-5 w-5 items-center justify-center rounded bg-secondary-100 text-[10px] font-bold text-secondary-600">AI</span>
         <span className="text-[11px] text-foreground-500">
-          {showingFile
-            ? "左侧点哪个文件，这里展示该文件抽出的结构化字段（原文请看左侧）"
-            : showingPackage
-            ? "五种文件类型的上传与摘录总览；点左侧标签可查看单份文件的解析字段"
-            : "一级/二级分析指标固定展示；未在招标文件中出现的字段保持空白，不编造内容"}
+          一级/二级分析指标固定展示；未在招标文件中出现的字段保持空白，不编造内容
         </span>
         {checklist && (
           <span
@@ -239,133 +260,17 @@ export default function ParseResults({
         {parsing && (
           <div className="mb-3 flex items-center gap-2 rounded-md border border-primary-100 bg-primary-50/60 px-3 py-2 text-xs text-primary-700">
             <i className="ri-loader-4-line animate-spin"></i>
-            AI 正在按固定指标逐项抽取，并识读施工图纸，请稍候…
+            AI 正在按固定指标逐项抽取，并提取施工图纸中的设计说明，请稍候…
           </div>
         )}
         {checklist?.error && (
           <div className="mb-3 rounded-md border border-accent-200 bg-accent-50 px-3 py-2 text-xs text-accent-700">{checklist.error}</div>
         )}
-        {showingFile ? (
+        {currentItem ? (
           <div className="space-y-4">
-            <div className="rounded-lg border border-primary-100 bg-primary-50/50 px-3 py-2">
-              <div className="text-sm font-semibold text-foreground-900">
-                {TENDER_KIND_LABELS[focusKind || ""] || "当前文件"}
-              </div>
-              <div className="mt-0.5 truncate text-[12px] text-foreground-700" title={focusFileName}>
-                {focusFileName || "未选择文件"}
-              </div>
-              <div className="mt-1 text-[11px] text-foreground-500">
-                {focusSlot?.displayIn || TENDER_KIND_DISPLAY[focusKind || ""] || ""}
-              </div>
-            </div>
-            {!focusSlot?.uploaded && focusKind ? (
-              <div className="text-[13px] text-accent-600">{TENDER_MISSING_HINT}</div>
-            ) : !hasChecklist ? (
-              <div className="text-[13px] text-foreground-400">请先点击「开始解析文件包」，再查看该文件的解析字段</div>
-            ) : !fileItem ? (
-              <div className="text-[13px] text-foreground-400">该文件类型暂无对应结构化字段，原文请直接查看左侧。</div>
-            ) : null}
-            {fileItem ? (
-              <div className="space-y-4">
-                {fileItem.sections.map((sec) => (
-                  <section key={sec.id}>
-                    <h3 className="mb-2 text-sm font-semibold text-foreground-900">{sec.title}</h3>
-                    <table className="w-full border-collapse text-[13px]">
-                      <tbody>
-                        {sec.rows.map((row) => (
-                          <tr key={row.label} className="align-top">
-                            <td className="w-32 border border-background-200 bg-background-50 px-2.5 py-2 font-medium text-foreground-700">
-                              {row.label}
-                            </td>
-                            <td className="border border-background-200 px-2.5 py-2 text-foreground-800">
-                              {row.content.trim() ? (
-                                <div className="whitespace-pre-wrap">{row.content}</div>
-                              ) : (
-                                <span className="text-foreground-400">未从该文件中抽取到该项内容</span>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </section>
-                ))}
-              </div>
-            ) : null}
-          </div>
-        ) : showingPackage ? (
-          <div className="space-y-3">
-            {(parsedPackage.length ? parsedPackage : TENDER_KIND_SLOTS.map((s) => ({
-              kind: s.key,
-              label: s.label,
-              uploaded: false,
-              missingHint: TENDER_MISSING_HINT,
-              files: [],
-            }))).map((slot) => {
-              const displayIn = slot.displayIn || TENDER_KIND_DISPLAY[slot.kind] || "";
-              const excerpt = (slot.excerpt || "").trim();
-              return (
-                <section key={slot.kind} className="overflow-hidden rounded-lg border border-background-200">
-                  <div className="flex items-start justify-between gap-2 bg-background-50 px-3 py-2">
-                    <div className="min-w-0">
-                      <div className="text-sm font-semibold text-foreground-900">{slot.label}</div>
-                      <div className="mt-0.5 text-[11px] text-foreground-500">{displayIn}</div>
-                      {slot.files.length > 0 && (
-                        <div className="mt-1 truncate text-[11px] text-foreground-600">
-                          {slot.files.map((f) => f.filename).join("；")}
-                        </div>
-                      )}
-                    </div>
-                    {slot.uploaded && dimensions.some((d) => d.key === (slot.jumpKey || TENDER_KIND_JUMP[slot.kind])) && (
-                      <button
-                        type="button"
-                        onClick={() => jumpTo(slot)}
-                        className="flex h-7 shrink-0 cursor-pointer items-center gap-1 whitespace-nowrap rounded-md border border-background-300 bg-background-100 px-2 text-[11px] text-foreground-600 hover:border-primary-300 hover:text-primary-700"
-                      >
-                        查看对应指标
-                        <i className="ri-arrow-right-s-line"></i>
-                      </button>
-                    )}
-                  </div>
-                  <div className="px-3 py-2.5 text-[13px]">
-                    {!slot.uploaded ? (
-                      <span className="text-accent-600">{slot.missingHint || TENDER_MISSING_HINT}</span>
-                    ) : excerpt ? (
-                      <div className="max-h-64 overflow-auto whitespace-pre-wrap text-foreground-800">{excerpt}</div>
-                    ) : hasChecklist ? (
-                      <span className="text-foreground-400">已上传。请点击「重新解析文件包」，将在此展示该类型抽取内容</span>
-                    ) : (
-                      <span className="text-foreground-400">已上传，点击「开始解析文件包」后将在此展示抽取内容</span>
-                    )}
-                  </div>
-                </section>
-              );
-            })}
-          </div>
-        ) : currentItem ? (
-          <div className="space-y-4">
+            <ContractTechNote itemId={currentItem.id} />
             {currentItem.sections.map((sec) => (
-              <section key={sec.id}>
-                <h3 className="mb-2 text-sm font-semibold text-foreground-900">{sec.title}</h3>
-                <table className="w-full border-collapse text-[13px]">
-                  <tbody>
-                    {sec.rows.map((row) => (
-                      <tr key={row.label} className="align-top">
-                        <td className="w-32 border border-background-200 bg-background-50 px-2.5 py-2 font-medium text-foreground-700">
-                          {row.label}
-                        </td>
-                        <td className="border border-background-200 px-2.5 py-2 text-foreground-800">
-                          {row.content.trim() ? (
-                            <div className="whitespace-pre-wrap">{row.content}</div>
-                          ) : (
-                            <span className="text-foreground-400">未从招标文件中抽取到该项内容</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </section>
+              <SectionFields key={sec.id} sec={sec} />
             ))}
           </div>
         ) : (

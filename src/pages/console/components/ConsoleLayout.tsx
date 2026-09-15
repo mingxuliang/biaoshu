@@ -17,6 +17,8 @@ function getTitle(pathname: string): string {
   if (pathname.match(/^\/console\/products\/[^/]+$/)) return "产品库详情";
   if (pathname.startsWith("/console/products")) return "产品功能库";
   if (pathname.startsWith("/console/audit")) return "AI 预审中心";
+  if (pathname.startsWith("/console/duplicate/result")) return "查重结果";
+  if (pathname.startsWith("/console/duplicate")) return "查重分析";
   if (pathname.startsWith("/console/review")) return "修改闭环";
   if (pathname.startsWith("/console/export")) return "Word 导出";
   if (pathname.startsWith("/console/rules")) return "预审规则";

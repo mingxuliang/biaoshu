@@ -17,8 +17,7 @@ export interface DimensionScore {
   score: number;
 }
 
-// 技术评分 8 模块（施工组织总纲/专项施工方案/工期管控/质量管理/安全文明/环保水保/
-// 资源配置/售后质保）逐项打分明细，与规则页「技术评分」tab 的 8 张卡片一一对应。
+// 技术评分模块逐项打分明细，与规则页「技术评分」tab 卡片一一对应（含工程量逻辑匹配）。
 export interface TechModuleScore {
   key: string;
   module: string;
@@ -1535,7 +1534,7 @@ export interface VetoRule {
   enabled: boolean;
 }
 
-export type CatalogKind = "business" | "tech" | "dup_check" | "strategy";
+export type CatalogKind = "business" | "tech" | "dup_check" | "dup_sim" | "strategy";
 
 export interface CatalogRule extends VetoRule {
   kind: CatalogKind;
@@ -1996,4 +1995,116 @@ export async function deleteLlmModel(id: string): Promise<void> {
 
 export async function testLlmModel(id: string): Promise<LlmTestResult> {
   return request<LlmTestResult>(`/api/llm-models/${id}/test`, { method: "POST" });
+}
+
+export type CustomRuleSource = "tender" | "drawing" | "mixed";
+export type CustomRuleSeverity = "废标" | "降档" | "扣分" | "建议";
+
+export interface ProjectCustomRule {
+  id: string;
+  projectId: string;
+  source: CustomRuleSource;
+  sources: string[];
+  title: string;
+  content: string;
+  severity: CustomRuleSeverity;
+  enabled: boolean;
+  createdAt: string;
+}
+
+export interface CustomRulePayload {
+  source: CustomRuleSource;
+  sources?: string[];
+  title?: string;
+  content: string;
+  severity?: CustomRuleSeverity;
+  enabled?: boolean;
+}
+
+export async function listCustomRules(projectId: string): Promise<ProjectCustomRule[]> {
+  return request<ProjectCustomRule[]>(`/api/projects/${projectId}/custom-rules`);
+}
+
+export async function createCustomRule(projectId: string, payload: CustomRulePayload): Promise<ProjectCustomRule> {
+  return request<ProjectCustomRule>(`/api/projects/${projectId}/custom-rules`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateCustomRule(
+  projectId: string,
+  ruleId: string,
+  payload: Partial<CustomRulePayload>,
+): Promise<ProjectCustomRule> {
+  return request<ProjectCustomRule>(`/api/projects/${projectId}/custom-rules/${ruleId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteCustomRule(projectId: string, ruleId: string): Promise<void> {
+  await request(`/api/projects/${projectId}/custom-rules/${ruleId}`, { method: "DELETE" });
+}
+
+export interface DuplicateFileInfo {
+  name: string;
+  chars: number;
+}
+
+export interface DuplicateCheckItem {
+  key: string;
+  label: string;
+  value: number | null;
+  threshold: number;
+  unit: string;
+  triggered: boolean;
+  severity: string;
+  meaning: string;
+  applicable: boolean;
+}
+
+export interface DuplicatePairHit {
+  pct: number;
+  excerptA: string;
+  excerptB: string;
+}
+
+export interface DuplicateIssue {
+  id: string;
+  level: string;
+  severity: "废标" | "降档" | "扣分" | "建议";
+  location: string;
+  excerpt: string;
+  tenderQuote: string;
+  rule: string;
+  suggestion: string;
+}
+
+export interface DuplicateCheckReport {
+  fileA: DuplicateFileInfo;
+  fileB: DuplicateFileInfo;
+  identical: boolean;
+  wholePct: number;
+  paragraphPct: number;
+  keySectionPct: number | null;
+  light: "绿" | "橙" | "红";
+  waste: number;
+  risk: number;
+  suggest: number;
+  checks: DuplicateCheckItem[];
+  pairs: DuplicatePairHit[];
+  issues: DuplicateIssue[];
+  conclusion: string;
+  scope: string;
+  method: string;
+}
+
+export async function runDuplicateCheck(fileA: File, fileB: File): Promise<DuplicateCheckReport> {
+  const form = new FormData();
+  form.append("file_a", fileA);
+  form.append("file_b", fileB);
+  return request<DuplicateCheckReport>("/api/duplicate-check", { method: "POST", body: form });
 }

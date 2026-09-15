@@ -225,12 +225,12 @@ export default function PreReviewReport({
           </>
         )}
 
-        {/* 技术评分模块核验（8 项）：与规则页「技术评分」tab 一一对应 */}
+        {/* 技术评分模块核验：与规则页「技术评分」tab 一一对应 */}
         {scope !== "business" && techModules.length > 0 && (
           <>
             <h4 className="mb-2.5 mt-6 flex items-center gap-1.5 text-sm font-semibold text-foreground-900">
               <i className="ri-cpu-line text-primary-500 text-sm"></i>
-              技术评分模块核验（8 项确定性核验）
+              技术评分模块核验
             </h4>
             <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
               {techModules.map((m) => (
@@ -242,7 +242,7 @@ export default function PreReviewReport({
                         className={`font-label whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-medium ${
                           m.status === "达标"
                             ? "bg-primary-50 text-primary-600"
-                            : m.status === "建议"
+                            : m.status === "建议" || m.status === "无法比对"
                               ? "bg-secondary-100 text-secondary-600"
                               : "bg-accent-50 text-accent-600"
                         }`}

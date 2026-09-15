@@ -49,6 +49,22 @@ const dimLabel = [
   { key: "standardization", label: "规范性" },
 ] as const;
 
+const DUP_CARD_THRESHOLD_KEYS: Record<string, string[]> = {
+  filler_density: ["filler_density_safe"],
+  price_deviation: ["price_deviation_ok", "price_deviation_warn", "price_deviation_malicious"],
+  asset_liability: ["asset_liability_ratio_max"],
+};
+
+const SIM_CARD_THRESHOLD_KEYS: Record<string, string[]> = {
+  full_text_sim: ["full_text_similarity_safe", "full_text_similarity_risk"],
+  key_section_sim: ["key_section_similarity_safe", "key_section_similarity_risk"],
+  cross_bidder: ["cross_bidder_paragraph_risk", "cross_bidder_whole_risk"],
+};
+
+const TECH_CARD_THRESHOLD_KEYS: Record<string, string[]> = {
+  qty_logic: ["qty_deviation_ok", "qty_material_mismatch", "excavator_m3_per_shift"],
+};
+
 const WORD_CATEGORIES = [
   "一类：万能动词",
   "二类：空洞形容词",
@@ -372,8 +388,15 @@ export default function RulesPage() {
               icon="ri-cpu-line"
               iconWrapClass="from-primary-400 to-primary-600"
               emptyText="暂无技术评分模块，请确认后端已完成规则入库"
-              footer="青天第三层「技术标核心 AI 评分点」。八个模块除写入五维语义引擎（L3）Prompt 外，同时接入确定性关键词核验，缺项会计入 L3 扣分。关闭开关后该模块退出 Prompt 与确定性核验。"
+              footer="青天第三层「技术标核心 AI 评分点」。九个模块写入五维语义引擎（L3）Prompt，并做确定性核验；「工程量逻辑匹配」由 e_qty_logic 比对清单与标书数字。关闭开关后该模块退出 Prompt 与核验。"
               onToggle={toggleCatalog}
+              thresholds={thresholds}
+              thresholdKeysByRule={TECH_CARD_THRESHOLD_KEYS}
+              thresholdEdits={thresholdEdits}
+              onStartEditThreshold={startEditThreshold}
+              onCancelEditThreshold={cancelEditThreshold}
+              onSaveThreshold={saveThreshold}
+              onEditThresholdValue={(id, value) => setThresholdEdits((prev) => ({ ...prev, [id]: value }))}
             />
           )}
 
@@ -383,7 +406,7 @@ export default function RulesPage() {
               <div className="border-b border-background-300 bg-background-50 px-4 py-3">
                 <div className="flex items-center gap-2 text-sm font-medium text-foreground-800">
                   <i className="ri-voiceprint-line text-primary-500"></i>
-                  虚词表（六类虚词 / 改写对照，驱动 AI 预审 L4 虚词密度检测）
+                  虚词表（六类空话口径 / 改写对照，仅供大模型虚词语义分析参考）
                 </div>
               </div>
               <div className="overflow-x-auto">
@@ -463,102 +486,35 @@ export default function RulesPage() {
               icon="ri-shield-check-line"
               iconWrapClass="from-amber-400 to-amber-500"
               emptyText="暂无专项检查清单，请确认后端已完成规则入库"
-              footer="青天第四层「AI 查重/防废标专项检查」。蓝色为引擎已自动核验的子项，灰色为未接入子项。虚词密度、高危词句由 L4 接入判定；全文/专项查重比对内置模板库与本企业历史标书。关闭开关后引擎将跳过该项检查。"
+              footer="青天第四层专项检查。虚词由大模型阅读原文判定；报价偏离、资产负债率数值写在对应卡片内。关闭开关后引擎将跳过该项。"
               onToggle={toggleCatalog}
+              thresholds={thresholds}
+              thresholdKeysByRule={DUP_CARD_THRESHOLD_KEYS}
+              thresholdEdits={thresholdEdits}
+              onStartEditThreshold={startEditThreshold}
+              onCancelEditThreshold={cancelEditThreshold}
+              onSaveThreshold={saveThreshold}
+              onEditThresholdValue={(id, value) => setThresholdEdits((prev) => ({ ...prev, [id]: value }))}
             />
           )}
 
           {/* 查重阈值 */}
           {activeTab === "threshold" && (
-            <div className="overflow-hidden rounded-lg border border-background-300 bg-background-100">
-              <div className="border-b border-background-300 bg-background-50 px-4 py-3">
-                <div className="flex items-center gap-2 text-sm font-medium text-foreground-800">
-                  <i className="ri-scales-3-line text-primary-500"></i>
-                  查重与数值阈值（虚词密度、全文/专项查重、本企业跨项目查重、报价偏离、资产负债率）
-                </div>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[680px] text-left">
-                  <thead>
-                    <tr className="font-label border-b border-background-300 bg-background-50 text-xs text-foreground-500">
-                      <th className="px-4 py-2.5 font-medium">规则</th>
-                      <th className="px-3 py-2.5 font-medium">说明</th>
-                      <th className="px-3 py-2.5 font-medium">当前值</th>
-                      <th className="px-3 py-2.5 text-right font-medium">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {thresholds.map((t) => {
-                      const editing = t.id in thresholdEdits;
-                      return (
-                        <tr
-                          key={t.id}
-                          className="group border-b border-background-200 transition-colors last:border-0 hover:bg-primary-50/30"
-                        >
-                          <td className="px-4 py-3 text-sm font-medium text-foreground-900">{t.label}</td>
-                          <td className="max-w-[320px] px-3 py-3 text-xs text-foreground-500">{t.description}</td>
-                          <td className="px-3 py-3">
-                            {editing ? (
-                              <div className="flex items-center gap-1">
-                                <input
-                                  type="number"
-                                  value={thresholdEdits[t.id]}
-                                  onChange={(e) =>
-                                    setThresholdEdits((prev) => ({ ...prev, [t.id]: e.target.value }))
-                                  }
-                                  className="h-8 w-20 rounded-md border border-primary-300 bg-background-50 px-2 text-sm text-foreground-900 outline-none focus:ring-1 focus:ring-primary-400/30"
-                                />
-                                <span className="text-xs text-foreground-500">{t.unit}</span>
-                              </div>
-                            ) : (
-                              <span className="inline-flex items-center gap-1.5 rounded-md bg-primary-50 px-2 py-1 text-sm font-semibold text-primary-600">
-                                {t.value}
-                                {t.unit}
-                              </span>
-                            )}
-                          </td>
-                          <td className="px-3 py-3 text-right">
-                            {editing ? (
-                              <div className="flex items-center justify-end gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() => cancelEditThreshold(t.id)}
-                                  className="cursor-pointer whitespace-nowrap rounded-md border border-background-300 px-2.5 py-1 text-xs text-foreground-600 transition-colors hover:bg-background-200"
-                                >
-                                  取消
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => saveThreshold(t.id)}
-                                  className="cursor-pointer whitespace-nowrap rounded-md bg-primary-500 px-2.5 py-1 text-xs font-medium text-background-50 transition-colors hover:bg-primary-600"
-                                >
-                                  保存
-                                </button>
-                              </div>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => startEditThreshold(t)}
-                                className="cursor-pointer whitespace-nowrap rounded-md border border-background-300 px-2.5 py-1 text-xs text-foreground-600 transition-colors hover:bg-background-200"
-                              >
-                                编辑
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                    {thresholds.length === 0 && (
-                      <tr>
-                        <td colSpan={4} className="px-4 py-10 text-center text-sm text-foreground-500">
-                          暂无阈值配置
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            <CatalogGrid
+              rules={catalogOf("dup_sim")}
+              icon="ri-scales-3-line"
+              iconWrapClass="from-primary-500 to-primary-600"
+              emptyText="暂无查重规则，请确认后端已完成规则入库"
+              footer="这三项只用于「查重分析」比对两份技术标，不进入 AI 预审。卡片内数字可改；关闭开关后该项不参与点灯。"
+              onToggle={toggleCatalog}
+              thresholds={thresholds}
+              thresholdKeysByRule={SIM_CARD_THRESHOLD_KEYS}
+              thresholdEdits={thresholdEdits}
+              onStartEditThreshold={startEditThreshold}
+              onCancelEditThreshold={cancelEditThreshold}
+              onSaveThreshold={saveThreshold}
+              onEditThresholdValue={(id, value) => setThresholdEdits((prev) => ({ ...prev, [id]: value }))}
+            />
           )}
 
           {/* 高分编制策略建议 */}
@@ -670,6 +626,185 @@ export default function RulesPage() {
   );
 }
 
+function ThresholdTable({
+  title,
+  rows,
+  thresholdEdits,
+  onStartEdit,
+  onCancelEdit,
+  onSave,
+  onEditValue,
+}: {
+  title: string;
+  rows: ThresholdRule[];
+  thresholdEdits: Record<string, string>;
+  onStartEdit: (t: ThresholdRule) => void;
+  onCancelEdit: (id: string) => void;
+  onSave: (id: string) => void;
+  onEditValue: (id: string, value: string) => void;
+}) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-background-300 bg-background-100">
+      <div className="border-b border-background-300 bg-background-50 px-4 py-3">
+        <div className="flex items-center gap-2 text-sm font-medium text-foreground-800">
+          <i className="ri-scales-3-line text-primary-500"></i>
+          {title}
+        </div>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[680px] text-left">
+          <thead>
+            <tr className="font-label border-b border-background-300 bg-background-50 text-xs text-foreground-500">
+              <th className="px-4 py-2.5 font-medium">规则</th>
+              <th className="px-3 py-2.5 font-medium">说明</th>
+              <th className="px-3 py-2.5 font-medium">当前值</th>
+              <th className="px-3 py-2.5 text-right font-medium">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((t) => {
+              const editing = t.id in thresholdEdits;
+              return (
+                <tr
+                  key={t.id}
+                  className="group border-b border-background-200 transition-colors last:border-0 hover:bg-primary-50/30"
+                >
+                  <td className="px-4 py-3 text-sm font-medium text-foreground-900">{t.label}</td>
+                  <td className="max-w-[320px] px-3 py-3 text-xs text-foreground-500">{t.description}</td>
+                  <td className="px-3 py-3">
+                    {editing ? (
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number"
+                          value={thresholdEdits[t.id]}
+                          onChange={(e) => onEditValue(t.id, e.target.value)}
+                          className="h-8 w-20 rounded-md border border-primary-300 bg-background-50 px-2 text-sm text-foreground-900 outline-none focus:ring-1 focus:ring-primary-400/30"
+                        />
+                        <span className="text-xs text-foreground-500">{t.unit}</span>
+                      </div>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 rounded-md bg-primary-50 px-2 py-1 text-sm font-semibold text-primary-600">
+                        {t.value}
+                        {t.unit}
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-3 py-3 text-right">
+                    {editing ? (
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => onCancelEdit(t.id)}
+                          className="cursor-pointer whitespace-nowrap rounded-md border border-background-300 px-2.5 py-1 text-xs text-foreground-600 transition-colors hover:bg-background-200"
+                        >
+                          取消
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onSave(t.id)}
+                          className="cursor-pointer whitespace-nowrap rounded-md bg-primary-500 px-2.5 py-1 text-xs font-medium text-background-50 transition-colors hover:bg-primary-600"
+                        >
+                          保存
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => onStartEdit(t)}
+                        className="cursor-pointer whitespace-nowrap rounded-md border border-background-300 px-2.5 py-1 text-xs text-foreground-600 transition-colors hover:bg-background-200"
+                      >
+                        编辑
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={4} className="px-4 py-10 text-center text-sm text-foreground-500">
+                  暂无阈值配置
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function ThresholdInline({
+  rows,
+  thresholdEdits,
+  onStartEdit,
+  onCancelEdit,
+  onSave,
+  onEditValue,
+}: {
+  rows: ThresholdRule[];
+  thresholdEdits: Record<string, string>;
+  onStartEdit?: (t: ThresholdRule) => void;
+  onCancelEdit?: (id: string) => void;
+  onSave?: (id: string) => void;
+  onEditValue?: (id: string, value: string) => void;
+}) {
+  if (rows.length === 0) return null;
+  return (
+    <div className="mt-3 space-y-2 border-t border-background-200 pt-3">
+      {rows.map((t) => {
+        const editing = t.id in thresholdEdits;
+        return (
+          <div key={t.id} className="flex items-center justify-between gap-2">
+            <div className="min-w-0 text-xs font-medium text-foreground-800">{t.label}</div>
+            <div className="flex shrink-0 items-center gap-1.5">
+              {editing ? (
+                <>
+                  <input
+                    type="number"
+                    value={thresholdEdits[t.id]}
+                    onChange={(e) => onEditValue?.(t.id, e.target.value)}
+                    className="h-7 w-[4.5rem] rounded-md border border-primary-300 bg-background-50 px-2 text-sm text-foreground-900 outline-none focus:ring-1 focus:ring-primary-400/30"
+                  />
+                  <span className="text-[11px] text-foreground-500">{t.unit}</span>
+                  <button
+                    type="button"
+                    onClick={() => onCancelEdit?.(t.id)}
+                    className="cursor-pointer whitespace-nowrap rounded-md border border-background-300 px-2 py-0.5 text-[11px] text-foreground-600 transition-colors hover:bg-background-200"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onSave?.(t.id)}
+                    className="cursor-pointer whitespace-nowrap rounded-md bg-primary-500 px-2 py-0.5 text-[11px] font-medium text-background-50 transition-colors hover:bg-primary-600"
+                  >
+                    保存
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span className="inline-flex items-center gap-1 rounded-md bg-primary-50 px-2 py-0.5 text-sm font-semibold text-primary-600">
+                    {t.value}
+                    {t.unit}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onStartEdit?.(t)}
+                    className="cursor-pointer whitespace-nowrap rounded-md border border-background-300 px-2 py-0.5 text-[11px] text-foreground-600 transition-colors hover:bg-background-200"
+                  >
+                    编辑
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function wiredBadgeClass(wired: VetoRule["wired"]) {
   if (wired === "接入判定") return "border-primary-200 bg-primary-50 text-primary-600";
   if (wired === "部分接入") return "border-amber-200 bg-amber-50 text-amber-700";
@@ -690,6 +825,13 @@ function CatalogGrid<T extends VetoRule>({
   emptyText,
   footer,
   onToggle,
+  thresholds = [],
+  thresholdKeysByRule,
+  thresholdEdits = {},
+  onStartEditThreshold,
+  onCancelEditThreshold,
+  onSaveThreshold,
+  onEditThresholdValue,
 }: {
   rules: T[];
   icon: string;
@@ -697,6 +839,13 @@ function CatalogGrid<T extends VetoRule>({
   emptyText: string;
   footer: string;
   onToggle: (rule: T) => void;
+  thresholds?: ThresholdRule[];
+  thresholdKeysByRule?: Record<string, string[]>;
+  thresholdEdits?: Record<string, string>;
+  onStartEditThreshold?: (t: ThresholdRule) => void;
+  onCancelEditThreshold?: (id: string) => void;
+  onSaveThreshold?: (id: string) => void;
+  onEditThresholdValue?: (id: string, value: string) => void;
 }) {
   return (
     <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -761,6 +910,18 @@ function CatalogGrid<T extends VetoRule>({
               );
             })}
           </div>
+          {thresholdKeysByRule && (
+            <ThresholdInline
+              rows={(thresholdKeysByRule[rule.key] || [])
+                .map((key) => thresholds.find((t) => t.key === key))
+                .filter((t): t is ThresholdRule => Boolean(t))}
+              thresholdEdits={thresholdEdits}
+              onStartEdit={onStartEditThreshold}
+              onCancelEdit={onCancelEditThreshold}
+              onSave={onSaveThreshold}
+              onEditValue={onEditThresholdValue}
+            />
+          )}
           {rule.wired === "部分接入" && (
             <div className="mt-2 flex flex-wrap items-center gap-3 text-[10px] text-foreground-500">
               <span className="inline-flex items-center gap-1">

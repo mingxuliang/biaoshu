@@ -71,9 +71,7 @@ class DimensionOut(BaseModel):
 
 
 class TechModuleOut(BaseModel):
-    """技术评分 8 模块（施工组织总纲/专项施工方案/工期管控…）逐项打分，
-    与规则页「技术评分」tab 的 8 张卡片一一对应，供预审报告直接展示
-    「模块名 N 分，缺项说明」，不再只笼统混在 issue 列表里。"""
+    """技术评分模块逐项打分，与规则页「技术评分」tab 卡片一一对应（含工程量逻辑匹配）。"""
 
     key: str
     module: str
@@ -209,6 +207,7 @@ class FormatItemOut(BaseModel):
 class ParseRowOut(BaseModel):
     label: str
     content: str = ""
+    original: str = ""
 
 
 class ParseSectionOut(BaseModel):
@@ -862,7 +861,7 @@ class UpdateVetoRuleIn(BaseModel):
 
 class CatalogRuleOut(BaseModel):
     id: str
-    kind: Literal["business", "tech", "dup_check", "strategy"]
+    kind: Literal["business", "tech", "dup_check", "dup_sim", "strategy"]
     key: str
     category: str
     point: str
@@ -1164,6 +1163,89 @@ class LlmPresetOut(BaseModel):
     keyRequired: bool
     hint: str = ""
     sampleModels: list[dict] = []
+
+
+class CustomRuleOut(BaseModel):
+    id: str
+    projectId: str
+    source: Literal["tender", "drawing", "mixed"]
+    sources: list[str] = []
+    title: str = ""
+    content: str
+    severity: Literal["废标", "降档", "扣分", "建议"] = "扣分"
+    enabled: bool = True
+    createdAt: str = ""
+
+
+class CustomRuleIn(BaseModel):
+    source: Literal["tender", "drawing", "mixed"] = "tender"
+    sources: list[str] = []
+    title: str = ""
+    content: str
+    severity: Literal["废标", "降档", "扣分", "建议"] = "扣分"
+    enabled: bool = True
+
+
+class UpdateCustomRuleIn(BaseModel):
+    source: Optional[Literal["tender", "drawing", "mixed"]] = None
+    sources: Optional[list[str]] = None
+    title: Optional[str] = None
+    content: Optional[str] = None
+    severity: Optional[Literal["废标", "降档", "扣分", "建议"]] = None
+    enabled: Optional[bool] = None
+
+
+class DuplicateFileOut(BaseModel):
+    name: str
+    chars: int = 0
+
+
+class DuplicateCheckItemOut(BaseModel):
+    key: str
+    label: str
+    value: Optional[float] = None
+    threshold: float
+    unit: str = "%"
+    triggered: bool = False
+    severity: str = "扣分"
+    meaning: str = ""
+    applicable: bool = True
+
+
+class DuplicatePairHitOut(BaseModel):
+    pct: float
+    excerptA: str = ""
+    excerptB: str = ""
+
+
+class DuplicateIssueOut(BaseModel):
+    id: str
+    level: str = "L4"
+    severity: Literal["废标", "降档", "扣分", "建议"] = "扣分"
+    location: str = ""
+    excerpt: str = ""
+    tenderQuote: str = ""
+    rule: str = ""
+    suggestion: str = ""
+
+
+class DuplicateCheckOut(BaseModel):
+    fileA: DuplicateFileOut
+    fileB: DuplicateFileOut
+    identical: bool = False
+    wholePct: float = 0
+    paragraphPct: float = 0
+    keySectionPct: Optional[float] = None
+    light: Literal["绿", "橙", "红"] = "绿"
+    waste: int = 0
+    risk: int = 0
+    suggest: int = 0
+    checks: list[DuplicateCheckItemOut] = []
+    pairs: list[DuplicatePairHitOut] = []
+    issues: list[DuplicateIssueOut] = []
+    conclusion: str = ""
+    scope: str = "tech"
+    method: str = ""
 
 
 ProductFeatureOut.model_rebuild()

@@ -12,7 +12,7 @@ from .review_context import load_review_context
 
 CHECK_LABELS = {
     "waste": "无未关闭废标项",
-    "filler": "虚词密度达标",
+    "filler": "虚词语义无明显空话",
     "dup": "查重阈值达标",
     "layout": "版式终审通过",
     "anon": "暗标标识无残留",
@@ -31,11 +31,14 @@ def run_checks(
     word_rules = rules_config.load_enabled_filler_words(db)
     thresholds = rules_config.load_thresholds(db)
     local_items = rules_config.load_enabled_package_items(db)
+    veto_keys = rules_config.load_enabled_veto_keys(db)
+    biz_keys = rules_config.load_enabled_catalog_keys(db, "business")
+    dup_keys = rules_config.load_enabled_catalog_keys(db, "dup_check")
     context = load_review_context(db, project_id, storage_path) if project_id else None
 
-    e1_findings = e1_veto.run(paragraphs, checklist_params, must_respond or [], thresholds, context)
-    e2_findings = e2_business.run(paragraphs, checklist_params, thresholds, local_items, context)
-    e4_findings = e4_duplicate_filler.run(paragraphs, word_rules, thresholds, context)
+    e1_findings = e1_veto.run(paragraphs, checklist_params, must_respond or [], thresholds, context, veto_keys, dup_keys)
+    e2_findings = e2_business.run(paragraphs, checklist_params, thresholds, local_items, context, biz_keys, veto_keys, None, dup_keys)
+    e4_findings = e4_duplicate_filler.run(paragraphs, word_rules, thresholds, context, dup_keys)
     e5_findings = e5_layout.run(storage_path, paragraphs, context)
     return e1_findings + e2_findings + e4_findings + e5_findings
 
@@ -65,7 +68,7 @@ def summarize(findings: list[dict], storage_path: str, mode: str) -> tuple[list[
             "key": "filler",
             "label": CHECK_LABELS["filler"],
             "ok": len(filler_findings) == 0,
-            "note": f"检测到 {len(filler_findings)} 处虚词/空话表达" if filler_findings else "",
+            "note": f"检测到 {len(filler_findings)} 处语义空话，建议补数据" if filler_findings else "",
         },
         {
             "key": "dup",

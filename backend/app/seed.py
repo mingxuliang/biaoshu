@@ -191,6 +191,20 @@ def seed_rules(db: Session) -> None:
         for field, value in payload.items():
             setattr(row, field, value)
 
+    sim_keys = {item["key"] for item in rules_data.DUP_SIMILARITY_POINTS}
+    stale = (
+        db.query(CatalogRule)
+        .filter(CatalogRule.kind == "dup_check", CatalogRule.key.in_(sim_keys))
+        .all()
+    )
+    moved = {r.key: r for r in db.query(CatalogRule).filter(CatalogRule.kind == "dup_sim").all()}
+    for row in stale:
+        if row.key in moved:
+            db.delete(row)
+        else:
+            row.kind = "dup_sim"
+    db.flush()
+
     existing_catalog = {(r.kind, r.key): r for r in db.query(CatalogRule).all()}
     for kind, items in rules_data.RULE_CATALOGS.items():
         for seq, item in enumerate(items):

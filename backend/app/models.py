@@ -117,6 +117,23 @@ class EvaluationChecklist(Base):
     finished_at = Column(DateTime, nullable=True)
 
 
+class ProjectCustomRule(Base):
+    """解析页人工补充的自定义规则，按来源类型归档，进入 AI 预审。"""
+
+    __tablename__ = "project_custom_rules"
+
+    id = Column(String, primary_key=True, default=lambda: gen_id("pcr"))
+    project_id = Column(String, index=True, nullable=False)
+    source = Column(String, nullable=False, default="tender")  # tender | drawing | mixed
+    sources_json = Column(JSON, default=list)  # mixed 时勾选的文件类型
+    title = Column(String, default="")
+    content = Column(Text, nullable=False, default="")
+    severity = Column(String, default="扣分")  # 废标 | 降档 | 扣分 | 建议
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class ReviewRun(Base):
     """一次完整的 L1-L5 预审运行记录。"""
 
@@ -137,7 +154,7 @@ class ReviewRun(Base):
 
     levels_json = Column(JSON, default=list)
     dimensions_json = Column(JSON, default=list)
-    tech_modules_json = Column(JSON, default=list)  # 技术评分 8 模块逐项打分明细，供预审报告展示
+    tech_modules_json = Column(JSON, default=list)  # 技术评分模块逐项打分明细，供预审报告展示
     tender_rules_json = Column(JSON, default=dict)  # 招标书自带商务/技术评分规则的模拟评标报告
 
     error_message = Column(Text, nullable=True)
@@ -439,7 +456,7 @@ class WeightTemplate(Base):
 
 
 class FillerWordRule(Base):
-    """虚词识别规则（预审规则页「虚词表」tab），驱动 E4 虚词密度检测与知识库 review_flag。"""
+    """虚词口径（预审规则页「虚词表」tab），供 E4 大模型虚词语义分析参考；知识库入库仍可用词表做粗检。"""
 
     __tablename__ = "filler_word_rules"
 
@@ -502,7 +519,7 @@ class CatalogRule(Base):
     __tablename__ = "catalog_rules"
 
     id = Column(String, primary_key=True, default=lambda: gen_id("cr"))
-    kind = Column(String, index=True, nullable=False)  # business | tech | dup_check | strategy
+    kind = Column(String, index=True, nullable=False)  # business | tech | dup_check | dup_sim | strategy
     key = Column(String, nullable=False)
     category = Column(String, nullable=False)
     point = Column(String, nullable=False)
