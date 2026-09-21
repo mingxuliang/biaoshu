@@ -164,24 +164,36 @@ def extract_paragraphs(path: str) -> list[dict]:
     return result
 
 
-def extract_full_text(path: str) -> str:
+def extract_full_text(path: str, *, max_ocr_pages: int | None = None, stats: dict | None = None) -> str:
     """招标文件正文抽取的统一入口：按扩展名分发到 docx / pdf 抽取。
 
     PDF 版招标文件（部分工程标只提供 PDF 招标文件正文，清单/图纸另附）走
-    PyMuPDF 抽取；docx 仍走 python-docx 段落抽取，行为不变。
+    PyMuPDF 抽取；文字层不足的页再 OCR。docx 仍走 python-docx。
     """
     if (path or "").lower().endswith(".pdf"):
-        return _extract_pdf_full_text(path)
+        return _extract_pdf_full_text(path, max_ocr_pages=max_ocr_pages, stats=stats)
     paragraphs = extract_paragraphs(path)
     return "\n".join(p["text"] for p in paragraphs)
 
 
-def _extract_pdf_full_text(path: str) -> str:
-    """按页抽出正文；表格再补一行结构化文本，避免复杂表只剩断行或漏格。"""
+PDF_SPARSE_CHARS = 80
+DEFAULT_TENDER_OCR_PAGES = 80
+
+
+def _extract_pdf_full_text(
+    path: str, *, max_ocr_pages: int | None = None, stats: dict | None = None
+) -> str:
+    """按页抽出正文；表格再补一行；稀疏页 OCR。"""
     import pymupdf as fitz
 
+    from .ocr import ocr_pixmap
+
+    ocr_limit = DEFAULT_TENDER_OCR_PAGES if max_ocr_pages is None else max_ocr_pages
     chunks: list[str] = []
+    ocr_pages = 0
+    page_count = 0
     with fitz.open(path) as doc:
+        page_count = len(doc)
         for page in doc:
             text = (page.get_text() or "").strip()
             table_lines: list[str] = []
@@ -199,8 +211,20 @@ def _extract_pdf_full_text(path: str) -> str:
                 block = f"{text}\n{extra}".strip() if text else extra
             else:
                 block = text
+            if len(block) < PDF_SPARSE_CHARS and ocr_pages < ocr_limit:
+                try:
+                    pix = page.get_pixmap(matrix=fitz.Matrix(1.6, 1.6), alpha=False)
+                    ocr_text, _status = ocr_pixmap(pix)
+                except Exception:
+                    ocr_text = ""
+                if ocr_text:
+                    ocr_pages += 1
+                    block = f"{block}\n{ocr_text}".strip() if block else ocr_text
             if block:
                 chunks.append(block)
+    if stats is not None:
+        stats["ocrPages"] = int(stats.get("ocrPages") or 0) + ocr_pages
+        stats["pages"] = int(stats.get("pages") or 0) + page_count
     return "\n".join(chunks)
 
 

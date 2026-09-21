@@ -364,7 +364,7 @@ export default function RulesPage() {
               icon="ri-alarm-warning-line"
               iconWrapClass="from-accent-400 to-accent-500"
               emptyText="暂无一票否决清单，请确认后端已完成规则入库"
-              footer="清单来自青天一票否决口径。「接入判定」子项全部高亮并进入废标结论；「部分接入」卡片中蓝色为引擎已自动核验的子项，灰色为尚未接入、需人工对照的子项（如社保局联网、图片徽标识别）。关闭开关后引擎将跳过该项检查。"
+              footer="关闭开关后引擎跳过该项。蓝色为已接线的自动核验；灰色仍须人工（如社保联网）。串标痕迹核验本企业历史标书 MD5 与长句，不比对其他投标人未公开文件。"
               onToggle={toggleVeto}
             />
           )}

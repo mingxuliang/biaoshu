@@ -378,7 +378,13 @@ def get_tender_document_paragraphs(
     except FileNotFoundError:
         raise HTTPException(404, "招标文件不存在")
     return [
-        TenderParagraphOut(index=p["index"], text=p["text"], style=p["style"], outlineLevel=p["outline_level"])
+        TenderParagraphOut(
+            index=p["index"],
+            text=p["text"],
+            style=p["style"],
+            outlineLevel=p["outline_level"],
+            page=p.get("page"),
+        )
         for p in paragraphs
     ]
 

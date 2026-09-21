@@ -90,33 +90,96 @@ def _keep_bid_excerpt(excerpt: str, *blobs: str, location: str = "", rule: str =
     return ""
 
 
-def _finding_row(run_id: str, f: dict, *blobs: str) -> ReviewFinding:
-    severity = f.get("severity") if f.get("severity") in _SEVERITIES else "建议"
-    rule = str(f.get("rule") or "")
-    quote = str(f.get("tenderQuote") or f.get("tender_quote") or "")
-    excerpt, quote = split_bid_and_tender(
-        _keep_bid_excerpt(
+_HUMAN = ("社保", "证书", "资质", "信用", "图面", "工程量", "造价", "人工核验", "联网", "扫描件")
+_SEV_RANK = {"废标": 4, "降档": 3, "扣分": 2, "建议": 1}
+
+
+def _issue_class(f: dict) -> str:
+    if f.get("issueClass"):
+        return str(f.get("issueClass"))
+    blob = f"{f.get('rule') or ''}{f.get('location') or ''}{f.get('suggestion') or ''}"
+    if any(k in blob for k in _HUMAN):
+        return "human_check"
+    engine = str(f.get("engine") or "")
+    if engine in {"e3_semantic", "e4_duplicate_filler"} or f.get("severity") == "建议":
+        return "writing"
+    if f.get("severity") == "废标":
+        return "auto_veto"
+    return "writing"
+
+
+def _admit_findings(findings: list[dict], *blobs: str) -> list[dict]:
+    """宁缺毋滥：废标/降档/扣分必须贴回原句或已确认未响应。"""
+    hay = "\n".join(b or "" for b in blobs)
+    admitted: list[dict] = []
+    suggest_n: dict[str, int] = {}
+    for raw in findings:
+        f = dict(raw)
+        severity = f.get("severity") if f.get("severity") in _SEVERITIES else "建议"
+        f["severity"] = severity
+        excerpt = _keep_bid_excerpt(
             str(f.get("excerpt") or ""),
-            *blobs,
+            hay,
             location=str(f.get("location") or ""),
-            rule=rule,
-        ),
-        quote,
-        rule,
-    )
+            rule=str(f.get("rule") or ""),
+        )
+        quote = str(f.get("tenderQuote") or f.get("tender_quote") or "")
+        excerpt, quote = split_bid_and_tender(excerpt, quote, str(f.get("rule") or ""))
+        f["excerpt"] = excerpt
+        f["tenderQuote"] = quote
+        evidence_ok = bool(f.get("evidenceOk") or f.get("evidence_ok"))
+        unanswered = bool(f.get("unansweredConfirmed") or f.get("unanswered_confirmed"))
+        try:
+            confidence = float(f.get("confidence") or 1.0)
+        except (TypeError, ValueError):
+            confidence = 1.0
+        if severity in {"废标", "降档"} and confidence < 0.5 and not unanswered:
+            continue
+        if not evidence_ok:
+            if severity in {"废标", "降档"} and not excerpt and not (unanswered and quote):
+                continue
+            if severity == "扣分" and not excerpt and not (unanswered and quote):
+                continue
+        f["issueClass"] = _issue_class(f)
+        if severity == "建议":
+            eng = str(f.get("engine") or "")
+            suggest_n[eng] = suggest_n.get(eng, 0) + 1
+            if suggest_n[eng] > 6:
+                continue
+        admitted.append(f)
+
+    best: dict[tuple[str, str], dict] = {}
+    order: list[tuple[str, str]] = []
+    for f in admitted:
+        key = (_norm_ws(str(f.get("rule") or ""))[:40], _norm_ws(str(f.get("excerpt") or f.get("tenderQuote") or ""))[:48])
+        prev = best.get(key)
+        if prev is None:
+            best[key] = f
+            order.append(key)
+            continue
+        if _SEV_RANK.get(f["severity"], 0) > _SEV_RANK.get(prev["severity"], 0):
+            best[key] = f
+    return [best[k] for k in order]
+
+
+def _finding_row(run_id: str, f: dict, *blobs: str) -> ReviewFinding:
+    del blobs
+    severity = f.get("severity") if f.get("severity") in _SEVERITIES else "建议"
+    extra = f.get("evidence_json") if isinstance(f.get("evidence_json"), dict) else {}
     return ReviewFinding(
         run_id=run_id,
         engine=str(f.get("engine") or "unknown"),
         level=str(f.get("level") or ""),
         severity=severity,
         location=str(f.get("location") or ""),
-        excerpt=excerpt,
-        rule=rule,
-        tender_quote=quote,
+        excerpt=str(f.get("excerpt") or ""),
+        rule=str(f.get("rule") or ""),
+        tender_quote=str(f.get("tenderQuote") or f.get("tender_quote") or ""),
         suggestion=str(f.get("suggestion") or ""),
         evidence_json={
-            "strategyKey": str(f.get("strategyKey") or ""),
-            "applyText": str(f.get("applyText") or "")[:4000],
+            "strategyKey": str(f.get("strategyKey") or extra.get("strategyKey") or ""),
+            "applyText": str(f.get("applyText") or extra.get("applyText") or "")[:4000],
+            "issueClass": str(f.get("issueClass") or "writing"),
         },
         confidence=float(f.get("confidence") or 1.0),
     )
@@ -207,6 +270,10 @@ def run_prereview(db: Session, run_id: str) -> None:
                 biz_paras = list(paras) + vis_paras
             e1 = e1_veto.run(biz_paras, checklist_params, must_respond, thresholds, ctx, veto_keys, dup_keys)
             e2 = e2_business.run(biz_paras, checklist_params, thresholds, local_items, ctx, biz_keys, veto_keys, strategy_keys, dup_keys)
+            if "file_form" in (veto_keys or {"file_form"}):
+                from .e5_layout import file_form_findings
+
+                e1.extend(file_form_findings(ctx))
             for item in vis_findings:
                 if item.get("level") == "L2":
                     e2.append(item)
@@ -239,12 +306,26 @@ def run_prereview(db: Session, run_id: str) -> None:
             headings=[(p.get("text") or "") for p in parse_paras],
             paragraphs=parse_paras,
         )
-        custom_findings = e_custom_rules.run(parse_text, parse_paras, custom_rules)
+        custom_pack = e_custom_rules.run(parse_text, parse_paras, custom_rules, scope=scope)
+        if isinstance(custom_pack, dict):
+            custom_findings = custom_pack.get("findings") or []
+            custom_items = custom_pack.get("items") or []
+        else:
+            custom_findings = list(custom_pack or [])
+            custom_items = []
         parse_findings = parse_findings + custom_findings
         if scope == SCOPE_BUSINESS:
-            parse_findings = [f for f in parse_findings if f.get("level") in ("L1", "L2")]
+            parse_findings = [
+                f
+                for f in parse_findings
+                if f.get("level") in ("L1", "L2") or f.get("engine") == "e_custom_rules"
+            ]
         elif scope == SCOPE_TECH:
-            parse_findings = [f for f in parse_findings if f.get("level") in ("L3", "L5")]
+            parse_findings = [
+                f
+                for f in parse_findings
+                if f.get("level") in ("L3", "L5") or f.get("engine") == "e_custom_rules"
+            ]
         e3_issues = (e3.get("issues") or []) + tech_findings + [f for f in parse_findings if f["level"] == "L3"]
         e1 = e1 + [f for f in parse_findings if f["level"] == "L1"]
         e2 = e2 + [f for f in parse_findings if f["level"] == "L2"]
@@ -258,7 +339,20 @@ def run_prereview(db: Session, run_id: str) -> None:
             paragraphs=parse_paras,
         )
         tender_rules = filter_tender_rules(tender_rules, scope)
-        return paras, text, e1, e2, e4, e5, e3, e3_issues, tech_modules, tender_rules
+        if isinstance(tender_rules, dict):
+            omitted = (ctx.extract_stats or {}).get("omittedCount") or {}
+            tender_rules["coverage"] = {
+                "bidChars": len(text or ""),
+                "ocrPages": int((ctx.extract_stats or {}).get("ocrPages") or 0),
+                "checklistVersion": ctx.checklist_version,
+                "weightName": ctx.weight_name,
+                "omittedCount": omitted,
+            }
+            note = str(tender_rules.get("note") or "")
+            extra_note = "模拟评标分仅供自查，不是评标委员会得分。"
+            if extra_note not in note:
+                tender_rules["note"] = (note + " " + extra_note).strip()
+        return paras, text, e1, e2, e4, e5, e3, e3_issues, tech_modules, tender_rules, custom_items
 
     if doc and doc.storage_path and storage.exists(doc.storage_path):
         with storage.as_local(doc.storage_path) as path:
@@ -273,6 +367,7 @@ def run_prereview(db: Session, run_id: str) -> None:
                 e3_issues,
                 tech_modules,
                 tender_rules,
+                custom_items,
             ) = _run_with_path(path)
     else:
         (
@@ -286,9 +381,19 @@ def run_prereview(db: Session, run_id: str) -> None:
             e3_issues,
             tech_modules,
             tender_rules,
+            custom_items,
         ) = _run_with_path(None)
 
-    all_findings = e1_findings + e2_findings + e4_findings + e5_findings + e3_issues
+    all_findings = _admit_findings(
+        e1_findings + e2_findings + e4_findings + e5_findings + e3_issues,
+        full_text,
+        "\n".join(str(p.get("text") or "") for p in paragraphs),
+    )
+    e1_findings = [f for f in all_findings if f.get("level") == "L1"]
+    e2_findings = [f for f in all_findings if f.get("level") == "L2"]
+    e4_findings = [f for f in all_findings if f.get("level") == "L4"]
+    e5_findings = [f for f in all_findings if f.get("level") == "L5"]
+    e3_issues = [f for f in all_findings if f.get("level") == "L3"]
 
     level_scores: dict[str, float] = {
         "L1": _score_from_findings(e1_findings),
@@ -310,7 +415,9 @@ def run_prereview(db: Session, run_id: str) -> None:
     for key in level_keys:
         meta = LEVEL_META[key]
         level_findings = [f for f in all_findings if f["level"] == key]
-        has_waste = any(f["severity"] == "废标" for f in level_findings)
+        has_waste = any(
+            f["severity"] == "废标" and f.get("issueClass") == "auto_veto" for f in level_findings
+        )
         levels_out.append(
             {
                 "key": key,
@@ -334,7 +441,8 @@ def run_prereview(db: Session, run_id: str) -> None:
         tech_modules = []
 
     overall = round(sum(level_scores[k] * w for k, w in score_weights.items()), 1)
-    waste = sum(1 for f in all_findings if f["severity"] == "废标")
+    auto_waste = [f for f in all_findings if f["severity"] == "废标" and f.get("issueClass") == "auto_veto"]
+    waste = len(auto_waste)
     risk = sum(1 for f in all_findings if f["severity"] in ("降档", "扣分"))
     suggest = sum(1 for f in all_findings if f["severity"] == "建议")
 
@@ -355,6 +463,7 @@ def run_prereview(db: Session, run_id: str) -> None:
     run.dimensions_json = dimensions_out
     run.tech_modules_json = tech_modules
     run.tender_rules_json = tender_rules
+    run.custom_rules_json = custom_items
     run.finished_at = datetime.utcnow()
 
     para_blob = "\n".join(str(p.get("text") or "") for p in paragraphs)

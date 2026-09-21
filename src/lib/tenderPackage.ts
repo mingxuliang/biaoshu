@@ -59,7 +59,7 @@ export const TENDER_KIND_LABELS: Record<string, string> = Object.fromEntries(
 );
 
 export const TENDER_KIND_DISPLAY: Record<string, string> = {
-  main: "写入右侧全部固定指标；专用合同条款中的技术要求与加分项写入「商务评分」",
+  main: "写入右侧全部固定指标；专用合同条款中的技术要求与加分项写入「技术评分」",
   addendum: "与正文冲突时以补遗为准；合同技术指标以答疑最新口径覆盖",
   boq: "「清单、图纸与其他」→ 工程量清单（项目名称、计量单位、工程数量、备注）",
   quote: "「其他材料」提炼摘要；含评审条款时写入评分尺子，不写入报价评审",

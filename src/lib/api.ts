@@ -64,6 +64,25 @@ export interface TenderRuleReport {
   percent: number;
   groups: TenderRuleGroup[];
   note: string;
+  coverage?: {
+    bidChars?: number;
+    ocrPages?: number;
+    checklistVersion?: number | null;
+    weightName?: string;
+    omittedCount?: Record<string, number>;
+  };
+}
+
+export interface CustomRuleReview {
+  id: string;
+  title: string;
+  content: string;
+  source: string;
+  sourceLabel: string;
+  severity: string;
+  status: "已响应" | "未响应";
+  excerpt: string;
+  reason: string;
 }
 
 export type BidScope = "business" | "tech" | "full";
@@ -80,6 +99,7 @@ export interface ReviewReport {
   dimensions: DimensionScore[];
   techModules: TechModuleScore[];
   tenderRules?: TenderRuleReport | null;
+  customRules?: CustomRuleReview[] | null;
   issues: PreReviewIssue[];
 }
 
@@ -169,6 +189,7 @@ export interface VetoParams {
 export interface ParseRow {
   label: string;
   content: string;
+  original?: string;
 }
 
 export interface ParseSection {
@@ -223,6 +244,14 @@ export interface Checklist {
   vetoParams: VetoParams;
   package?: TenderPackageSlot[];
   error?: string | null;
+  extractStats?: {
+    usableHanzi?: number;
+    ocrPages?: number;
+    unpackedFiles?: number;
+    omittedCount?: Record<string, number>;
+    filledRows?: number;
+  };
+  omittedCount?: Record<string, number>;
 }
 
 class ApiError extends Error {
@@ -611,6 +640,26 @@ export interface TenderParagraph {
   text: string;
   style: string;
   outlineLevel: number | null;
+  page?: number | null;
+}
+
+export interface TenderLocateHit {
+  found: boolean;
+  page: number;
+  pageCount: number;
+  snippet: string;
+  heading?: string;
+  rects: { x: number; y: number; w: number; h: number }[];
+}
+
+export interface TenderSheet {
+  name: string;
+  rows: string[][];
+}
+
+export interface TenderSheetPreview {
+  filename: string;
+  sheets: TenderSheet[];
 }
 
 export async function getOrCreateWriterDraft(projectId: string): Promise<WriterDraft> {
@@ -1435,6 +1484,18 @@ export async function downloadTenderDocument(id: string, inline = true): Promise
 
 export async function getTenderPreviewMeta(id: string): Promise<{ pageCount: number; kind: string; filename?: string }> {
   return request(`/api/tender-documents/${id}/preview-meta`);
+}
+
+export async function locateTenderText(id: string, q: string, label?: string): Promise<TenderLocateHit> {
+  return request<TenderLocateHit>(`/api/tender-documents/${id}/locate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ q: (q || "").slice(0, 800), label: (label || "").slice(0, 80) }),
+  });
+}
+
+export async function getTenderSheetPreview(id: string): Promise<TenderSheetPreview> {
+  return request<TenderSheetPreview>(`/api/tender-documents/${id}/sheet-preview`);
 }
 
 export async function downloadBidDocumentFile(id: string): Promise<Blob> {

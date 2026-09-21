@@ -13,6 +13,11 @@ from ..models import CatalogRule, EvaluationChecklist, FillerWordRule, RulePacka
 from . import rules_data
 
 
+def load_active_weight_name(db: Session) -> str:
+    template = db.query(WeightTemplate).filter(WeightTemplate.active.is_(True)).first()
+    return (template.name if template else "") or "青天默认五维"
+
+
 def load_active_weights(db: Session) -> dict[str, float]:
     """五维权重：取当前 active 模板，查不到则回退 DEFAULT_WEIGHTS。"""
     template = db.query(WeightTemplate).filter(WeightTemplate.active.is_(True)).first()
@@ -128,6 +133,9 @@ class ProjectChecklist:
     dimensions: list = field(default_factory=list)
     locked: bool = False
     version: int | None = None
+    tender_corpus: str = ""
+    extract_stats: dict = field(default_factory=dict)
+    weight_name: str = ""
 
 
 def load_project_checklist(db: Session, project_id: str) -> ProjectChecklist:
@@ -160,4 +168,6 @@ def load_project_checklist(db: Session, project_id: str) -> ProjectChecklist:
         dimensions=_list("dimensions"),
         locked=bool(row.locked),
         version=row.version,
+        tender_corpus=str(data.get("tenderCorpus") or "")[:200_000],
+        extract_stats=data.get("extractStats") if isinstance(data.get("extractStats"), dict) else {},
     )

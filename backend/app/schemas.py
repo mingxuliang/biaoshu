@@ -62,6 +62,9 @@ class PreReviewIssueOut(BaseModel):
     strategyPoint: str = ""
     strategyClauses: list[str] = []
     applyText: str = ""
+    issueClass: str = ""
+    sectionId: str = ""
+    chapter: str = ""
 
 
 class DimensionOut(BaseModel):
@@ -118,6 +121,19 @@ class TenderRuleReportOut(BaseModel):
     percent: float = 0
     groups: list[TenderRuleGroupOut] = []
     note: str = ""
+    coverage: dict = {}
+
+
+class CustomRuleReviewOut(BaseModel):
+    id: str = ""
+    title: str = ""
+    content: str = ""
+    source: str = ""
+    sourceLabel: str = ""
+    severity: str = "扣分"
+    status: str = "未响应"
+    excerpt: str = ""
+    reason: str = ""
 
 
 class ReviewReportOut(BaseModel):
@@ -132,6 +148,7 @@ class ReviewReportOut(BaseModel):
     dimensions: list[DimensionOut]
     techModules: list[TechModuleOut] = []
     tenderRules: TenderRuleReportOut | None = None
+    customRules: list[CustomRuleReviewOut] = []
     issues: list[PreReviewIssueOut]
 
 
@@ -270,6 +287,8 @@ class ChecklistOut(BaseModel):
     vetoParams: VetoParamsOut = VetoParamsOut()
     package: list[TenderPackageSlotOut] = []
     error: Optional[str] = None
+    extractStats: dict = {}
+    omittedCount: dict = {}
 
 
 # 以下模型对应项目 / 认证真正落库（P0），字段严格对齐前端 src/context/AuthContext.tsx 的
@@ -450,6 +469,33 @@ class TenderParagraphOut(BaseModel):
     text: str
     style: str
     outlineLevel: Optional[int] = None
+    page: Optional[int] = None
+
+
+class TenderLocateRect(BaseModel):
+    x: float
+    y: float
+    w: float
+    h: float
+
+
+class TenderLocateOut(BaseModel):
+    found: bool
+    page: int = 0
+    pageCount: int = 0
+    snippet: str = ""
+    heading: str = ""
+    rects: list[TenderLocateRect] = []
+
+
+class TenderSheetOut(BaseModel):
+    name: str
+    rows: list[list[str]] = []
+
+
+class TenderSheetPreviewOut(BaseModel):
+    filename: str = ""
+    sheets: list[TenderSheetOut] = []
 
 
 # 以下模型对应「AI 撰写工作台」真实后端接入：统一目录节点（融合原前端 PlanNode 编写思路字段

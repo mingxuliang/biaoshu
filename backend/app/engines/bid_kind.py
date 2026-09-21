@@ -289,7 +289,16 @@ def project_booklet_payload(payload: dict, scope: str) -> dict:
         return payload
     keys = set(BOOKLET_LEVELS[scope])
     levels = [lv for lv in (payload.get("levels") or []) if isinstance(lv, dict) and lv.get("key") in keys]
-    issues = [i for i in (payload.get("issues") or []) if isinstance(i, dict) and (i.get("level") or "") in keys]
+    issues = [
+        i
+        for i in (payload.get("issues") or [])
+        if isinstance(i, dict)
+        and (
+            (i.get("level") or "") in keys
+            or str(i.get("rule") or "").startswith("自定义规则")
+            or str(i.get("location") or "").startswith("自定义规则")
+        )
+    ]
     waste = sum(1 for i in issues if i.get("severity") == "废标")
     risk = sum(1 for i in issues if i.get("severity") in ("降档", "扣分"))
     suggest = sum(1 for i in issues if i.get("severity") == "建议")

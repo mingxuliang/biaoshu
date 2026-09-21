@@ -25,6 +25,7 @@ def review_run_to_docx(
     dimensions: list[dict],
     issues: list[dict],
     tech_modules: list[dict] | None = None,
+    custom_rules: list[dict] | None = None,
     finished_at: datetime | None = None,
     scope: str = "full",
 ) -> bytes:
@@ -98,7 +99,7 @@ def review_run_to_docx(
                 if summary:
                     document.add_paragraph(summary)
 
-    labels = {2: "二", 3: "三", 4: "四", 5: "五"}
+    labels = {2: "二", 3: "三", 4: "四", 5: "五", 6: "六"}
     document.add_heading(f"{labels.get(heading_n, '四')}、预审问题清单", level=1)
     if not issues:
         document.add_paragraph("本轮无预审问题。")
@@ -120,14 +121,38 @@ def review_run_to_docx(
             issue.get("tenderQuote") or issue.get("tender_quote") or "",
             issue.get("rule") or "",
         )
-        excerpt = excerpt or "本项为缺项/未响应，投标书中没有可引用的命中句"
-        quote = quote or "（未对照到招标条款原文）"
+        excerpt = excerpt or "对照招标要求，投标书中未见相应的响应内容。"
+        quote = quote or "此项不对照某一条招标条款，而是检查投标书自身写得是否清楚。"
         suggestion = (issue.get("suggestion") or "").strip() or "（无改写建议）"
-        document.add_paragraph("投标书原文" + ("（命中句）" if (issue.get("excerpt") or "").strip() else "（未定位到对应句）") + f"：{excerpt}")
+        document.add_paragraph("投标书原文" + ("（对应内容）" if (issue.get("excerpt") or "").strip() else "（未见对应响应）") + f"：{excerpt}")
         document.add_paragraph(f"招标要求原文：{quote}")
         document.add_paragraph(f"修改建议：{suggestion}")
 
-    document.add_heading(f"{labels.get(heading_n + 1, '五')}、预审结论", level=1)
+    custom_heading = heading_n + 1
+    document.add_heading(f"{labels.get(custom_heading, '五')}、自定义规则对照", level=1)
+    if not custom_rules:
+        document.add_paragraph("本轮预审尚未纳入自定义规则对照。若解析页已添加规则，请再跑一轮预审。")
+    else:
+        unanswered_n = sum(1 for r in custom_rules if (r.get("status") or "") == "未响应")
+        document.add_paragraph(f"共 {len(custom_rules)} 条，其中未响应 {unanswered_n} 条。")
+        for i, rule in enumerate(custom_rules, 1):
+            title = (rule.get("title") or "").strip() or f"规则 {i}"
+            status = rule.get("status") or "未响应"
+            severity = rule.get("severity") or "扣分"
+            source = rule.get("sourceLabel") or rule.get("source") or "—"
+            line = document.add_paragraph()
+            line.add_run(f"{i}. [{status}] {title}（{severity} · {source}）").bold = True
+            content = (rule.get("content") or "").strip()
+            if content:
+                document.add_paragraph(f"规则内容：{content}")
+            reason = (rule.get("reason") or "").strip()
+            if reason:
+                document.add_paragraph(f"对照说明：{reason}")
+            excerpt = (rule.get("excerpt") or "").strip()
+            if excerpt:
+                document.add_paragraph(f"投标书对应内容：{excerpt}")
+
+    document.add_heading(f"{labels.get(custom_heading + 1, '六')}、预审结论", level=1)
     document.add_paragraph(
         f"本轮{score_label}为 {overall} 分，风险灯为「{light or '—'}」。"
         f"共发现废标 {waste} 项、扣分 {risk} 项、建议 {suggest} 项。"

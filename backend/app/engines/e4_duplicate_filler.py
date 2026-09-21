@@ -35,7 +35,7 @@ MAX_REVIEW_CHARS = 100_000
 PARALLEL_WORKERS = 4
 CALL_TIMEOUT = 60
 PER_CHUNK = 8
-ISSUE_CAP = 24
+ISSUE_CAP = 8
 
 
 def _default_word_patterns() -> list[tuple[str, str, str, str]]:

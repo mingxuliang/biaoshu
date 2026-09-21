@@ -20,6 +20,7 @@ interface BidDocxViewerProps {
   fileName?: string;
   active?: boolean;
   onAnchored?: (issueIds: string[]) => void;
+  onIssueChapters?: (issueSections: Record<string, string>) => void;
 }
 
 function isPdfBlob(blob: Blob | null, fileName?: string): boolean {
@@ -99,6 +100,40 @@ function matchScore(el: HTMLElement, needleNorm: string): number {
   return score;
 }
 
+function issueChaptersFromDom(
+  issues: PreReviewIssue[],
+  sections: BidSection[],
+  anchorMap: Record<string, HTMLElement>,
+): Record<string, string> {
+  const heads = sections
+    .map((s) => ({ id: s.id, el: anchorMap[s.id] }))
+    .filter((x): x is { id: string; el: HTMLElement } => !!x.el)
+    .sort((a, b) => {
+      const pos = a.el.compareDocumentPosition(b.el);
+      if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+      if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+      return 0;
+    });
+  const out: Record<string, string> = {};
+  for (const issue of issues) {
+    const el = anchorMap[issue.id];
+    if (!el) continue;
+    let last = "";
+    for (const h of heads) {
+      if (h.el === el) {
+        last = h.id;
+        break;
+      }
+      const pos = h.el.compareDocumentPosition(el);
+      if (pos & Node.DOCUMENT_POSITION_FOLLOWING || pos & Node.DOCUMENT_POSITION_CONTAINED_BY) {
+        last = h.id;
+      }
+    }
+    if (last) out[issue.id] = last;
+  }
+  return out;
+}
+
 function pickTitle(blocks: HTMLElement[], needle: string, used: Set<HTMLElement>, allowIndex = false): HTMLElement | undefined {
   const needleNorm = normalize(needle);
   if (needleNorm.length < 4) return undefined;
@@ -118,7 +153,7 @@ function pickTitle(blocks: HTMLElement[], needle: string, used: Set<HTMLElement>
 }
 
 const BidDocxViewer = forwardRef<BidDocxViewerHandle, BidDocxViewerProps>(function BidDocxViewer(
-  { bidDocumentId, sections, issues, fileName, active = true, onAnchored },
+  { bidDocumentId, sections, issues, fileName, active = true, onAnchored, onIssueChapters },
   ref,
 ) {
   const [zoom, setZoom] = useState(100);
@@ -263,7 +298,8 @@ const BidDocxViewer = forwardRef<BidDocxViewerHandle, BidDocxViewerProps>(functi
 
     anchorMapRef.current = anchorMap;
     onAnchored?.(issues.filter((issue) => anchorMap[issue.id]).map((issue) => issue.id));
-  }, [loading, rendering, error, sections, issues, onAnchored]);
+    onIssueChapters?.(issueChaptersFromDom(issues, sections, anchorMap));
+  }, [loading, rendering, error, sections, issues, onAnchored, onIssueChapters]);
 
   const scrollToKey = useCallback((key: string): boolean => {
     const el = anchorMapRef.current[key];

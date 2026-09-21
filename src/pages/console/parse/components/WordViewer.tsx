@@ -4,11 +4,16 @@ import {
   downloadTenderDocument,
   getTenderParagraphs,
   getTenderPreviewMeta,
+  getTenderSheetPreview,
+  locateTenderText,
   triggerFileDownload,
+  type TenderLocateHit,
   type TenderParagraph,
+  type TenderSheet,
 } from "@/lib/api";
 import AuthImage from "../../components/AuthImage";
 import { isDocxFile, isImageFile, isPdfFile, isSpreadsheetFile, ensureBlobMime } from "@/lib/tenderPackage";
+import { findContentAnchor, findSheetRow, locateNeedles, type LocateTarget } from "@/lib/tenderAnchor";
 
 interface WordViewerProps {
   projectName: string;
@@ -17,16 +22,33 @@ interface WordViewerProps {
   fileName?: string;
   paragraphs?: TenderParagraph[];
   anchorIndex?: number | null;
+  locateQuery?: LocateTarget | null;
 }
 
 export interface WordViewerHandle {
   scrollToIndex: (index: number) => void;
+  locateText: (text: string, label?: string) => Promise<boolean>;
 }
 
 const zoomOptions = [75, 90, 100, 125, 150];
 
+function colLetter(n: number): string {
+  let s = "";
+  let x = n;
+  while (x > 0) {
+    const m = (x - 1) % 26;
+    s = String.fromCharCode(65 + m) + s;
+    x = Math.floor((x - 1) / 26);
+  }
+  return s;
+}
+
+function compactCell(s: string): string {
+  return (s || "").replace(/\s+/g, "").replace(/[：:、，,。；;．.|｜]/g, "");
+}
+
 const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordViewer(
-  { projectName, projectCode, tenderDocumentId, fileName, paragraphs: paragraphsProp, anchorIndex = null },
+  { projectName, projectCode, tenderDocumentId, fileName, paragraphs: paragraphsProp, anchorIndex = null, locateQuery = null },
   ref,
 ) {
   const [zoom, setZoom] = useState(100);
@@ -40,7 +62,13 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
   const [pdfPages, setPdfPages] = useState(0);
   const [visiblePages, setVisiblePages] = useState(6);
   const [downloading, setDownloading] = useState(false);
+  const [pdfHit, setPdfHit] = useState<TenderLocateHit | null>(null);
+  const [sheets, setSheets] = useState<TenderSheet[]>([]);
+  const [sheetIndex, setSheetIndex] = useState(0);
+  const [sheetHit, setSheetHit] = useState<{ sheet: number; row: number } | null>(null);
   const hostRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const sheetRef = useRef<HTMLDivElement>(null);
 
   const displayName = fileName || projectName || projectCode || "招标文件.docx";
   const isPdf = isPdfFile(displayName);
@@ -62,6 +90,10 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
     setPdfPages(0);
     setVisiblePages(6);
     setParagraphs(paragraphsProp ?? []);
+    setPdfHit(null);
+    setSheets([]);
+    setSheetIndex(0);
+    setSheetHit(null);
 
     if (isPdfFile(fileName || displayName)) {
       getTenderPreviewMeta(tenderDocumentId)
@@ -72,6 +104,31 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
         })
         .catch((err: unknown) => {
           if (!cancelled) setError(err instanceof Error ? err.message : "招标文件原文加载失败");
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+      getTenderParagraphs(tenderDocumentId)
+        .then((paras) => {
+          if (!cancelled) setParagraphs(paras);
+        })
+        .catch(() => {
+          if (!cancelled && !paragraphsProp) setParagraphs([]);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (isSpreadsheetFile(fileName || displayName)) {
+      getTenderSheetPreview(tenderDocumentId)
+        .then((preview) => {
+          if (cancelled) return;
+          setSheets(preview.sheets || []);
+          if (!(preview.sheets || []).length) setError("未能从该 Excel 中还原表格，请另存为 .xlsx 后重新上传");
+        })
+        .catch((err: unknown) => {
+          if (!cancelled) setError(err instanceof Error ? err.message : "Excel 预览失败");
         })
         .finally(() => {
           if (!cancelled) setLoading(false);
@@ -172,26 +229,109 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
     return n;
   };
 
-  const scrollToIndex = useCallback((index: number) => {
-    if (isPdf) return;
-    const para = paragraphs.find((p) => p.index === index);
-    const root = hostRef.current;
-    if (!root || !para?.text) return;
-    const needle = para.text.replace(/\s+/g, "").slice(0, 24);
-    if (!needle) return;
-    const nodes = root.querySelectorAll("p, h1, h2, h3, h4, h5, li, td");
-    for (const el of nodes) {
-      const compact = (el.textContent || "").replace(/\s+/g, "");
-      if (compact.includes(needle)) {
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
-        el.setAttribute("data-tender-flash", "1");
-        window.setTimeout(() => el.removeAttribute("data-tender-flash"), 2800);
-        return;
-      }
-    }
-  }, [paragraphs, isPdf]);
+  const flashNode = (el: Element) => {
+    el.setAttribute("data-tender-flash", "1");
+    window.setTimeout(() => el.removeAttribute("data-tender-flash"), 2800);
+  };
 
-  useImperativeHandle(ref, () => ({ scrollToIndex }), [scrollToIndex]);
+  const locateInDom = useCallback((query: string, label?: string): boolean => {
+    const root = hostRef.current || sheetRef.current;
+    if (!root) return false;
+    const keys = locateNeedles(query, label);
+    if (!keys.length) return false;
+    hostRef.current?.querySelectorAll("[data-tender-flash]").forEach((el) => el.removeAttribute("data-tender-flash"));
+    const nodes = root.querySelectorAll("p, h1, h2, h3, h4, h5, li, td, span");
+    const compact = (s: string) => s.replace(/\s+/g, "").replace(/[：:、，,。；;．.]/g, "");
+    const labelC = compact(label || "");
+    let best: { el: Element; score: number } | null = null;
+    for (const el of nodes) {
+      const raw = (el.textContent || "").trim();
+      const t = compact(raw);
+      if (!t) continue;
+      let score = 0;
+      for (const key of keys) {
+        const k = compact(key);
+        if (k.length < 2) continue;
+        if (t.includes(k) || (k.includes(t) && t.length >= 6)) {
+          score = Math.max(score, k.length + (raw.length < 120 ? 10 : 0));
+        }
+      }
+      if (labelC && t.includes(labelC)) {
+        score += 18;
+        if (/[：:]/.test(raw)) score += 8;
+      }
+      if (/^\d+\.\d+/.test(raw) || /^第[0-9一二三四五六七八九十百]+[章节篇]/.test(raw)) score += 12;
+      if (score > (best?.score ?? 0)) best = { el, score };
+    }
+    if (!best || best.score < 8) return false;
+    best.el.scrollIntoView({ behavior: "smooth", block: "center" });
+    flashNode(best.el);
+    return true;
+  }, []);
+
+  const scrollPdfHit = useCallback((page: number) => {
+    const run = () => {
+      const hitEl = scrollRef.current?.querySelector(`[data-pdf-page="${page}"] .tender-pdf-hit`);
+      const pageEl = scrollRef.current?.querySelector(`[data-pdf-page="${page}"]`);
+      (hitEl || pageEl)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    };
+    window.setTimeout(run, 80);
+    window.setTimeout(run, 400);
+  }, []);
+
+  const locateText = useCallback(
+    async (text: string, label?: string): Promise<boolean> => {
+      const q = (text || "").trim();
+      if (!q) return false;
+      if (isPdf) {
+        try {
+          const hit = await locateTenderText(tenderDocumentId, q, label);
+          if (!hit.found || hit.page < 1 || !(hit.rects || []).length) return false;
+          setVisiblePages((n) => Math.max(n, hit.page + 2));
+          setPdfHit(hit);
+          scrollPdfHit(hit.page);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      if (isSheet) {
+        const best = findSheetRow(sheets, q);
+        if (!best) return false;
+        const hitRow = best.row;
+        setSheetIndex(best.sheet);
+        setSheetHit({ sheet: best.sheet, row: hitRow });
+        window.setTimeout(() => {
+          sheetRef.current?.querySelector(`[data-sheet-row="${hitRow}"]`)?.scrollIntoView({
+            behavior: "smooth",
+            block: "center",
+          });
+        }, 60);
+        return true;
+      }
+      if (locateInDom(q, label)) return true;
+      const para = findContentAnchor(q, paragraphs, label);
+      if (para) return locateInDom(para.text, label);
+      return false;
+    },
+    [isPdf, isSheet, tenderDocumentId, paragraphs, locateInDom, scrollPdfHit, sheets],
+  );
+
+  const scrollToIndex = useCallback((index: number) => {
+    const para = paragraphs.find((p) => p.index === index);
+    if (!para?.text) return;
+    if (isPdf) {
+      if (para.page) {
+        setVisiblePages((n) => Math.max(n, para.page! + 2));
+        setPdfHit({ found: true, page: para.page, pageCount: pdfPages, snippet: para.text, heading: para.text, rects: [] });
+        scrollPdfHit(para.page);
+      }
+      return;
+    }
+    locateInDom(para.text);
+  }, [paragraphs, isPdf, pdfPages, locateInDom, scrollPdfHit]);
+
+  useImperativeHandle(ref, () => ({ scrollToIndex, locateText }), [scrollToIndex, locateText]);
 
   useEffect(() => {
     if (anchorIndex == null || loading) return;
@@ -200,9 +340,17 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
   }, [anchorIndex, loading, scrollToIndex]);
 
   useEffect(() => {
-    if (loading || isPdf) return;
+    if (!locateQuery?.content || loading) return;
+    const timer = window.setTimeout(() => {
+      void locateText(locateQuery.content, locateQuery.label);
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [locateQuery, loading, locateText, tenderDocumentId]);
+
+  useEffect(() => {
+    if (loading || isPdf || isSheet) return;
     markHits(searchQuery);
-  }, [searchQuery, loading, isPdf]);
+  }, [searchQuery, loading, isPdf, isSheet]);
 
   const downloadName = /\.[a-z0-9]+$/i.test(displayName) ? displayName : `${displayName}${isPdf ? ".pdf" : isImage ? ".png" : isSheet ? ".xlsx" : ".docx"}`;
   const showSearch = isDocx || isSheet;
@@ -241,7 +389,7 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
             <span className="mx-1 h-4 w-px bg-background-300" />
           </>
         )}
-        {(fileBlob || isPdf) && (
+        {(fileBlob || isPdf || isSheet) && (
           <button
             type="button"
             onClick={handleDownload}
@@ -259,7 +407,7 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="搜索文档内容…"
+              placeholder={isSheet ? "搜索表格内容…" : "搜索文档内容…"}
               className="h-8 w-44 rounded-md border border-background-300 bg-background-50 pl-8 pr-3 text-xs text-foreground-700 outline-none transition-all focus:w-56 focus:border-primary-400 focus:ring-1 focus:ring-primary-400/20 placeholder:text-foreground-400"
             />
             <span className="flex items-center gap-1 text-[11px] text-primary-600">
@@ -274,7 +422,7 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
         )}
       </div>
 
-      <div className={`relative flex-1 overflow-auto bg-background-200/50 ${isPdf ? "" : "px-4 py-5 md:px-6"}`}>
+      <div ref={scrollRef} className={`relative flex-1 bg-background-200/50 ${isSheet ? "overflow-hidden" : "overflow-auto"} ${isPdf || isSheet ? "" : "px-4 py-5 md:px-6"}`}>
         {(loading || rendering) && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-background-200/80 text-sm text-foreground-500">
             <i className="ri-loader-4-line mr-1.5 animate-spin"></i>
@@ -288,16 +436,50 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
           </div>
         ) : isPdf ? (
           <div className="flex flex-col items-center gap-3 px-3 py-4">
-            {Array.from({ length: Math.min(visiblePages, pdfPages) }, (_, i) => (
-              <AuthImage
-                key={`${tenderDocumentId}-${i + 1}`}
-                eager={i < 2}
-                src={`/api/tender-documents/${tenderDocumentId}/preview-page?page=${i + 1}`}
-                alt={`${displayName} 第 ${i + 1} 页`}
-                className="max-w-full rounded shadow"
-                fallbackText={`第 ${i + 1} 页加载失败`}
-              />
-            ))}
+            {Array.from({ length: Math.min(visiblePages, pdfPages) }, (_, i) => {
+              const pageNo = i + 1;
+              const active = pdfHit?.page === pageNo && (pdfHit.rects || []).length > 0;
+              const badge = [pdfHit?.heading, pdfHit?.snippet].filter(Boolean).join(" · ");
+              return (
+                <div
+                  key={`${tenderDocumentId}-${pageNo}`}
+                  data-pdf-page={pageNo}
+                  className="relative inline-block max-w-full"
+                >
+                  <AuthImage
+                    eager={i < 2 || active}
+                    src={`/api/tender-documents/${tenderDocumentId}/preview-page?page=${pageNo}`}
+                    alt={`${displayName} 第 ${pageNo} 页`}
+                    className="max-w-full rounded shadow"
+                    fallbackText={`第 ${pageNo} 页加载失败`}
+                  />
+                  {active &&
+                    (pdfHit?.rects || []).map((r, ri) => (
+                      <span
+                        key={`${pageNo}-${ri}`}
+                        className="tender-pdf-hit"
+                        style={{
+                          left: `${r.x * 100}%`,
+                          top: `${r.y * 100}%`,
+                          width: `${r.w * 100}%`,
+                          height: `${Math.max(r.h * 100, 1.2)}%`,
+                        }}
+                      />
+                    ))}
+                  {active && badge && (
+                    <div
+                      className="pointer-events-none absolute max-w-[90%] truncate rounded bg-primary-600/90 px-2 py-0.5 text-[10px] font-medium text-background-50"
+                      style={{
+                        left: `${Math.min(86, (pdfHit?.rects?.[0]?.x || 0) * 100)}%`,
+                        top: `calc(${(pdfHit?.rects?.[0]?.y || 0) * 100}% - 22px)`,
+                      }}
+                    >
+                      {badge}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
             {pdfPages > 0 && (
               <div className="text-[11px] text-foreground-500">
                 已显示 {Math.min(visiblePages, pdfPages)} / {pdfPages} 页
@@ -325,9 +507,72 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
             </div>
           )
         ) : isSheet ? (
-          <pre className="whitespace-pre-wrap rounded-md border border-background-200 bg-background-50 p-3 text-[12px] leading-5 text-foreground-800">
-            {paragraphs.length ? paragraphs.map((p) => p.text).join("\n") : "未能从该 Excel 中抽出单元格文字。旧版 .xls 请另存为 .xlsx。"}
-          </pre>
+          <div ref={sheetRef} className="tender-excel">
+            {(() => {
+              const sheet = sheets[sheetIndex];
+              const searchKey = compactCell(searchQuery);
+              if (!sheet?.rows?.length) {
+                return (
+                  <div className="flex h-full min-h-[240px] flex-col items-center justify-center gap-2 px-4 text-center text-sm text-foreground-500">
+                    <i className="ri-table-line text-2xl text-foreground-300"></i>
+                    未能从该 Excel 中还原表格。旧版 .xls 请另存为 .xlsx 后重新上传。
+                  </div>
+                );
+              }
+              const colCount = Math.max(1, ...sheet.rows.map((r) => r.length));
+              return (
+                <>
+                  <div className="tender-excel-scroll">
+                    <table className="tender-excel-grid">
+                      <thead>
+                        <tr>
+                          <th className="tender-excel-corner" />
+                          {Array.from({ length: colCount }, (_, i) => (
+                            <th key={i}>{colLetter(i + 1)}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sheet.rows.map((row, ri) => {
+                          const hit = sheetHit?.sheet === sheetIndex && sheetHit.row === ri;
+                          const searched = !hit && searchKey.length >= 2 && compactCell(row.join("")).includes(searchKey);
+                          return (
+                            <tr
+                              key={ri}
+                              data-sheet-row={ri}
+                              className={hit ? "is-hit" : searched ? "is-search" : undefined}
+                            >
+                              <th>{ri + 1}</th>
+                              {Array.from({ length: colCount }, (_, ci) => (
+                                <td key={ci} title={row[ci] || ""}>
+                                  {row[ci] || ""}
+                                </td>
+                              ))}
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="tender-excel-tabs">
+                    {sheets.map((item, i) => (
+                      <button
+                        key={`${item.name}-${i}`}
+                        type="button"
+                        className={i === sheetIndex ? "is-active" : undefined}
+                        onClick={() => {
+                          setSheetIndex(i);
+                          setSheetHit((prev) => (prev?.sheet === i ? prev : null));
+                        }}
+                      >
+                        {item.name || `工作表${i + 1}`}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              );
+            })()}
+          </div>
         ) : (
           <div
             className="mx-auto w-fit origin-top"
@@ -343,7 +588,7 @@ const WordViewer = forwardRef<WordViewerHandle, WordViewerProps>(function WordVi
           <i className={`${isPdf ? "ri-file-pdf-2-line" : isSheet ? "ri-file-excel-2-line" : isImage ? "ri-image-line" : "ri-file-word-2-line"} text-primary-500`}></i>
           {displayName}
         </span>
-        <span>上传的原{isPdf ? " PDF" : isSheet ? " Excel" : isImage ? " 图片" : " Word"}文档</span>
+        <span>上传的原{isPdf ? " PDF" : isSheet ? " Excel 表格" : isImage ? " 图片" : " Word"}文档{isSheet && sheets[sheetIndex]?.rows?.length ? ` · ${sheets[sheetIndex].rows.length} 行` : ""}</span>
       </div>
     </div>
   );

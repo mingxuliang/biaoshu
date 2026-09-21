@@ -107,6 +107,31 @@ export function issueChapter(location?: string): string {
   return rest[rest.length - 1];
 }
 
+export type IssueRuleKind = "tender" | "review";
+
+/** 招标解析约定、自定义规则 → 招标问题；其余 F 码/版式/虚词等 → 预审规则问题。 */
+export function issueRuleKind(issue: { rule?: string; location?: string }): IssueRuleKind {
+  const blob = `${issue.rule || ""}\n${issue.location || ""}`;
+  if (/招标解析约定|自定义规则/.test(blob)) return "tender";
+  return "review";
+}
+
+export function issueRuleSourceLabel(issue: { rule?: string; location?: string }): string {
+  const blob = `${issue.rule || ""}\n${issue.location || ""}`;
+  if (blob.includes("自定义规则")) return "自定义规则";
+  if (issueRuleKind(issue) === "tender") return "招标条款";
+  return "预审规则";
+}
+
+/** 没有招标条款可对标时，用白话说明这项检查在看什么。 */
+export const NO_TENDER_CLAUSE_HINT =
+  "此项不对照某一条招标条款，而是检查投标书自身写得是否清楚：前后有没有矛盾、有没有空话套话、版式是否规范。";
+
+/** 投标书侧没有可引用原文时的说明。避免「命中句 / 检索 / 定位」等检索口吻，以免被理解成全文关键词查找。 */
+export const NO_BID_EXCERPT_HINT = "对照招标要求，投标书中未见相应的响应内容。";
+export const BID_EXCERPT_HIT_LABEL = "投标书原文（对应内容）";
+export const BID_EXCERPT_MISS_LABEL = "投标书原文（未见对应响应）";
+
 export function issueRuleLabel(issue: { rule?: string; suggestion?: string; strategyKey?: string; strategyCategory?: string }): string {
   if (issue.strategyCategory) {
     const name = STRATEGY_ALIAS[issue.strategyCategory] || issue.strategyCategory;
@@ -126,5 +151,5 @@ export function issueRuleLabel(issue: { rule?: string; suggestion?: string; stra
   }
   const raw = (issue.rule || "").trim();
   if (!raw || /五维语义评审/.test(raw)) return raw.replace(/（AI 生成，供参考）/g, "").trim() || "五维语义评审";
-  return raw;
+  return raw.replace(/^F\d{2}\.\d{2}\s+/, "").trim() || raw;
 }

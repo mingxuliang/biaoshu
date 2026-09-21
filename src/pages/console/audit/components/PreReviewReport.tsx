@@ -1,6 +1,7 @@
+import { useState } from "react";
 import type { PreReviewLevel, PreReviewIssue } from "@/mocks/preReview";
-import type { BidScope, TechModuleScore } from "@/lib/api";
-import { issueChapter, issueRuleLabel, splitBidAndTender } from "@/lib/excerpt";
+import type { BidScope, CustomRuleReview, TechModuleScore, TenderRuleReport } from "@/lib/api";
+import { BID_EXCERPT_HIT_LABEL, BID_EXCERPT_MISS_LABEL, issueChapter, issueRuleKind, issueRuleLabel, issueRuleSourceLabel, NO_BID_EXCERPT_HINT, NO_TENDER_CLAUSE_HINT, splitBidAndTender, type IssueRuleKind } from "@/lib/excerpt";
 
 interface PreReviewReportProps {
   projectName: string;
@@ -18,6 +19,8 @@ interface PreReviewReportProps {
   onCopy: () => void;
   exporting?: boolean;
   scope?: BidScope;
+  tenderRules?: TenderRuleReport | null;
+  customRules?: CustomRuleReview[] | null;
 }
 
 const levelStyle: Record<string, string> = {
@@ -35,6 +38,69 @@ const severityStyle: Record<string, string> = {
   建议: "bg-primary-50 text-primary-600 border-primary-200",
 };
 
+export function CustomRulesReviewBlock({ rules }: { rules?: CustomRuleReview[] | null }) {
+  const rows = rules || [];
+  if (!rows.length) {
+    return (
+      <p className="rounded-lg border border-dashed border-background-300 bg-background-50 px-3 py-5 text-center text-sm text-foreground-500">
+        本轮预审尚未纳入自定义规则对照。若解析页已添加规则，请再跑一轮预审。
+      </p>
+    );
+  }
+  const unanswered = rows.filter((r) => r.status === "未响应").length;
+  return (
+    <div>
+      <p className="mb-3 text-xs leading-relaxed text-foreground-500">
+        来自招标解析页人工补充的规则，逐条对照投标书是否响应。共 {rows.length} 条，未响应 {unanswered} 条。
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[640px] text-left text-sm">
+          <thead>
+            <tr className="font-label border-b border-background-300 text-xs text-foreground-500">
+              <th className="py-2 pr-3 font-medium">规则</th>
+              <th className="py-2 pr-3 font-medium">来源</th>
+              <th className="py-2 pr-3 text-center font-medium">严重程度</th>
+              <th className="py-2 pr-3 text-center font-medium">对照结果</th>
+              <th className="py-2 font-medium">说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((rule, idx) => (
+              <tr key={rule.id || `${rule.title}-${idx}`} className="border-b border-background-200 last:border-0 align-top">
+                <td className="py-2.5 pr-3">
+                  <div className="font-medium text-foreground-900">{rule.title || "未命名规则"}</div>
+                  {rule.content ? (
+                    <div className="mt-0.5 text-[11px] leading-relaxed text-foreground-500">{rule.content}</div>
+                  ) : null}
+                </td>
+                <td className="py-2.5 pr-3 whitespace-nowrap text-xs text-foreground-600">{rule.sourceLabel || "—"}</td>
+                <td className="py-2.5 pr-3 text-center">
+                  <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${severityStyle[rule.severity] || severityStyle["扣分"]}`}>
+                    {rule.severity || "扣分"}
+                  </span>
+                </td>
+                <td className="py-2.5 pr-3 text-center">
+                  <span
+                    className={`font-label inline-flex rounded-md px-2 py-0.5 text-xs font-medium ${
+                      rule.status === "已响应" ? "bg-primary-50 text-primary-600" : "bg-accent-50 text-accent-600"
+                    }`}
+                  >
+                    {rule.status}
+                  </span>
+                </td>
+                <td className="py-2.5 text-xs leading-relaxed text-foreground-600">
+                  {rule.reason || (rule.status === "已响应" ? "投标书已覆盖该规则。" : "投标书未确认对应表述。")}
+                  {rule.excerpt ? ` 对应内容：「${rule.excerpt}」` : ""}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export default function PreReviewReport({
   projectName,
   projectCode,
@@ -51,6 +117,8 @@ export default function PreReviewReport({
   onCopy,
   exporting = false,
   scope = "full",
+  tenderRules = null,
+  customRules = null,
 }: PreReviewReportProps) {
   const wasteCount = waste ?? issues.filter((i) => i.severity === "废标" || i.severity === "降档").length;
   const riskCount = risk ?? issues.filter((i) => i.severity === "扣分").length;
@@ -58,8 +126,15 @@ export default function PreReviewReport({
   const moduleGaps = techModules.filter((m) => m.status && m.status !== "达标");
   const isSecondReview = round >= 4;
   const levelKeys = scope === "business" ? ["L1", "L2"] : ["L3", "L4", "L5"];
+  const isCustomIssue = (issue: PreReviewIssue) =>
+    (issue.rule || "").startsWith("自定义规则") || (issue.location || "").startsWith("自定义规则");
   const shownLevels = levels.filter((level) => levelKeys.includes(level.key));
-  const shownIssues = issues.filter((issue) => levelKeys.includes(issue.level));
+  const shownIssues = issues.filter((issue) => levelKeys.includes(issue.level) || isCustomIssue(issue));
+  const [issueKind, setIssueKind] = useState<IssueRuleKind>("tender");
+  const tenderIssues = shownIssues.filter((issue) => issueRuleKind(issue) === "tender");
+  const reviewIssues = shownIssues.filter((issue) => issueRuleKind(issue) === "review");
+  const listedIssues = issueKind === "tender" ? tenderIssues : reviewIssues;
+  const coverage = tenderRules?.coverage;
   const scoreLabel = scope === "business" ? "商务标得分" : "技术标得分";
 
   return (
@@ -75,7 +150,9 @@ export default function PreReviewReport({
               {scope === "business" ? "商务标预审报告" : "技术标预审报告"}
             </h3>
             <p className="text-xs text-foreground-500">
-              慧投标 AI · {scope === "business" ? "商务分册" : "技术分册"} · 第 {round} 轮预审{isSecondReview ? "（修改后）" : ""}
+              智标云 AI · {scope === "business" ? "商务分册" : "技术分册"} · 第 {round} 轮预审{isSecondReview ? "（修改后）" : ""}
+              {coverage?.checklistVersion ? ` · 尺子 v${coverage.checklistVersion}` : ""}
+              {coverage?.weightName ? ` · ${coverage.weightName}` : ""}
             </p>
           </div>
         </div>
@@ -262,35 +339,61 @@ export default function PreReviewReport({
           </>
         )}
 
-        {/* 四、预审问题与原文对照 */}
-        <h4 className="mb-2.5 mt-6 flex items-center gap-1.5 text-sm font-semibold text-foreground-900">
-          <i className="ri-file-list-3-line text-accent-500 text-sm"></i>
-          四、预审问题清单（投标书原文 ↔ 招标书要求原文）
-        </h4>
-        <p className="mb-3 text-xs leading-relaxed text-foreground-500">
-          以下问题均定位到投标书与招标书原文，可直接核对偏差，作为修改闭环的输入。
-        </p>
+        {/* 四、预审问题（有据才列出） */}
+        <div className="mb-2.5 mt-6 flex flex-wrap items-center justify-between gap-2">
+          <h4 className="flex items-center gap-1.5 text-sm font-semibold text-foreground-900">
+            <i className="ri-file-list-3-line text-accent-500 text-sm"></i>
+            四、预审问题清单
+          </h4>
+          <div className="inline-flex rounded-lg border border-background-300 bg-background-50 p-0.5">
+            {([
+              ["tender", "招标问题", tenderIssues.length],
+              ["review", "预审规则问题", reviewIssues.length],
+            ] as const).map(([key, label, count]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setIssueKind(key)}
+                className={`cursor-pointer rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                  issueKind === key
+                    ? "bg-gradient-to-r from-primary-500 to-primary-600 text-background-50"
+                    : "text-foreground-600 hover:text-foreground-900"
+                }`}
+              >
+                {label} · {count}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="space-y-3">
-          {shownIssues.map((issue) => {
+          {listedIssues.map((issue) => {
             const { excerpt, tenderQuote } = splitBidAndTender(issue.excerpt, issue.tenderQuote, issue.rule);
             const chapter = issueChapter(issue.location);
             const ruleLabel = issueRuleLabel(issue);
+            const ruleSource = issueRuleSourceLabel(issue);
             return (
             <div key={issue.id} className="overflow-hidden rounded-lg border border-background-200">
+              <div className="flex flex-wrap items-center gap-2 border-b border-accent-200 bg-accent-50 px-3 py-2">
+                <span className="inline-flex items-center gap-1 rounded bg-accent-500 px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-background-50">
+                  <i className="ri-price-tag-3-line"></i>
+                  命中规则
+                </span>
+                <span className="min-w-0 flex-1 text-sm font-semibold leading-snug text-accent-800">{ruleLabel}</span>
+                <span className="font-label shrink-0 rounded border border-accent-200 bg-background-50 px-1.5 py-0.5 text-[10px] text-accent-700">{ruleSource}</span>
+              </div>
               <div className="flex flex-wrap items-center gap-2 border-b border-background-200 bg-background-50 px-3 py-2">
                 <span className="font-label inline-flex items-center rounded bg-background-200 px-1.5 py-0.5 text-[10px] text-foreground-600">{issue.level}</span>
                 <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${severityStyle[issue.severity]}`}>{issue.severity}</span>
                 <span className="font-label text-[11px] text-foreground-500">章节：{chapter || "未标注章节"}</span>
-                <span className="font-label ml-auto rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700">{ruleLabel}</span>
               </div>
               <div className="grid grid-cols-1 gap-3 p-3 sm:grid-cols-2">
                 <div className="rounded-md border border-accent-200 bg-accent-50/40 p-3">
                   <div className="mb-1.5 flex items-center gap-1 text-[11px] font-medium text-accent-600">
                     <i className="ri-file-text-line"></i>
-                    {excerpt ? "投标书原文（命中句）" : "投标书原文（未定位到对应句）"}
+                    {excerpt ? BID_EXCERPT_HIT_LABEL : BID_EXCERPT_MISS_LABEL}
                   </div>
                   <p className="text-sm leading-relaxed text-foreground-800">
-                    {excerpt ? `「${excerpt}」` : "本项为缺项/未响应，投标书中没有可引用的命中句"}
+                    {excerpt ? `「${excerpt}」` : NO_BID_EXCERPT_HINT}
                   </p>
                 </div>
                 <div className="rounded-md border border-primary-200 bg-primary-50/40 p-3">
@@ -299,7 +402,7 @@ export default function PreReviewReport({
                     招标书要求原文（对标条款）
                   </div>
                   <p className="text-sm leading-relaxed text-foreground-800">
-                    {tenderQuote ? `「${tenderQuote}」` : "本项为投标书自洽核验，无对应招标条款"}
+                    {tenderQuote ? `「${tenderQuote}」` : NO_TENDER_CLAUSE_HINT}
                   </p>
                 </div>
               </div>
@@ -313,7 +416,7 @@ export default function PreReviewReport({
             </div>
             );
           })}
-          {shownIssues.length === 0 && moduleGaps.length > 0 && moduleGaps.map((m) => (
+          {listedIssues.length === 0 && issueKind === "review" && shownIssues.length === 0 && moduleGaps.length > 0 && moduleGaps.map((m) => (
             <div key={m.key} className="overflow-hidden rounded-lg border border-background-200">
               <div className="flex flex-wrap items-center gap-2 border-b border-background-200 bg-background-50 px-3 py-2">
                 <span className="font-label inline-flex items-center rounded bg-background-200 px-1.5 py-0.5 text-[10px] text-foreground-600">L3</span>
@@ -324,19 +427,28 @@ export default function PreReviewReport({
               <div className="px-3 py-2 text-xs leading-relaxed text-foreground-600">{m.summary}</div>
             </div>
           ))}
-          {shownIssues.length === 0 && moduleGaps.length === 0 && (
+          {listedIssues.length === 0 && !(issueKind === "review" && shownIssues.length === 0 && moduleGaps.length > 0) && (
             <p className="rounded-lg border border-dashed border-background-300 bg-background-50 px-3 py-6 text-center text-sm text-foreground-500">
-              {wasteCount + riskCount + suggestCount > 0
+              {shownIssues.length === 0 && wasteCount + riskCount + suggestCount > 0
                 ? "分层得分已扣分，但问题明细未写入。请重新发起一轮预审以生成问题清单。"
-                : "本轮未检出需列出的预审问题。"}
+                : issueKind === "tender"
+                  ? "当前暂无招标问题。"
+                  : "当前暂无预审规则问题。"}
             </p>
           )}
         </div>
 
-        {/* 五、预审结论 */}
+        {/* 五、自定义规则对照 */}
+        <h4 className="mb-2.5 mt-6 flex items-center gap-1.5 text-sm font-semibold text-foreground-900">
+          <i className="ri-list-check-3 text-primary-500 text-sm"></i>
+          五、自定义规则对照
+        </h4>
+        <CustomRulesReviewBlock rules={customRules} />
+
+        {/* 六、预审结论 */}
         <h4 className="mb-2.5 mt-6 flex items-center gap-1.5 text-sm font-semibold text-foreground-900">
           <i className="ri-check-double-line text-primary-500 text-sm"></i>
-          五、预审结论
+          六、预审结论
         </h4>
         <div className={`rounded-lg p-3.5 ${isSecondReview ? "border border-primary-300 bg-primary-50/40" : "border border-primary-200 bg-primary-50/40"}`}>
           <p className="text-sm leading-relaxed text-foreground-600">

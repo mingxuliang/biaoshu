@@ -156,7 +156,7 @@ def package_slots(docs: Iterable[Any]) -> list[dict]:
 
 
 KIND_DISPLAY = {
-    KIND_MAIN: "写入右侧全部固定指标（基础审核、资格与合规、技术/商务评分、废标风险等）；专用合同条款写入「商务评分」",
+    KIND_MAIN: "写入右侧全部固定指标（基础审核、资格与合规、技术/商务评分、废标风险等）；专用合同条款写入「技术评分」",
     KIND_ADDENDUM: "与正文冲突时以补遗为准，覆盖写入各相关维度；合同技术指标以答疑最新口径覆盖",
     KIND_BOQ: "「清单、图纸与其他」→ 工程量清单（项目名称、计量单位、工程数量、备注）",
     KIND_QUOTE: "「其他材料」提炼摘要；含评审条款时写入评分尺子，不写入报价评审",
@@ -290,7 +290,8 @@ def extract_pptx_text(path: str, max_chars: int = 80_000) -> str:
 
 def extract_plain_text(path: str, ext: str = ".txt", max_chars: int = 80_000) -> str:
     try:
-        raw = open(path, "rb").read()
+        with open(path, "rb") as fh:
+            raw = fh.read()
     except Exception:
         return ""
     text = raw.decode("utf-8", errors="ignore")
@@ -647,37 +648,166 @@ def extract_image_text(path: str) -> tuple[str, str]:
 
 
 def extract_file_text(path: str, *, kind: str = KIND_MAIN, filename: str = "") -> str:
-    """按扩展名抽文；图纸类截短，避免整卷 CAD/扫描件撑爆模型。"""
+    return str(extract_file_bundle(path, kind=kind, filename=filename).get("text") or "")
+
+
+def extract_file_bundle(path: str, *, kind: str = KIND_MAIN, filename: str = "") -> dict:
+    """抽文并带统计。压缩包解包；.doc/.xls 尝试转换。"""
+    stats: dict = {"ocrPages": 0, "unpackedFiles": 0, "pages": 0, "error": ""}
+    text, extra = _extract_file_inner(path, kind=kind, filename=filename, stats=stats)
+    cap = _TEXT_CAPS.get(kind, 80_000)
+    return {
+        "text": (text or "")[:cap],
+        "stats": stats,
+        "boqItems": extra.get("boqItems") or [],
+        "error": stats.get("error") or "",
+    }
+
+
+def _extract_file_inner(path: str, *, kind: str, filename: str, stats: dict) -> tuple[str, dict]:
+    extra: dict = {"boqItems": []}
     ext = os.path.splitext((filename or path) or "")[1].lower()
     cap = _TEXT_CAPS.get(kind, 80_000)
     if ext == ".xls":
-        return "该文件为旧版 .xls，未能抽取单元格文字。请另存为 .xlsx 后重新上传。"
+        try:
+            from .legacy_doc import as_xlsx
+
+            with as_xlsx(path) as xlsx_path:
+                text = extract_xlsx_text(xlsx_path, max_chars=cap)
+                extra["boqItems"] = extract_boq_items(xlsx_path, filename=(filename or "sheet.xlsx"))
+                return text, extra
+        except Exception as exc:  # noqa: BLE001
+            stats["error"] = f"旧版 .xls 转换失败（{exc}）。请另存为 .xlsx 后重新上传。"
+            return "", extra
     if ext == ".xlsx":
-        return extract_xlsx_text(path, max_chars=cap)
+        extra["boqItems"] = extract_boq_items(path, filename=filename) if kind == KIND_BOQ else []
+        return extract_xlsx_text(path, max_chars=cap), extra
     if ext == ".pptx":
-        return extract_pptx_text(path, max_chars=cap)
+        return extract_pptx_text(path, max_chars=cap), extra
     if ext in TEXT_EXTS:
-        return extract_plain_text(path, ext=ext, max_chars=cap)
-    if ext in ARCHIVE_EXTS or ext in {".ppt", ".doc"}:
-        return f"已上传「{filename or os.path.basename(path)}」，该格式仅存档，未能抽取正文。"
+        return extract_plain_text(path, ext=ext, max_chars=cap), extra
+    if ext in ARCHIVE_EXTS:
+        return _extract_archive(path, kind=kind, filename=filename, stats=stats)
+    if ext == ".ppt":
+        stats["error"] = f"已上传「{filename or os.path.basename(path)}」，暂不支持旧版 .ppt，请另存为 .pptx。"
+        return "", extra
+    if ext == ".doc":
+        try:
+            from .legacy_doc import as_docx
+            from .docx_extract import extract_full_text
+
+            with as_docx(path) as docx_path:
+                return (extract_full_text(docx_path) or "")[:cap], extra
+        except Exception as exc:  # noqa: BLE001
+            stats["error"] = f"旧版 .doc 转换失败（{exc}）。请另存为 .docx 后重新上传。"
+            return "", extra
     if ext in IMAGE_EXTS:
         text, status = extract_image_text(path)
         if text:
-            return text[:cap]
+            return text[:cap], extra
         if status == "unavailable":
-            return "施工图纸/图片已上传，当前环境未启用 OCR，未能识别图面文字。"
-        return "施工图纸/图片已上传，扫描件未识别到文字。"
+            stats["error"] = "当前环境未启用 OCR，未能识别图面文字。"
+            return "", extra
+        stats["error"] = "扫描件未识别到文字。"
+        return "", extra
     from .docx_extract import extract_full_text
 
     if ext == ".pdf":
-        text = extract_full_text(path)
-        if kind == KIND_DRAWING:
-            return (text or "")[:cap]
-        return (text or "")[:cap] if kind != KIND_MAIN else (text or "")[: _TEXT_CAPS[KIND_MAIN]]
+        ocr_limit = 25 if kind == KIND_DRAWING else 80
+        text = extract_full_text(path, max_ocr_pages=ocr_limit, stats=stats)
+        return (text or "")[:cap], extra
     if ext == ".docx":
         text = extract_full_text(path)
-        return (text or "")[:cap]
-    return ""
+        return (text or "")[:cap], extra
+    stats["error"] = f"不支持的文件格式（{ext or '无扩展名'}）"
+    return "", extra
+
+
+def _extract_archive(path: str, *, kind: str, filename: str, stats: dict) -> tuple[str, dict]:
+    extra: dict = {"boqItems": []}
+    ext = os.path.splitext((filename or path) or "")[1].lower()
+    out_dir = ""
+    try:
+        members, out_dir = _unpack_archive(path, ext)
+    except Exception as exc:  # noqa: BLE001
+        stats["error"] = str(exc) or "压缩包无法解压，请解压后按槽位重新上传。"
+        return "", extra
+    try:
+        if not members:
+            stats["error"] = f"压缩包「{filename or os.path.basename(path)}」内没有可抽取的文件。"
+            return "", extra
+        stats["unpackedFiles"] = len(members)
+        chunks: list[str] = []
+        boq: list[dict] = []
+        for member_path, member_name in members:
+            inner_kind = guess_kind(member_name) if guess_kind(member_name) != KIND_MAIN else kind
+            inner_stats: dict = {"ocrPages": 0, "unpackedFiles": 0, "pages": 0, "error": ""}
+            text, inner_extra = _extract_file_inner(
+                member_path, kind=inner_kind, filename=member_name, stats=inner_stats
+            )
+            stats["ocrPages"] += int(inner_stats.get("ocrPages") or 0)
+            stats["pages"] += int(inner_stats.get("pages") or 0)
+            if inner_stats.get("error"):
+                chunks.append(f"【压缩包内：{member_name}】{inner_stats['error']}")
+                continue
+            if text.strip():
+                chunks.append(f"【压缩包内：{member_name}】\n{text}")
+            boq.extend(inner_extra.get("boqItems") or [])
+        extra["boqItems"] = boq
+        joined = "\n\n".join(chunks)
+        if not joined.strip():
+            stats["error"] = f"压缩包「{filename or os.path.basename(path)}」解压后仍未抽出正文。"
+        return joined, extra
+    finally:
+        if out_dir:
+            import shutil
+
+            shutil.rmtree(out_dir, ignore_errors=True)
+
+
+def _unpack_archive(path: str, ext: str) -> tuple[list[tuple[str, str]], str]:
+    import shutil
+    import tempfile
+
+    skip = {"__macosx", "thumbs.db", ".ds_store"}
+    out_dir = tempfile.mkdtemp(prefix="tender-zip-")
+    if ext == ".zip":
+        with zipfile.ZipFile(path) as zf:
+            zf.extractall(out_dir)
+    elif ext in {".rar", ".7z"}:
+        binary = shutil.which("7z") or shutil.which("7za")
+        if not binary:
+            shutil.rmtree(out_dir, ignore_errors=True)
+            raise RuntimeError("当前环境无法解压 rar/7z，请先解压后按槽位上传 Word/PDF/Excel。")
+        import subprocess
+
+        proc = subprocess.run(
+            [binary, "x", f"-o{out_dir}", "-y", os.path.abspath(path)],
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+        if proc.returncode != 0:
+            shutil.rmtree(out_dir, ignore_errors=True)
+            raise RuntimeError("rar/7z 解压失败，请先解压后按槽位上传。")
+    else:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        raise RuntimeError("不支持的压缩格式")
+    members: list[tuple[str, str]] = []
+    try:
+        for root, _dirs, files in os.walk(out_dir):
+            for name in files:
+                if name.lower() in skip or name.startswith("."):
+                    continue
+                full = os.path.join(root, name)
+                rel = os.path.relpath(full, out_dir).replace("\\", "/")
+                if any(part.lower() in skip for part in rel.split("/")):
+                    continue
+                members.append((full, name))
+    except Exception:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        raise
+    return members, out_dir
 
 
 def extract_as_paragraphs(path: str, filename: str = "") -> list[dict]:
@@ -686,6 +816,13 @@ def extract_as_paragraphs(path: str, filename: str = "") -> list[dict]:
         from .docx_extract import extract_paragraphs
 
         return extract_paragraphs(path)
+    if ext == ".pdf":
+        try:
+            from .tender_locate import pdf_paragraphs
+
+            return pdf_paragraphs(path)
+        except Exception:
+            pass
     text = extract_file_text(path, kind=guess_kind(filename), filename=filename)
     if not text.strip():
         return []
@@ -884,6 +1021,14 @@ _BOQ_NOISE_EXACT = {
 def extract_boq_items(path: str, filename: str = "") -> list[dict[str, str]]:
     """从工程量清单 xlsx 抽出项目名称、计量单位、工程数量、备注（含分部标题行）。"""
     ext = os.path.splitext((filename or path) or "")[1].lower()
+    if ext == ".xls":
+        try:
+            from .legacy_doc import as_xlsx
+
+            with as_xlsx(path) as xlsx_path:
+                return extract_boq_items(xlsx_path, filename="sheet.xlsx")
+        except Exception:
+            return []
     if ext != ".xlsx":
         return []
     items: list[dict[str, str]] = []
@@ -1032,6 +1177,41 @@ def _xlsx_col_row(ref: str) -> tuple[int, int]:
     except ValueError:
         row_i = 0
     return col, row_i
+
+
+def extract_xlsx_preview(path: str, *, max_rows: int = 1500, max_cols: int = 36) -> list[dict]:
+    """还原工作表格子，供解析页按表格预览，而不是竖杠拼接文本。"""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".xls":
+        try:
+            from .legacy_doc import as_xlsx
+
+            with as_xlsx(path) as xlsx_path:
+                return extract_xlsx_preview(xlsx_path, max_rows=max_rows, max_cols=max_cols)
+        except Exception:
+            return []
+    sheets_out: list[dict] = []
+    for title, rows in _iter_xlsx_grids(path):
+        if not rows:
+            continue
+        usable = {r: cells for r, cells in rows.items() if r <= max_rows}
+        if not usable:
+            continue
+        max_r = max(usable)
+        max_c = 1
+        for cells in usable.values():
+            if cells:
+                max_c = max(max_c, max(cells))
+        max_c = min(max_c, max_cols)
+        grid: list[list[str]] = []
+        for r in range(1, max_r + 1):
+            cells = usable.get(r, {})
+            grid.append([cells.get(c, "") for c in range(1, max_c + 1)])
+        while grid and not any((c or "").strip() for c in grid[-1]):
+            grid.pop()
+        if grid:
+            sheets_out.append({"name": title or f"工作表{len(sheets_out) + 1}", "rows": grid})
+    return sheets_out
 
 
 def _snippet_around(text: str, keys: tuple[str, ...], window: int = 180) -> str:

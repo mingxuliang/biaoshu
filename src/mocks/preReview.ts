@@ -25,6 +25,11 @@ export interface PreReviewIssue {
   strategyPoint?: string;
   strategyClauses?: string[];
   applyText?: string;
+  issueClass?: "auto_veto" | "human_check" | "writing" | string;
+  /** 修改闭环目录章节 id，来自投标书正文标题树 */
+  sectionId?: string;
+  /** 投标书章节标题，供清单按章分类 */
+  chapter?: string;
 }
 
 export const preReviewLevels: PreReviewLevel[] = [

@@ -54,6 +54,9 @@ def ensure_schema() -> None:
             text("ALTER TABLE review_runs ADD COLUMN IF NOT EXISTS tender_rules_json JSON DEFAULT '{}'::json")
         )
         conn.execute(
+            text("ALTER TABLE review_runs ADD COLUMN IF NOT EXISTS custom_rules_json JSON DEFAULT '[]'::json")
+        )
+        conn.execute(
             text(
                 "UPDATE qualification_assets SET kind = 'cert' "
                 "WHERE kind = 'credit' AND ("

@@ -156,6 +156,7 @@ class ReviewRun(Base):
     dimensions_json = Column(JSON, default=list)
     tech_modules_json = Column(JSON, default=list)  # 技术评分模块逐项打分明细，供预审报告展示
     tender_rules_json = Column(JSON, default=dict)  # 招标书自带商务/技术评分规则的模拟评标报告
+    custom_rules_json = Column(JSON, default=list)  # 解析页自定义规则逐条对照结果
 
     error_message = Column(Text, nullable=True)
     started_at = Column(DateTime, default=datetime.utcnow)

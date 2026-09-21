@@ -1,15 +1,12 @@
 import type { BidSection } from "@/lib/api";
+import { UNASSIGNED_HEADING, UNASSIGNED_SECTION_ID } from "@/lib/reviewChapters";
 
 interface DocTreeProps {
   sections: BidSection[];
   activeSectionId: string | null;
-  activeIssueId: string | null;
+  issueCounts?: Record<string, number>;
+  unassignedCount?: number;
   onSelectSection: (sectionId: string) => void;
-}
-
-interface SectionNode {
-  section: BidSection;
-  issueCount: number;
 }
 
 const levelPad: Record<number, string> = {
@@ -30,15 +27,13 @@ const levelText: Record<number, string> = {
   3: "text-xs font-medium text-foreground-700",
 };
 
-export default function DocTree({ sections, activeSectionId, activeIssueId, onSelectSection }: DocTreeProps) {
-  const tree: SectionNode[] = sections.map((section) => {
-    let issueCount = 0;
-    section.paragraphs.forEach((p) => {
-      if (p.problem) issueCount += 1;
-    });
-    return { section, issueCount };
-  });
-
+export default function DocTree({
+  sections,
+  activeSectionId,
+  issueCounts = {},
+  unassignedCount = 0,
+  onSelectSection,
+}: DocTreeProps) {
   return (
     <div className="flex h-full flex-col overflow-hidden rounded-lg border border-background-300 bg-background-100">
       <div className="flex items-center justify-between border-b border-background-300 bg-background-50 px-4 py-3">
@@ -46,12 +41,13 @@ export default function DocTree({ sections, activeSectionId, activeIssueId, onSe
           <i className="ri-bookmark-3-line text-primary-500"></i>
           文档目录
         </div>
-        <span className="font-label text-[11px] text-foreground-500">{tree.length} 章</span>
+        <span className="font-label text-[11px] text-foreground-500">{sections.length} 章</span>
       </div>
       <div className="flex-1 overflow-y-auto p-2">
         <div className="space-y-0.5">
-          {tree.map(({ section, issueCount }) => {
+          {sections.map((section) => {
             const active = activeSectionId === section.id;
+            const issueCount = issueCounts[section.id] || 0;
             return (
               <button
                 key={section.id}
@@ -77,12 +73,39 @@ export default function DocTree({ sections, activeSectionId, activeIssueId, onSe
               </button>
             );
           })}
+          {unassignedCount > 0 && (
+            <button
+              type="button"
+              onClick={() => onSelectSection(UNASSIGNED_SECTION_ID)}
+              className={`mt-1 flex w-full cursor-pointer items-center gap-2 rounded-md py-1.5 pl-2 pr-2 text-left transition-all duration-200 ${
+                activeSectionId === UNASSIGNED_SECTION_ID
+                  ? "bg-primary-50/80 ring-1 ring-primary-200"
+                  : "hover:bg-background-200/70"
+              }`}
+            >
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-secondary-400" />
+              <span
+                className={`min-w-0 flex-1 truncate text-xs font-medium ${
+                  activeSectionId === UNASSIGNED_SECTION_ID ? "text-primary-700" : "text-foreground-700"
+                }`}
+              >
+                {UNASSIGNED_HEADING}
+              </span>
+              <span
+                className={`font-label flex h-4 shrink-0 items-center whitespace-nowrap rounded-full px-1.5 text-[10px] font-semibold ${
+                  activeSectionId === UNASSIGNED_SECTION_ID ? "bg-accent-500 text-background-50" : "bg-accent-100 text-accent-700"
+                }`}
+              >
+                {unassignedCount}
+              </span>
+            </button>
+          )}
         </div>
       </div>
       <div className="border-t border-background-300 bg-background-50 px-4 py-2.5">
         <p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-foreground-500">
           <i className="ri-map-pin-2-line mt-0.5 shrink-0 text-primary-500"></i>
-          点击章节锚定到源文件对应位置；数字为该章节待整改问题数。
+          点击章节锚定到源文件对应位置，右侧按该章及子节列出问题。数字为待整改问题数。
         </p>
       </div>
     </div>

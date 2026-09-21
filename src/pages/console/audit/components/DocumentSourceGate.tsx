@@ -78,7 +78,7 @@ function docsForSlot(docs: BidDocumentSummary[], slot: BidSlot): BidDocumentSumm
   });
 }
 
-const ACCEPT = ".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const ACCEPT = ".docx,.pdf,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const MISSING = "未能上传该类型文件";
 
 export default function DocumentSourceGate({ projectId, projectName, projectCode, onContinue }: DocumentSourceGateProps) {
@@ -130,8 +130,8 @@ export default function DocumentSourceGate({ projectId, projectName, projectCode
   };
 
   const pickUpload = (slot: BidSlot, file: File) => {
-    if (!/\.docx$/i.test(file.name)) {
-      setUploadErr((e) => ({ ...e, [slot]: "仅支持 .docx（请另存为 .docx 后重新上传）" }));
+    if (!/\.(docx|pdf)$/i.test(file.name)) {
+      setUploadErr((e) => ({ ...e, [slot]: "仅支持 .docx 或 PDF" }));
       return;
     }
     const mb = (file.size / 1024 / 1024).toFixed(1);
@@ -222,9 +222,9 @@ export default function DocumentSourceGate({ projectId, projectName, projectCode
           >
             <i className={`${selected?.kind === "upload" ? "ri-file-word-2-line" : "ri-upload-cloud-2-line"} text-xl text-primary-500`}></i>
             <span className="text-xs font-medium text-foreground-700">
-              {selected?.kind === "upload" ? selected.name : `上传${meta.label} Word`}
+              {selected?.kind === "upload" ? selected.name : `上传${meta.label}`}
             </span>
-            <span className="text-[11px] text-foreground-500">仅 .docx</span>
+            <span className="text-[11px] text-foreground-500">.docx 或 PDF</span>
           </button>
           <input
             ref={inputRef}

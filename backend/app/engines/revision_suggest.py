@@ -27,9 +27,9 @@ def fallback_suggestion(issue: dict) -> str:
     quote = str(issue.get("tenderQuote") or "").strip()
     excerpt = str(issue.get("excerpt") or "").strip()
     if excerpt:
-        return f"请按预审规则「{rule}」改写命中句，补全可核验的响应内容，删除空话与未响应表述。"
+        return f"请按预审规则「{rule}」改写对应内容，补全可核验的响应，删除空话与未响应表述。"
     if quote:
-        return f"投标书未定位到对应句。请按预审规则「{rule}」补写对标响应，落实招标要求：「{quote[:80]}」。"
+        return f"对照招标要求，投标书中未见相应的响应内容。请按预审规则「{rule}」补写对标响应，落实招标要求：「{quote[:80]}」。"
     return f"请按预审规则「{rule}」补全可核验的响应内容。"
 
 
@@ -48,8 +48,8 @@ def llm_write_suggestion(issue: dict) -> str:
         f"层级/严重度：{issue.get('level') or ''} / {severity}\n"
         f"定位：{location}\n"
         f"预审规则：{rule}\n"
-        f"招标对标原文：{quote or '（无，投标书自洽核验）'}\n"
-        f"投标书命中句：{excerpt or '（缺项/未定位）'}\n"
+        f"招标对标原文：{quote or '（此项不对照某一条招标条款，检查投标书自身是否写清楚）'}\n"
+        f"投标书对应内容：{excerpt or '（对照招标要求，未见相应响应）'}\n"
     )
     try:
         raw = chat_complete(

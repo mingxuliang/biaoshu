@@ -33,7 +33,7 @@ export default function TenderRuleReportView({ projectName, projectCode, round, 
           <div>
             <h3 className="font-heading text-base font-semibold tracking-wide text-foreground-950">招标规则预审报告</h3>
             <p className="text-xs text-foreground-500">
-              模拟评委通读投标全文后，按本项目招标评分规则原文逐条赋分 · 第 {round} 轮
+              模拟评委按本项目招标规则原文逐条赋分，仅供自查，不是评标委员会得分 · 第 {round} 轮
             </p>
           </div>
         </div>
@@ -53,7 +53,7 @@ export default function TenderRuleReportView({ projectName, projectCode, round, 
       <div className="px-5 py-5 md:px-8">
         {!empty && !data?.judgeMode ? (
           <div className="mb-4 rounded-lg border border-accent-200 bg-accent-50/60 px-3 py-2 text-xs text-foreground-700">
-            当前还是旧版「检索是否写到」的结果，不是模拟评委打分。请点击右上角「发起全量预审」，系统会通读投标全文并按本项目招标规则逐条赋分。
+            当前还是旧版对照结果，不是按本项目招标规则逐条赋分。请点击右上角「发起全量预审」，系统会对照招标评分要求重新评审。
           </div>
         ) : null}
         {empty ? (
@@ -74,7 +74,7 @@ export default function TenderRuleReportView({ projectName, projectCode, round, 
               <div className="flex items-center gap-3 rounded-lg border border-accent-200 bg-accent-50/40 p-3.5">
                 <span className="font-heading text-gradient text-3xl font-bold">{data.totalScore}</span>
                 <div className="text-xs text-foreground-500">
-                  <div className="font-medium text-foreground-700">模拟评标得分</div>
+                  <div className="font-medium text-foreground-700">模拟评标得分（非评标委员会）</div>
                   <div className="mt-0.5">满分 {data.totalMax} · 折合 {data.percent}%</div>
                 </div>
               </div>

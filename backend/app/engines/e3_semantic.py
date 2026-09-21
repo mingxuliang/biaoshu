@@ -12,6 +12,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .bid_media import marker_for, seqs_in_text
+from .clause_scan import CHUNK_CHARS, MAX_CHUNKS, MAX_REVIEW_CHARS, _cap_review_chunks, _split_chunks
 from .excerpt_guard import display_rule, snap_bid_excerpt
 from .llm import LlmError, chat_complete, get_default_model_id, get_vision_model_id, is_vision_model
 from .rules_data import (
@@ -25,118 +26,17 @@ from .rules_data import (
 
 logger = logging.getLogger(__name__)
 
-# 单块约 1.6 万字；合计最多送审 30 万字（约 19 块），避免百万字标把预审拖成几十分钟。
-CHUNK_CHARS = 16000
-MAX_REVIEW_CHARS = 300_000
-MAX_CHUNKS = 19
+# 分块基础设施（CHUNK_CHARS/MAX_REVIEW_CHARS/MAX_CHUNKS/_split_chunks/_cap_review_chunks）
+# 已迁到 clause_scan.py，供本引擎与 clause_cover 的分块通读扫描共用；这里从那里导入并
+# 重新导出，保持对外名字（包括测试里的导入路径）不变。
 PARALLEL_WORKERS = 4
 VISION_WORKERS = 2
-ISSUE_CAP = 60
+ISSUE_CAP = 12
 CALL_TIMEOUT = 60
 VISION_TIMEOUT = 180
 MAX_IMAGES_PER_CALL = 8
 
-_CHAPTER = re.compile(r"^第[0-9一二三四五六七八九十百零]+[章节篇]")
-_CN_DOT = re.compile(r"^([一二三四五六七八九十]+)、")
-_CN_PAREN = re.compile(r"^[（(]([一二三四五六七八九十]+)[）)]")
-_DOTTED = re.compile(r"^(\d+\.\d+(?:\.\d+)*)")
-_ATTACH = re.compile(r"^附件[0-9一二三四五六七八九十]")
-
-
-def _is_heading_line(line: str) -> bool:
-    text = (line or "").strip()
-    if not text or len(text) > 48 or "。" in text:
-        return False
-    return bool(_CHAPTER.match(text) or _CN_DOT.match(text) or _CN_PAREN.match(text) or _DOTTED.match(text) or _ATTACH.match(text))
-
-
-def _cap_review_chunks(chunks: list[dict]) -> list[dict]:
-    """送审上限：累计 30 万字，且不超过 MAX_CHUNKS 块。未送审章节并入标题+文首约 2 千字。"""
-    kept: list[dict] = []
-    used = 0
-    leftover: list[dict] = []
-    leftover_prefix = ""
-    for i, chunk in enumerate(chunks):
-        body = chunk.get("text") or ""
-        if len(kept) >= MAX_CHUNKS or used >= MAX_REVIEW_CHARS:
-            leftover.extend(chunks[i:])
-            break
-        room = MAX_REVIEW_CHARS - used
-        if len(body) > room:
-            trimmed = dict(chunk)
-            trimmed["text"] = body[:room]
-            kept.append(trimmed)
-            leftover_prefix = body[room : room + 2000]
-            leftover.extend(chunks[i + 1 :])
-            break
-        kept.append(chunk)
-        used += len(body)
-
-    if kept and (leftover or leftover_prefix):
-        bits: list[str] = []
-        if leftover_prefix:
-            bits.append(leftover_prefix)
-        for c in leftover[:12]:
-            heading = (c.get("heading") or "").strip() or "未标注章节"
-            snippet = (c.get("text") or "").strip()[:2000]
-            bits.append(f"【{heading}】\n{snippet}")
-        extra = "【后续未送审章节（标题+文首）】\n" + "\n\n".join(bits)
-        kept[-1] = dict(kept[-1])
-        kept[-1]["text"] = kept[-1]["text"].rstrip() + "\n" + extra[:24000]
-    return kept or chunks[:1]
-
-
-def _split_chunks(full_text: str) -> list[dict]:
-    """按章节边界把正文切成 {text, heading} 块，再按 30 万字上限截取连续前部。
-
-    优先在「第X章 / 一、 / 1.1」标题处断开；单段超长则硬切。
-    """
-    text = full_text or ""
-    if not text.strip():
-        return [{"text": "", "heading": "开篇"}]
-    if len(text) <= CHUNK_CHARS:
-        heading = next((ln.strip() for ln in text.splitlines() if _is_heading_line(ln)), "全文")
-        return [{"text": text, "heading": heading}]
-
-    lines = text.splitlines()
-    chunks: list[dict] = []
-    buf: list[str] = []
-    buf_len = 0
-    heading = "开篇"
-
-    def flush() -> None:
-        nonlocal buf, buf_len
-        body = "\n".join(buf).strip()
-        if body:
-            chunks.append({"text": body, "heading": heading})
-        buf = []
-        buf_len = 0
-
-    for line in lines:
-        line_len = len(line) + 1
-        at_heading = _is_heading_line(line)
-        if at_heading and buf_len >= int(CHUNK_CHARS * 0.5):
-            flush()
-            heading = line.strip()[:40]
-        elif buf_len + line_len > CHUNK_CHARS and buf:
-            flush()
-            if at_heading:
-                heading = line.strip()[:40]
-        elif at_heading:
-            heading = line.strip()[:40]
-
-        if line_len > CHUNK_CHARS:
-            flush()
-            for start in range(0, len(line), CHUNK_CHARS):
-                piece = line[start : start + CHUNK_CHARS]
-                chunks.append({"text": piece, "heading": heading})
-            continue
-
-        buf.append(line)
-        buf_len += line_len
-
-    flush()
-    return _cap_review_chunks(chunks or [{"text": text, "heading": "全文"}])
+_VAGUE_SUGGEST = re.compile(r"不够量化|建议加强针对性|进一步完善")
 
 
 def _merge_chunk_results(results: list[dict], lengths: list[int], weights: dict) -> dict:
@@ -429,7 +329,8 @@ def _build_system_prompt(
 注意：完整标书已按章节拆分后全部送审，表格文字与【附图N】原图必须阅读。完整性只评本段应有内容是否写清，禁止因为看不到前后章节而给低分。
 仅有章节标题、目录行、空图、装饰图或与标题不符的附图，一律按未实质性响应列入 issues（降档或扣分），不得给高完整性分。
 不得凭正文里出现「网络图」「横道图」字样认定已附图，必须从图中看到对应图示。
-issues 每段最多 8 条，优先降档/扣分。excerpt 必须摘自本段【正文】或【附图N】占位，禁止摘目录行或带点线页码的目录条目。location 写章节名，不要写「目录」。
+issues 每段最多 4 条，优先降档/扣分。excerpt 必须摘自本段【正文】或【附图N】占位，禁止摘目录行或带点线页码的目录条目。location 写章节名，不要写「目录」。
+禁止空泛建议（如「不够量化」「建议加强针对性」「进一步完善」）；只能报能指出缺哪个数字、哪张图、哪条规范或哪段未响应的问题。贴不上原句的条目不要输出。
 
 请仅返回严格的 JSON，不要包含任何其他文字说明，格式如下：
 {{
@@ -459,11 +360,17 @@ def _normalize(data: dict, weights: dict, chunk_text: str = "") -> dict:
         dims[key] = {"score": score, "reason": d.get("reason", "")}
 
     issues = []
-    for item in (data.get("issues") or [])[:8]:
+    for item in (data.get("issues") or [])[:4]:
         severity = item.get("severity") if item.get("severity") in ("扣分", "降档", "建议") else "建议"
         location = item.get("location", "技术标")
         excerpt = snap_bid_excerpt(item.get("excerpt") or "", chunk_text, location)
+        if not excerpt:
+            continue
+        suggestion = str(item.get("suggestion") or "")
+        if _VAGUE_SUGGEST.search(suggestion) and not re.search(r"(缺|未见|未附|没有).{0,12}(图|表|数据|规范|数量|工期|人员)", suggestion):
+            continue
         strategy_key = str(item.get("strategyKey") or "")
+        confidence = 0.55 if severity == "降档" else 0.6
         issues.append(
             {
                 "engine": "e3_semantic",
@@ -471,12 +378,13 @@ def _normalize(data: dict, weights: dict, chunk_text: str = "") -> dict:
                 "severity": severity,
                 "location": location,
                 "excerpt": excerpt[:200],
-                "rule": display_rule("五维语义评审（AI 生成，供参考）", item.get("suggestion") or "", strategy_key),
+                "rule": display_rule("五维语义评审（AI 生成，供参考）", suggestion, strategy_key),
                 "tenderQuote": "",
-                "suggestion": item.get("suggestion", ""),
+                "suggestion": suggestion,
                 "strategyKey": strategy_key,
                 "applyText": item.get("applyText") or "",
-                "confidence": 0.6,
+                "confidence": confidence,
+                "issueClass": "writing",
             }
         )
 

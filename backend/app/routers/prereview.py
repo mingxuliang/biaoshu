@@ -40,6 +40,8 @@ def _finding_to_issue(f: ReviewFinding) -> dict:
         "tenderQuote": quote,
         "suggestion": f.suggestion or "",
         "strategyKey": str(extra.get("strategyKey") or ""),
+        "applyText": str(extra.get("applyText") or ""),
+        "issueClass": str(extra.get("issueClass") or ""),
     }
 
 
@@ -231,10 +233,37 @@ def _issues_from_findings(findings) -> list[dict]:
     ]
 
 
+def _custom_rules_payload(raw) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        status = item.get("status")
+        if status not in ("已响应", "未响应"):
+            status = "未响应"
+        out.append(
+            {
+                "id": str(item.get("id") or ""),
+                "title": str(item.get("title") or ""),
+                "content": str(item.get("content") or ""),
+                "source": str(item.get("source") or ""),
+                "sourceLabel": str(item.get("sourceLabel") or ""),
+                "severity": str(item.get("severity") or "扣分"),
+                "status": status,
+                "excerpt": str(item.get("excerpt") or ""),
+                "reason": str(item.get("reason") or ""),
+            }
+        )
+    return out
+
+
 def _run_to_report(db: Session, run: ReviewRun, as_scope: str | None = None) -> ReviewReportOut:
     tender_rules = run.tender_rules_json or {}
     if not (isinstance(tender_rules, dict) and tender_rules.get("groups")):
         tender_rules = _backfill_tender_rules(db, run)
+    custom_rules = _custom_rules_payload(getattr(run, "custom_rules_json", None))
     issues = _issues_from_findings(db.query(ReviewFinding).filter(ReviewFinding.run_id == run.id).all())
     light = run.light if run.light in ("绿", "橙", "红") else "橙"
     payload = {
@@ -249,6 +278,7 @@ def _run_to_report(db: Session, run: ReviewRun, as_scope: str | None = None) -> 
         "dimensions": run.dimensions_json or [],
         "techModules": run.tech_modules_json or [],
         "tenderRules": tender_rules or None,
+        "customRules": custom_rules,
         "issues": issues,
     }
     run_scope = payload["scope"]
@@ -307,6 +337,7 @@ def export_latest_review_report(
         "dimensions": run.dimensions_json or [],
         "techModules": run.tech_modules_json or [],
         "issues": issues,
+        "customRules": _custom_rules_payload(getattr(run, "custom_rules_json", None)),
         "scope": getattr(run, "scope", None) or "full",
     }
     payload = project_booklet_payload(payload, export_scope)
@@ -324,6 +355,7 @@ def export_latest_review_report(
         dimensions=payload.get("dimensions") or [],
         issues=payload["issues"],
         tech_modules=payload.get("techModules") or [],
+        custom_rules=payload.get("customRules") or [],
         finished_at=run.finished_at,
         scope=run_scope,
     )

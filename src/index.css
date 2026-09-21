@@ -412,6 +412,119 @@ input[name="website_alt"] {
   background: oklch(var(--primary-50));
 }
 
+.tender-pdf-hit {
+  position: absolute;
+  pointer-events: none;
+  background: oklch(var(--primary-400) / 0.42);
+  box-shadow: 0 0 0 2px oklch(var(--primary-600) / 0.85);
+  border-radius: 2px;
+  animation: tender-hit-pulse 1.6s ease-out 1;
+}
+@keyframes tender-hit-pulse {
+  0% { background: oklch(var(--primary-400) / 0.7); }
+  100% { background: oklch(var(--primary-400) / 0.38); }
+}
+
+.tender-excel {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  background: #fff;
+}
+.tender-excel-scroll {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+.tender-excel-grid {
+  border-collapse: collapse;
+  min-width: 100%;
+  font-family: Calibri, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 12px;
+  color: #1f1f1f;
+  background: #fff;
+}
+.tender-excel-grid th,
+.tender-excel-grid td {
+  border: 1px solid #d0d7de;
+  padding: 2px 8px;
+  white-space: nowrap;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  height: 22px;
+  line-height: 18px;
+  vertical-align: middle;
+}
+.tender-excel-grid thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #f3f3f3;
+  color: #5f6368;
+  font-weight: 600;
+  text-align: center;
+  min-width: 72px;
+}
+.tender-excel-grid .tender-excel-corner,
+.tender-excel-grid tbody th {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  width: 42px;
+  min-width: 42px;
+  max-width: 42px;
+  background: #f3f3f3;
+  color: #5f6368;
+  text-align: center;
+  font-weight: 600;
+  padding: 0 4px;
+}
+.tender-excel-grid thead .tender-excel-corner {
+  z-index: 3;
+  left: 0;
+}
+.tender-excel-grid tbody tr.is-hit td,
+.tender-excel-grid tbody tr.is-hit th {
+  background: #fff2cc;
+  outline: 2px solid #f6c000;
+  outline-offset: -2px;
+}
+.tender-excel-grid tbody tr.is-search td,
+.tender-excel-grid tbody tr.is-search th {
+  background: #cfe8fc;
+}
+.tender-excel-grid tbody tr:hover td {
+  background: #e7f3ff;
+}
+.tender-excel-tabs {
+  display: flex;
+  flex-shrink: 0;
+  gap: 1px;
+  overflow-x: auto;
+  border-top: 1px solid #d0d7de;
+  background: #f3f3f3;
+  padding: 0 8px;
+}
+.tender-excel-tabs button {
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 4px 14px;
+  font-size: 12px;
+  color: #444;
+  white-space: nowrap;
+}
+.tender-excel-tabs button.is-active {
+  background: #fff;
+  border-color: #d0d7de;
+  color: #107c41;
+  font-weight: 600;
+}
+
 /* 修改闭环「原文」：docx-preview 渲染结果必须隔离 Tailwind Preflight 对 h1/h2 的 font-size:inherit 重置 */
 .bidrev-docx-host {
   font-family: initial;

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import Toast from "../components/Toast";
@@ -9,16 +9,20 @@ import {
   createTenderParseJob,
   downloadChecklistReport,
   getLatestChecklist,
+  getTenderParagraphs,
+  getTenderSheetPreview,
   listCustomRules,
   listProjectTenderDocuments,
+  locateTenderText,
   lockChecklist,
   pollTenderParseJobUntilDone,
   triggerFileDownload,
   type Checklist,
   type TenderDocumentSummary,
 } from "@/lib/api";
-import { TENDER_KIND_LABELS, effectiveTenderKind } from "@/lib/tenderPackage";
-import WordViewer from "./components/WordViewer";
+import { TENDER_KIND_LABELS, effectiveTenderKind, isSpreadsheetFile } from "@/lib/tenderPackage";
+import { findContentAnchor, findSheetRow, type LocateTarget } from "@/lib/tenderAnchor";
+import WordViewer, { type WordViewerHandle } from "./components/WordViewer";
 import ParseResults from "./components/ParseResults";
 import TenderPackagePanel from "./components/TenderPackagePanel";
 import CustomRulesPanel from "./components/CustomRulesPanel";
@@ -47,6 +51,8 @@ export default function ParsePage() {
   const [customRuleCount, setCustomRuleCount] = useState(0);
   const [checklist, setChecklist] = useState<Checklist | null>(null);
   const [toast, setToast] = useState<ToastState>({ message: "", type: "success", visible: false });
+  const viewerRef = useRef<WordViewerHandle>(null);
+  const [locateQuery, setLocateQuery] = useState<LocateTarget | null>(null);
 
   useEffect(() => {
     if (!selectedId) {
@@ -110,6 +116,53 @@ export default function ParsePage() {
   const goBackToList = () => setSearchParams({}, { replace: true });
 
   const activeDoc = docs.find((d) => d.id === activeDocId) || docs[0] || null;
+  const omittedDerived = Object.values(checklist?.omittedCount || checklist?.extractStats?.omittedCount || {}).reduce(
+    (a, b) => a + (Number(b) || 0),
+    0,
+  );
+
+  const handleLocate = async (target: LocateTarget | string) => {
+    const q = (typeof target === "string" ? target : target.content || "").trim();
+    const label = typeof target === "string" ? "" : (target.label || "").trim();
+    if (!q) return;
+    const ok = await viewerRef.current?.locateText(q, label);
+    if (ok) {
+      setLocateQuery({ content: q, label });
+      return;
+    }
+    for (const doc of docs) {
+      if (doc.id === activeDocId) continue;
+      try {
+        if (isSpreadsheetFile(doc.filename || "")) {
+          const preview = await getTenderSheetPreview(doc.id);
+          if (findSheetRow(preview.sheets || [], q)) {
+            setLocateQuery({ content: q, label });
+            setActiveDocId(doc.id);
+            showToast(`已切换到「${doc.filename}」并定位到表格行`);
+            return;
+          }
+          continue;
+        }
+        const pdfHit = await locateTenderText(doc.id, q, label);
+        if (pdfHit.found && (pdfHit.rects || []).length) {
+          setLocateQuery({ content: q, label });
+          setActiveDocId(doc.id);
+          showToast(`已切换到「${doc.filename}」并定位到 ${pdfHit.heading || pdfHit.snippet || "原文条款"}`);
+          return;
+        }
+        const paras = await getTenderParagraphs(doc.id);
+        if (findContentAnchor(q, paras, label)) {
+          setLocateQuery({ content: q, label });
+          setActiveDocId(doc.id);
+          showToast(`已切换到「${doc.filename}」并定位原文`);
+          return;
+        }
+      } catch {
+        /* try next file */
+      }
+    }
+    showToast("未能在已上传的招标文件中定位到该抽取内容", "info");
+  };
 
   const startParse = async () => {
     if (!currentProject || !docs.length || parsing) return;
@@ -119,7 +172,7 @@ export default function ParsePage() {
     showToast(`AI 正在一并解析招标文件包（${docs.length} 份）：按固定指标抽取，并提取施工图纸设计说明…`, "info");
     try {
       const job = await createTenderParseJob(currentProject.id, primary.id, ids);
-      const finalStatus = await pollTenderParseJobUntilDone(job.job_id, { timeoutMs: 12 * 60 * 1000 });
+      const finalStatus = await pollTenderParseJobUntilDone(job.job_id, { timeoutMs: 40 * 60 * 1000 });
       const latest = await getLatestChecklist(currentProject.id);
       setChecklist(latest);
       if (finalStatus.status === "done" && !latest.error) {
@@ -141,6 +194,10 @@ export default function ParsePage() {
 
   const handleLock = async () => {
     if (!currentProject || !checklist || checklist.locked || locking) return;
+    if (checklist.status !== "done" || checklist.error) {
+      showToast(checklist.error || "解析未成功，不能锁定", "error");
+      return;
+    }
     setLocking(true);
     try {
       const locked = await lockChecklist(currentProject.id, checklist.id);
@@ -283,7 +340,7 @@ export default function ParsePage() {
               {checklist
                 ? checklist.locked
                   ? `评标尺子已锁定 v${checklist.version}`
-                  : `评标尺子草稿 v${checklist.version}`
+                  : `评标尺子草稿 v${checklist.version}${checklist.extractStats?.usableHanzi ? ` · 有效汉字 ${checklist.extractStats.usableHanzi}` : ""}${checklist.extractStats?.ocrPages ? ` · OCR ${checklist.extractStats.ocrPages} 页` : ""}${omittedDerived > 0 ? ` · 未纳入 ${omittedDerived} 条派生尺子` : ""}`
                 : "尚未解析评标尺子"}
             </div>
           </div>
@@ -357,10 +414,12 @@ export default function ParsePage() {
         <div className="flex min-h-0 flex-col">
           {activeDoc ? (
             <WordViewer
+              ref={viewerRef}
               projectName={currentProject.name}
               projectCode={currentProject.code}
               tenderDocumentId={activeDoc.id}
               fileName={activeDoc.filename}
+              locateQuery={locateQuery}
             />
           ) : (
             <div className="flex h-full min-h-[280px] flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-background-300 bg-background-50 text-sm text-foreground-500">
@@ -378,6 +437,7 @@ export default function ParsePage() {
             focusKind={activeDoc ? effectiveTenderKind(activeDoc.kind, activeDoc.filename) : undefined}
             focusFileId={activeDoc?.id}
             onLock={handleLock}
+            onLocate={(target) => { void handleLocate(target); }}
             onShare={async () => {
               try {
                 await navigator.clipboard.writeText(window.location.href);

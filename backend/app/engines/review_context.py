@@ -45,6 +45,9 @@ class ReviewContext:
     current_hash: str = ""
     encrypted: bool = False
     scanned_pdf: bool = False
+    checklist_version: int | None = None
+    extract_stats: dict = field(default_factory=dict)
+    weight_name: str = ""
 
 
 def _file_md5(ref: str) -> str:
@@ -166,25 +169,34 @@ def load_review_context(db: Session, project_id: str, current_path: str | None =
     slices = db.query(KnowledgeSlice).order_by(KnowledgeSlice.seq.asc()).limit(80).all()
     ctx.knowledge_texts = [(s.text or "")[:800] for s in slices if (s.text or "").strip()]
 
-    tender = (
-        db.query(TenderDocument)
-        .filter(TenderDocument.project_id == project_id)
-        .order_by(TenderDocument.uploaded_at.desc())
-        .first()
-    )
-    if tender and tender.storage_path:
-        try:
-            ext = os.path.splitext(tender.storage_path)[1].lower()
-            with storage.as_local(tender.storage_path) as path:
-                if ext == ".pdf":
-                    import pymupdf as fitz
+    from .rules_config import load_active_weight_name, load_project_checklist
 
-                    with fitz.open(path) as pdf:
-                        ctx.tender_text = "\n".join(page.get_text("text") for page in pdf)[:TEXT_CAP]
-                else:
-                    ctx.tender_text = extract_full_text(path)[:TEXT_CAP]
-        except Exception:
-            ctx.tender_text = ""
+    checklist = load_project_checklist(db, project_id)
+    ctx.checklist_version = checklist.version
+    ctx.extract_stats = checklist.extract_stats or {}
+    ctx.weight_name = load_active_weight_name(db)
+    if checklist.tender_corpus.strip():
+        ctx.tender_text = checklist.tender_corpus[:120_000]
+    else:
+        tender = (
+            db.query(TenderDocument)
+            .filter(TenderDocument.project_id == project_id)
+            .order_by(TenderDocument.uploaded_at.desc())
+            .first()
+        )
+        if tender and tender.storage_path:
+            try:
+                ext = os.path.splitext(tender.storage_path)[1].lower()
+                with storage.as_local(tender.storage_path) as path:
+                    if ext == ".pdf":
+                        import pymupdf as fitz
+
+                        with fitz.open(path) as pdf:
+                            ctx.tender_text = "\n".join(page.get_text("text") for page in pdf)[:TEXT_CAP]
+                    else:
+                        ctx.tender_text = extract_full_text(path)[:TEXT_CAP]
+            except Exception:
+                ctx.tender_text = ""
 
     for item in db.query(QualificationAsset).filter(QualificationAsset.review_status == "已入库").all():
         blob = " ".join(

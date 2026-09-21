@@ -9,7 +9,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from .celery_app import celery_app
 from .db import SessionLocal
-from .engines import e0_tender_parse, e_writer
+from .engines import e0_tender_parse, e_writer, parse_schema
 from .engines.docx_extract import extract_document_plain_text, extract_full_text
 from .engines.tender_package import (
     KIND_BOQ,
@@ -18,11 +18,11 @@ from .engines.tender_package import (
     compose_addendum_text,
     compose_parse_text,
     effective_kind,
-    extract_boq_items,
-    extract_file_text,
+    extract_file_bundle,
     extra_fills_from_package,
     package_slots,
 )
+from .engines.extract_quality import merge_stats, parse_fail_reason
 from .engines.drawing_intel import analyze_drawings, merge_drawing_fills
 from .engines.knowledge_retrieval import list_knowledge_headings, retrieve_by_doc_and_headings, retrieve_for_chapter
 from .engines.orchestrator import run_prereview
@@ -49,7 +49,7 @@ from .models import (
 logger = get_task_logger(__name__)
 
 
-@celery_app.task(name="run_prereview_task", soft_time_limit=12 * 60, time_limit=15 * 60)
+@celery_app.task(name="run_prereview_task", soft_time_limit=25 * 60, time_limit=30 * 60)
 def run_prereview_task(run_id: str) -> None:
     db = SessionLocal()
     try:
@@ -110,10 +110,22 @@ def run_tender_parse_task(checklist_id: str) -> None:
                 drawing_refs[tender_doc.id] = tender_doc.storage_path
                 drawing_names[tender_doc.id] = tender_doc.filename or "未命名"
             with storage.as_local(tender_doc.storage_path) as path:
-                text = extract_file_text(path, kind=kind, filename=tender_doc.filename)
-                boq_items = extract_boq_items(path, filename=tender_doc.filename) if kind == KIND_BOQ else []
-            parts.append({"kind": kind, "filename": tender_doc.filename, "text": text, "boqItems": boq_items})
+                bundle = extract_file_bundle(path, kind=kind, filename=tender_doc.filename)
+            boq_items = bundle.get("boqItems") or []
+            if kind == KIND_BOQ and not boq_items:
+                boq_items = []
+            parts.append(
+                {
+                    "kind": kind,
+                    "filename": tender_doc.filename,
+                    "text": bundle.get("text") or "",
+                    "boqItems": boq_items,
+                    "stats": bundle.get("stats") or {},
+                    "error": bundle.get("error") or "",
+                }
+            )
 
+        extract_stats = merge_stats(parts)
         full_text, notes = compose_parse_text(parts, include_addendum_body=False)
         addendum_text = compose_addendum_text(parts)
         extra_fills = extra_fills_from_package(
@@ -136,6 +148,15 @@ def run_tender_parse_task(checklist_id: str) -> None:
         result = e0_tender_parse.run(
             full_text, category=category, extra_fills=extra_fills, addendum_text=addendum_text
         )
+        filled, _total = parse_schema.filled_row_counts(result.get("dimensions") or [])
+        omitted = result.get("omittedCount") or {}
+        extract_stats = {
+            **extract_stats,
+            "filledRows": filled,
+            "omittedCount": omitted,
+            "tenderCorpusChars": len(full_text or ""),
+        }
+        fail = parse_fail_reason(extract_stats, filled=filled, llm_error=result.get("error"))
 
         checklist.checklist_json = {
             "dimensions": result["dimensions"],
@@ -145,10 +166,17 @@ def run_tender_parse_task(checklist_id: str) -> None:
             "formatRequirements": result["formatRequirements"],
             "packageDocIds": [d.id for d in docs],
             "package": attach_extracts(package_slots(docs), parts),
+            "extractStats": extract_stats,
+            "tenderCorpus": (full_text or "")[:200_000],
+            "omittedCount": omitted,
         }
         checklist.engine_params_json = result["vetoParams"]
-        checklist.error = result.get("error")
-        checklist.status = "done"
+        if fail:
+            checklist.error = fail
+            checklist.status = "failed"
+        else:
+            checklist.error = result.get("error")
+            checklist.status = "done"
         checklist.finished_at = datetime.utcnow()
         db.commit()
     except Exception as exc:  # noqa: BLE001 —— 解析失败也要把任务状态置为 failed，而不是让 worker 静默丢失

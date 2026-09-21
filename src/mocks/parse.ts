@@ -35,7 +35,7 @@ export interface MustRespond {
 export interface ParseSection {
   id: string;
   title: string;
-  rows: { label: string; content: string }[];
+  rows: { label: string; content: string; original?: string }[];
 }
 
 // 二级分析项目

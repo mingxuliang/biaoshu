@@ -4,6 +4,7 @@
 // 禁止增删 key、id、label、section id/title、row label，仅允许写入 rows.content。
 // 一级/二级分类对齐专业解读报告 A 基础审核～G 开评定标；
 // 工程量清单、图纸、专用合同条款、其他材料为产品保留的专用抽取槽，不删。
+// 工程量清单、图纸、专用合同条款、其他材料为产品保留的专用抽取槽，不删。
 
 import type { ParseDimension } from "./parse";
 
@@ -247,54 +248,16 @@ export const parseDimensionsEngineering: ParseDimension[] = [
     items: [
       {
         id: "eval-tech",
-        label: "施工组织设计评分",
+        label: "技术标评分",
         sections: [
           {
             id: "et-1",
-            title: "施工组织设计评分标准",
+            title: "技术标评分标准",
             rows: [
               { label: "评分因素与标准", content: "" },
               { label: "分档/赋分规则", content: "" },
               { label: "技术标编制要点（暗标）", content: "" },
               { label: "技术标评分门槛", content: "" },
-            ],
-          }
-        ],
-      }
-    ],
-  },
-  {
-    key: "envelope",
-    label: "商务评分",
-    completed: false,
-    items: [
-      {
-        id: "eval-business",
-        label: "企业与项目管理机构评分",
-        sections: [
-          {
-            id: "eb-1",
-            title: "企业与项目管理机构评分标准",
-            rows: [
-              { label: "评分因素与标准", content: "" },
-              { label: "分档/赋分规则", content: "" },
-            ],
-          }
-        ],
-      },
-      {
-        id: "env-price",
-        label: "投标报价评分",
-        sections: [
-          {
-            id: "ep-1",
-            title: "投标报价评分标准",
-            rows: [
-              { label: "评标基准价/有效评标价计算方法", content: "" },
-              { label: "有效报价区间与K值", content: "" },
-              { label: "投标报价偏差率计算公式", content: "" },
-              { label: "报价得分计算公式", content: "" },
-              { label: "异常低价识别公式与参数", content: "" },
             ],
           }
         ],
@@ -351,51 +314,109 @@ export const parseDimensionsEngineering: ParseDimension[] = [
     ],
   },
   {
+    key: "envelope",
+    label: "商务评分",
+    completed: false,
+    items: [
+      {
+        id: "eval-business",
+        label: "企业与项目管理机构评分",
+        sections: [
+          {
+            id: "eb-1",
+            title: "企业与项目管理机构评分标准",
+            rows: [
+              { label: "评分因素与标准", content: "" },
+              { label: "分档/赋分规则", content: "" },
+            ],
+          }
+        ],
+      },
+      {
+        id: "env-price",
+        label: "投标报价评分",
+        sections: [
+          {
+            id: "ep-1",
+            title: "投标报价评分标准",
+            rows: [
+              { label: "评标基准价/有效评标价计算方法", content: "" },
+              { label: "有效报价区间与K值", content: "" },
+              { label: "投标报价偏差率计算公式", content: "" },
+              { label: "报价得分计算公式", content: "" },
+              { label: "异常低价识别公式与参数", content: "" },
+            ],
+          }
+        ],
+      }
+    ],
+  },
+  {
     key: "reject",
     label: "废标风险",
     completed: false,
     items: [
       {
         id: "reject-open",
-        label: "开标前阶段",
+        label: "开标前阶段废标风险",
         sections: [
           {
             id: "rj-1",
             title: "开标前阶段废标风险",
-            rows: [{ label: "废标风险点（风险点/描述/等级/条款号）", content: "" }],
+            rows: [
+              { label: "风险点", content: "" },
+              { label: "详细描述", content: "" },
+              { label: "风险等级", content: "" },
+              { label: "来源/依据", content: "" },
+            ],
           }
         ],
       },
       {
         id: "reject-qual",
-        label: "资格性审查",
+        label: "资格性审查废标风险",
         sections: [
           {
             id: "rj-2",
             title: "资格性审查废标风险",
-            rows: [{ label: "废标风险点（风险点/描述/等级/条款号）", content: "" }],
+            rows: [
+              { label: "风险点", content: "" },
+              { label: "详细描述", content: "" },
+              { label: "风险等级", content: "" },
+              { label: "来源/依据", content: "" },
+            ],
           }
         ],
       },
       {
         id: "reject-conform",
-        label: "符合性审查",
+        label: "符合性审查废标风险",
         sections: [
           {
             id: "rj-3",
             title: "符合性审查废标风险",
-            rows: [{ label: "废标风险点（风险点/描述/等级/条款号）", content: "" }],
+            rows: [
+              { label: "风险点", content: "" },
+              { label: "详细描述", content: "" },
+              { label: "风险等级", content: "" },
+              { label: "来源/依据", content: "" },
+            ],
           }
         ],
       },
       {
         id: "reject-eval",
-        label: "评标与定标阶段",
+        label: "评标与定标阶段废标风险",
         sections: [
           {
             id: "rj-4",
             title: "评标与定标阶段废标风险",
-            rows: [{ label: "废标风险点（风险点/描述/等级/条款号）", content: "" }],
+            rows: [
+              { label: "风险点", content: "" },
+              { label: "详细描述", content: "" },
+              { label: "风险等级", content: "" },
+              { label: "来源/依据", content: "" },
+            ],
           }
         ],
       },
@@ -406,7 +427,12 @@ export const parseDimensionsEngineering: ParseDimension[] = [
           {
             id: "rj-5",
             title: "其他高风险情形",
-            rows: [{ label: "废标风险点（风险点/描述/等级/条款号）", content: "" }],
+            rows: [
+              { label: "风险点", content: "" },
+              { label: "详细描述", content: "" },
+              { label: "风险等级", content: "" },
+              { label: "来源/依据", content: "" },
+            ],
           }
         ],
       }
@@ -424,7 +450,13 @@ export const parseDimensionsEngineering: ParseDimension[] = [
           {
             id: "rq-2",
             title: "投标文件组成",
-            rows: [{ label: "投标文件组成清单（文件名/格式/是否必须/备注）", content: "" }],
+            rows: [
+              { label: "序号", content: "" },
+              { label: "文件名称", content: "" },
+              { label: "格式要求", content: "" },
+              { label: "是否必须", content: "" },
+              { label: "备注", content: "" },
+            ],
           }
         ],
       },
@@ -476,7 +508,12 @@ export const parseDimensionsEngineering: ParseDimension[] = [
           {
             id: "rq-7",
             title: "资格审查资料详细清单",
-            rows: [{ label: "资格审查资料详细清单（资料类别/具体资料/是否必须/备注）", content: "" }],
+            rows: [
+              { label: "资料类别", content: "" },
+              { label: "具体资料", content: "" },
+              { label: "是否必须", content: "" },
+              { label: "备注", content: "" },
+            ],
           }
         ],
       }

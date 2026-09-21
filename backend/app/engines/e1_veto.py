@@ -13,7 +13,7 @@ enabled_keys：管理员在「规则页 / 一票否决」tab 关闭某条时，�
 import re
 from datetime import datetime
 
-from .excerpt_guard import hit_sentence
+from .clause_cover import CAPS, cap_overflow_finding, check_clause
 
 VALIDITY_KEYWORDS = ["投标有效期"]
 VALIDITY_NUMBER_PATTERN = re.compile(r"(\d{1,3})\s*(日历天|天)")
@@ -52,7 +52,18 @@ def _now() -> datetime:
     return datetime.utcnow()
 
 
-def _finding(severity: str, location: str, excerpt: str, rule: str, suggestion: str, tender_quote: str = "") -> dict:
+def _finding(
+    severity: str,
+    location: str,
+    excerpt: str,
+    rule: str,
+    suggestion: str,
+    tender_quote: str = "",
+    *,
+    unanswered_confirmed: bool = False,
+    evidence_ok: bool = False,
+    issue_class: str = "",
+) -> dict:
     return {
         "engine": "e1_veto",
         "level": "L1",
@@ -63,6 +74,9 @@ def _finding(severity: str, location: str, excerpt: str, rule: str, suggestion: 
         "tenderQuote": tender_quote,
         "suggestion": suggestion,
         "confidence": 0.8,
+        "unansweredConfirmed": unanswered_confirmed,
+        "evidenceOk": evidence_ok,
+        "issueClass": issue_class,
     }
 
 
@@ -284,6 +298,8 @@ def run(
                     excerpt="",
                     rule="F02.03 实质性条款须明确响应",
                     suggestion="投标书全文未检出「投标有效期」条款。请人工确认投标函是否包含投标有效期并写明天数",
+                    issue_class="human_check",
+                    evidence_ok=True,
                 )
             )
 
@@ -315,6 +331,7 @@ def run(
                     )
 
     if star_clause_enabled:
+        pending = []
         for item in must_respond or []:
             if not isinstance(item, dict):
                 continue
@@ -323,17 +340,29 @@ def run(
             clause = str(item.get("clause") or item.get("text") or "").strip()
             if not clause:
                 continue
-            if _clause_unanswered(clause, full_text):
-                findings.append(
-                    _finding(
-                        severity="废标",
-                        location=f"投标文件 / 星号条款响应 / {item.get('original') or '未标注'}",
-                        excerpt="",
-                        rule="F02.06 星号条款必须全部响应",
-                        suggestion="招标文件标记的实质性条款未在投标文件中检出对应响应，任何一条不响应即废标",
-                        tender_quote=clause[:500],
-                    )
+            pending.append((item, check_clause(clause, bid=full_text, paragraphs=paragraphs)))
+        kept = 0
+        omitted = 0
+        for item, result in pending:
+            if result.answered:
+                continue
+            if kept >= CAPS["star"]:
+                omitted += 1
+                continue
+            kept += 1
+            findings.append(
+                _finding(
+                    severity="废标",
+                    location=f"投标文件 / 星号条款响应 / {item.get('original') or '未标注'}",
+                    excerpt=result.excerpt,
+                    rule="F02.06 星号条款必须全部响应",
+                    suggestion=result.reason or "招标文件标记的实质性条款未确认对应响应，请按原文补写",
+                    tender_quote=str(item.get("clause") or item.get("text") or "")[:500],
+                    unanswered_confirmed=result.unanswered_confirmed,
                 )
+            )
+        if omitted:
+            findings.append(cap_overflow_finding("star", omitted, "L1", "废标"))
 
     findings.extend(
         _context_findings(full_text, paragraphs, must_respond or [], context, checklist_params, enabled_keys)
@@ -360,21 +389,21 @@ def _context_findings(
     qualification_enabled = _enabled("qualification", enabled_keys)
     content_match_enabled = _enabled("content_match", enabled_keys)
 
-    if (
-        bid_elements_enabled
-        and ("保证金" in combined_req or "投标保证金" in combined_req)
-        and "保证金" not in full_text
-    ):
-        extra.append(
-            _finding(
-                severity="废标",
-                location="投标文件 / 投标保证金",
-                excerpt="",
-                rule="F02.05 投标保证金须按招标要求提交",
-                suggestion="招标文件要求提交投标保证金，投标书未检出「保证金」表述。请在投标文件中写明保证金金额、形式与递交凭证，并附缴款证明",
-                tender_quote=_hit_tender(combined_req, ("投标保证金", "保证金")),
+    if bid_elements_enabled and ("保证金" in combined_req or "投标保证金" in combined_req):
+        cover = check_clause("投标保证金", bid=full_text, paragraphs=paragraphs, title="保证金")
+        if not cover.answered:
+            extra.append(
+                _finding(
+                    severity="降档",
+                    location="投标文件 / 投标保证金",
+                    excerpt=cover.excerpt,
+                    rule="F02.05 投标保证金须按招标要求提交",
+                    suggestion=cover.reason or "招标要求提交投标保证金，投标书未确认对应表述。请写明金额、形式与递交凭证",
+                    tender_quote=_hit_tender(combined_req, ("投标保证金", "保证金")),
+                    unanswered_confirmed=cover.unanswered_confirmed,
+                    issue_class="human_check",
+                )
             )
-        )
 
     if bid_elements_enabled and checklist_params.get("anonymity_required") and context is not None:
         bidder_name = ""
@@ -403,6 +432,7 @@ def _context_findings(
                         excerpt=_hit_excerpt(full_text, paragraphs, ("社保",)),
                         rule="F02.02 人员核查-社保证明",
                         suggestion="投标书写到社保，但未检出缴纳证明、参保或养老保险等可核验表述。请在资格文件中附社保证明",
+                        issue_class="human_check",
                     )
                 )
         elif "社保" in combined_req:
@@ -414,6 +444,8 @@ def _context_findings(
                     rule="F02.02 人员核查-社保证明",
                     suggestion="招标要求提供社保证明，投标书未检出相关表述。请在资格文件中附人员社保证明",
                     tender_quote=_hit_tender(combined_req, ("社保",)),
+                    issue_class="human_check",
+                    unanswered_confirmed=True,
                 )
             )
         if "项目经理" in full_text:
@@ -484,5 +516,37 @@ def _context_findings(
                     )
                 )
                 break
+
+    if _enabled("collusion", enabled_keys) and context is not None:
+        current_hash = getattr(context, "current_hash", "") or ""
+        for label, digest in getattr(context, "other_file_hashes", []) or []:
+            if current_hash and digest and digest == current_hash:
+                extra.append(
+                    _finding(
+                        severity="废标",
+                        location="投标文件 / 串标痕迹",
+                        excerpt="",
+                        rule="F02.08 本企业历史标书文件哈希相同",
+                        suggestion=f"当前投标文件与本企业项目「{label}」的文件 MD5 完全相同，请确认是否误用历史标书。不比对其他投标人未公开文件。",
+                        evidence_ok=True,
+                    )
+                )
+                break
+        hits = 0
+        for label, sent in getattr(context, "other_sentences", []) or []:
+            if hits >= 3:
+                break
+            if len(sent) < 40 or sent not in full_text:
+                continue
+            extra.append(
+                _finding(
+                    severity="降档",
+                    location="投标文件 / 历史标书雷同",
+                    excerpt=_hit_excerpt(full_text, paragraphs, (sent[:12],)) or sent[:180],
+                    rule="F02.08 与本企业历史标书长句完全相同",
+                    suggestion=f"检出与本企业项目「{label}」相同的长句，请改写为本项目针对性表述。",
+                )
+            )
+            hits += 1
 
     return extra

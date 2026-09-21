@@ -38,7 +38,19 @@ _SKIP_LABELS = (
     "格式与递交要求",
     "工程专业（市政/房建/公路/水利等）",
 )
-_SKIP_HINTS = ("畸高畸低", "类人评审", "不替代评标委员会", "纵向偏差率", "横向偏差率")
+_SKIP_HINTS = (
+    "畸高畸低",
+    "类人评审",
+    "不替代评标委员会",
+    "纵向偏差率",
+    "横向偏差率",
+    # 评标委员会计算/定档办法：投标人不会、也不该把这些字写进正文，不能当应答项。
+    "评分门槛",
+    "由高到低取前",
+    "有效评标价",
+    "评审标准部分得分",
+    "综合评价结果判定为",
+)
 _PARENT_NAME_HINTS = ("评分标准", "分值构成", "分值组成", "分值分配", "评分办法")
 
 # 括号分值：对设计文件的理解（7分）
@@ -94,11 +106,31 @@ def _is_formula(group: str, text: str) -> bool:
     return any(k in (text or "") for k in ("计算公式", "评标基准价", "偏差率", "每减少", "最高限价"))
 
 
-def _should_skip(label: str, content: str) -> bool:
+def is_grading_rule(label: str, content: str) -> bool:
+    """评委打分/分档语言（如「分档/赋分规则」「评委打分…算法原文」）：
+
+    这类文字是给评标委员会看的赋分口径，投标人不会、也不该把它写进正文，
+    不能当成「必须在投标书里出现」的应答项。供 e_parse_match 复用同一套过滤。
+    """
     if label in _SKIP_LABELS:
         return True
     blob = f"{label}{content}"
     return any(h in blob for h in _SKIP_HINTS)
+
+
+# 兼容旧调用名。
+_should_skip = is_grading_rule
+
+
+def split_label_content(detail: str) -> tuple[str, str]:
+    """「标签：正文」拆分；拆不出标签则原样返回，标签为空。"""
+    content = (detail or "").strip()
+    label = ""
+    if "：" in content[:20]:
+        label, _, rest = content.partition("：")
+        if rest:
+            content = rest
+    return label, content
 
 
 def _split_factors(content: str) -> list[tuple[str, float]]:
@@ -201,13 +233,8 @@ def _blobs_from_score_rules(score_rules: list | None) -> list[dict]:
     for item in score_rules or []:
         if not isinstance(item, dict):
             continue
-        content = (item.get("detail") or "").strip()
-        label = ""
-        if "：" in content[:20]:
-            label, _, rest = content.partition("：")
-            if rest:
-                content = rest
-        if not content or _should_skip(label or item.get("sectionPath") or "", content):
+        label, content = split_label_content(item.get("detail") or "")
+        if not content or is_grading_rule(label or item.get("sectionPath") or "", content):
             continue
         if content.startswith("分值构成") or content.startswith("招标文件未明确列出"):
             continue
@@ -224,12 +251,20 @@ def _blobs_from_score_rules(score_rules: list | None) -> list[dict]:
     return out
 
 
+_NON_SCORING_SOURCE_IDS = {"contract-tech"}  # 专用合同条款：中标后履约条款，不是投标时的评分点
+
+
 def expand_score_items(score_rules: list | None, tree: list | None = None) -> list[dict]:
     """展开「这一份」招标书的评分点。优先解析树原文，没有再退回派生 scoreRules。"""
     blobs = _blobs_from_tree(tree) or _blobs_from_score_rules(score_rules)
     items: list[dict] = []
     seq = 0
     for blob in blobs:
+        if (blob.get("sourceItemId") or "") in _NON_SCORING_SOURCE_IDS:
+            # 「专用合同条款」是履约阶段的合同管理条款（付款进度、质保金比例、违约金…），
+            # 不是投标人在技术方案里要响应的评分点；不跳过的话，付款条款里散落的多处百分比
+            # 会被下面的 _split_factors 误拆成好几条名字截断、语无伦次的「评分项」。
+            continue
         group = _group_of(blob["dimension"], f"{blob.get('label') or ''}{blob['content'][:20]}", blob.get("sourceItemId") or "")
         factors = _split_factors(blob["content"])
         if factors:
@@ -250,9 +285,13 @@ def expand_score_items(score_rules: list | None, tree: list | None = None) -> li
         seq += 1
         weight = float(blob.get("weight") or 0)
         if weight <= 0:
-            found = re.search(r"(\d+(?:\.\d+)?)\s*分", blob["content"])
+            # 只在条目开头附近找分值/权重标注（如「XX方案（7分）」「权重10%」）；不去整段
+            # 正文里搜孤立数字——像「专用合同条款」里的「违约金上限：合同价款的4%」这类跟
+            # 分值无关的数字，不能被当成本条的评分权重，否则会把履约条款误标成评分项。
+            head = blob["content"][:60]
+            found = re.search(r"(\d+(?:\.\d+)?)\s*分", head)
             if not found:
-                found = re.search(r"(\d+(?:\.\d+)?)\s*%", blob["content"])
+                found = re.search(r"(\d+(?:\.\d+)?)\s*%", head)
             weight = float(found.group(1)) if found else 0
         if weight <= 0:
             continue
@@ -414,7 +453,7 @@ def _judge_batch(
                 "name": item["name"],
                 "maxScore": item["maxScore"],
                 "rule": item["rule"],
-                "evidenceFromBid": item.get("window") or "（未定位到对应段落，不得引用文首或其他无关承诺）",
+                "evidenceFromBid": item.get("window") or "（对照本项评分要求，投标书中未见相应响应内容，不得引用文首或其他无关承诺）",
             }
         )
     system = (
@@ -492,7 +531,7 @@ def _unanswered_entry(raw: dict, strategies: list[dict]) -> dict:
         "status": "未响应",
         "grade": "未响应",
         "evidence": "",
-        "reason": "投标书未定位到与本评分点对应的原文。",
+        "reason": "对照本项招标评分要求，投标书中未见相应的响应内容。",
         "suggestion": f"请在本册投标文件中写入可核验的「{raw['name']}」响应内容后再送审。",
         "strategies": strategies,
         "sourceItemId": raw.get("sourceItemId") or "",
@@ -518,6 +557,9 @@ def _failed_entry(raw: dict, strategies: list[dict], err: str) -> dict:
 
 
 def _judged_entry(raw: dict, judged: dict, strategies: list[dict]) -> dict:
+    evidence = str(judged.get("evidence") or "").strip()
+    if not evidence:
+        return _unanswered_entry(raw, strategies)
     max_score = float(raw["maxScore"] or 0)
     try:
         score = float(judged.get("score") or 0)
@@ -566,12 +608,37 @@ def run(
     judged_map: dict[str, dict] = {}
     to_judge = [it for it in raw_items if not it["formula"]]
     located: list[dict] = []
+    pending_scan: list[dict] = []
     for it in to_judge:
         it["window"] = _windows(it["name"], it["rule"], bid, paragraphs)
         if it["window"]:
             located.append(it)
         else:
-            judged_map[it["id"]] = {"_unanswered": True}
+            pending_scan.append(it)
+
+    if pending_scan:
+        # 关键词窗口检索找不到候选：本评分点大多是评委打分语言（原文里搜不到这些字），
+        # 升级到分块通读投标书正文，避免直接判「未响应」。打分证据与「是否应答」共用同
+        # 一次扫描结果，不会再出现同一评分点判出两个矛盾结论。
+        from . import clause_scan
+
+        scan_query = [
+            {"id": it["id"], "query": f"{it['name']}：{it['rule']}", "title": it["name"]} for it in pending_scan
+        ]
+        scanned = clause_scan.scan_items(scan_query, bid)
+        for it in pending_scan:
+            row = scanned.get(it["id"]) or {}
+            excerpt = str(row.get("excerpt") or "").strip()
+            if row.get("answered") and excerpt:
+                it["window"] = excerpt[:_WINDOW]
+                located.append(it)
+            elif row.get("answered"):
+                # 扫描按「宁缺毋滥」兜底判已应答，但没有可引用原句（模型不可用/正文为空等）：
+                # 不能虚构评分依据，但也不能扣成「未响应」，标记为未能评审，提示人工复核。
+                judged_map[it["id"]] = {"_error": str(row.get("reason") or "分块通读未能给出可引用原句")}
+            else:
+                judged_map[it["id"]] = {"_unanswered": True}
+
     if located:
         try:
             model_id = get_default_model_id()

@@ -347,8 +347,8 @@ VETO_CHECK_POINTS = [
             "不比对其他公司未公开的投标文件",
         ],
         "wired": "接入判定",
-        "wiredNote": "E4 对本企业其他项目文件做 MD5 与段落/全文相似度比对；明确不伪造跨投标人围串标结果",
-        "engine": "e4_duplicate_filler",
+        "wiredNote": "E1 对本企业其他项目投标文件做 MD5 撞库与长句比对；明确不伪造跨投标人围串标结果",
+        "engine": "e1_veto",
     },
     {
         "key": "content_match",

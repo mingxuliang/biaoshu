@@ -16,13 +16,6 @@ _SLOT_LABELS = {
     "drawing": "施工图纸",
 }
 
-_LEVEL = {
-    "废标": ("L1", "废标"),
-    "降档": ("L1", "降档"),
-    "扣分": ("L3", "扣分"),
-    "建议": ("L5", "建议"),
-}
-
 
 def _slots_text(source: str, sources: list | None) -> str:
     if source == "tender":
@@ -30,41 +23,90 @@ def _slots_text(source: str, sources: list | None) -> str:
     if source == "drawing":
         return "图纸"
     names = [_SLOT_LABELS.get(str(k), str(k)) for k in (sources or []) if k]
-    return "、".join(names) if names else "多种类型"
+    return "、".join(names) if names else SOURCE_LABELS.get(source, "多种类型")
 
 
-def run(full_text: str, paragraphs: list[dict] | None, rules: list | None) -> list[dict]:
-    from .e_parse_match import _substance_blob, _unanswered
+def _level_for_scope(severity: str, scope: str) -> str:
+    """自定义规则要落在当前分册的可见层级，避免商务预审丢掉「扣分」。"""
+    if scope == "business":
+        return "L1" if severity in ("废标", "降档") else "L2"
+    if scope == "tech":
+        return "L5" if severity == "建议" else "L3"
+    if severity in ("废标", "降档"):
+        return "L1"
+    if severity == "建议":
+        return "L5"
+    return "L3"
 
-    bid = _substance_blob(full_text or "", paragraphs)
-    heading_blob = "".join((p.get("text") or "") for p in (paragraphs or []) if p.get("isHeading"))
+
+def run(full_text: str, paragraphs: list[dict] | None, rules: list | None, scope: str = "full") -> dict:
+    from .clause_cover import CAPS, CoverResult, cap_overflow_finding, check_clauses_batch, substance_blob
+
+    bid = substance_blob(full_text or "", paragraphs)
     findings: list[dict] = []
-    for item in rules or []:
-        if not isinstance(item, dict) or item.get("enabled") is False:
+    items: list[dict] = []
+    omitted = 0
+
+    entries = []
+    for raw in rules or []:
+        if not isinstance(raw, dict) or raw.get("enabled") is False:
             continue
-        content = str(item.get("content") or "").strip()
+        content = str(raw.get("content") or "").strip()
         if len(content) < 2:
             continue
-        title = str(item.get("title") or "").strip()
-        if not _unanswered(content, bid, title, heading_blob):
-            continue
-        source = str(item.get("source") or "tender")
-        where = _slots_text(source, item.get("sources") if isinstance(item.get("sources"), list) else [])
+        entries.append(raw)
+
+    batch = [
+        {"id": str(i), "clause": str(raw.get("content") or "").strip(), "title": str(raw.get("title") or "").strip()}
+        for i, raw in enumerate(entries)
+    ]
+    # 先跑免费的字面命中/关键词候选校验；命中不到候选的规则（原文换了说法、或规则本身
+    # 是评委/审查口径而非投标人应答语言）整批升级到分块通读投标书正文，不再直接判「未响应」。
+    scanned = check_clauses_batch(batch, bid=bid, paragraphs=paragraphs, full_text=full_text or "")
+
+    for i, raw in enumerate(entries):
+        content = str(raw.get("content") or "").strip()
+        title = str(raw.get("title") or "").strip()
+        cover = scanned.get(str(i)) or CoverResult(answered=True, reason="核验缺失，按宁缺毋滥视为已响应")
+        source = str(raw.get("source") or "tender")
+        where = _slots_text(source, raw.get("sources") if isinstance(raw.get("sources"), list) else [])
         label = title or content[:24]
-        level, severity = _LEVEL.get(str(item.get("severity") or "扣分"), ("L3", "扣分"))
+        severity = str(raw.get("severity") or "扣分")
+        if severity not in ("废标", "降档", "扣分", "建议"):
+            severity = "扣分"
+        status = "已响应" if cover.answered else "未响应"
+        items.append(
+            {
+                "id": str(raw.get("id") or ""),
+                "title": label,
+                "content": content[:800],
+                "source": source,
+                "sourceLabel": where,
+                "severity": severity,
+                "status": status,
+                "excerpt": cover.excerpt or "",
+                "reason": cover.reason or ("投标书已覆盖该规则。" if cover.answered else "投标书未确认对应表述。"),
+            }
+        )
+        if cover.answered:
+            continue
+        if len(findings) >= CAPS["custom"]:
+            omitted += 1
+            continue
         findings.append(
             {
                 "engine": "e_custom_rules",
-                "level": level,
+                "level": _level_for_scope(severity, scope),
                 "severity": severity,
                 "location": f"自定义规则 / {where}",
-                "excerpt": "",
+                "excerpt": cover.excerpt,
                 "rule": f"自定义规则（{where}）：{label}",
                 "tenderQuote": content[:500],
-                "suggestion": f"人工补充的规则未在投标书中检出对应表述，请按该条款补写响应。来源：{where}。",
-                "confidence": 0.7,
+                "suggestion": cover.reason or f"人工补充的规则未确认对应表述，请按该条款补写。来源：{where}。",
+                "confidence": 0.78,
+                "unansweredConfirmed": cover.unanswered_confirmed or not cover.answered,
             }
         )
-        if len(findings) >= 40:
-            break
-    return findings
+    if omitted:
+        findings.append(cap_overflow_finding("custom", omitted, "L5", "建议"))
+    return {"findings": findings, "items": items}

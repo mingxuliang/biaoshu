@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 DEFAULT_CATEGORY = "软件服务类"
@@ -155,6 +156,118 @@ def row_body(row: dict) -> str:
     return (row.get("original") or row.get("content") or "").strip()
 
 
+_SKIP_DISTILL_LABELS = {
+    "序号",
+    "是否必须",
+    "风险等级",
+    "计量单位",
+    "工程数量",
+    "来源/依据",
+}
+_CLAUSE_HINTS = (
+    "投标人应当",
+    "投标人应",
+    "投标人必须",
+    "投标人须",
+    "响应文件应当",
+    "招标文件规定",
+    "本招标文件",
+    "详见招标文件",
+    "一经发现",
+    "按招标文件",
+    "根据招标文件",
+    "须知前附表",
+)
+_FLUFF_SENTENCE = re.compile(r"^(详见(招标文件|本章|本节).{0,24}|以招标文件为准|按招标文件执行)$")
+_LEAD_IN = re.compile(r"^(投标人|响应人|供应商|承包人)(应当|应|必须|须)")
+
+
+def _looks_like_raw_clause(text: str) -> bool:
+    body = (text or "").replace("【答疑补遗为准】", "").strip()
+    if len(body) < 48:
+        return False
+    lines = [ln.strip() for ln in body.split("\n") if ln.strip()]
+    if len(lines) >= 3:
+        heavy = sum(1 for ln in lines if len(ln) >= 72 or any(h in ln for h in _CLAUSE_HINTS))
+        return heavy * 2 >= len(lines)
+    if any(h in body for h in _CLAUSE_HINTS) and (body.count("。") >= 1 or len(body) >= 80):
+        return True
+    return body.count("。") >= 2 and len(body) >= 100
+
+
+def _compress_sentence(text: str) -> str:
+    s = (text or "").strip(" 　，,。；;、")
+    if not s:
+        return ""
+    s = _LEAD_IN.sub("", s).strip(" 　，,")
+    s = re.sub(r"^(应当|应|必须|须)", "", s).strip(" 　，,")
+    s = s.replace("详见招标文件", "").replace("本招标文件的规定", "").replace("本招标文件规定", "")
+    s = re.sub(r"\s{2,}", " ", s).strip(" 　，,。；;")
+    if _FLUFF_SENTENCE.match(s) or s in {"详见招标文件", "以招标文件为准"}:
+        return ""
+    return s
+
+
+def _compress_clause(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return raw
+    prefix = ""
+    body = raw
+    mark = "【答疑补遗为准】"
+    if body.startswith(mark):
+        prefix = mark
+        body = body[len(mark) :].strip()
+    lines = body.split("\n")
+    if len(lines) >= 2:
+        result = "\n".join(_compress_sentence(ln) or ln.strip() for ln in lines)
+    else:
+        kept = [_compress_sentence(p) for p in re.split(r"[。；;]", body) if p.strip()]
+        kept = [x for x in kept if x]
+        result = "\n".join(kept) if kept else body
+    if not result.strip():
+        return raw
+    return f"{prefix}{result}" if prefix else result
+
+
+def _should_distill_row(label: str, content: str, original: str) -> bool:
+    if (label or "") in _SKIP_DISTILL_LABELS:
+        return False
+    text = (content or "").strip()
+    if not text:
+        return False
+    orig = (original or "").strip()
+    if orig and text != orig and not _looks_like_raw_clause(text):
+        return False
+    return _looks_like_raw_clause(text) or (bool(orig) and text == orig and len(text) >= 48)
+
+
+def ensure_originals(tree: list[dict]) -> None:
+    """没有单独原文时，把当前字段当作招标原文留给评标尺子。"""
+    for dim in tree:
+        for item in dim.get("items") or []:
+            for sec in item.get("sections") or []:
+                for row in sec.get("rows") or []:
+                    content = (row.get("content") or "").strip()
+                    original = (row.get("original") or "").strip()
+                    if not original and content:
+                        row["original"] = content
+
+
+def distill_display(tree: list[dict]) -> None:
+    """页面摘要改写成可扫读事实；不改 original。"""
+    for dim in tree:
+        for item in dim.get("items") or []:
+            for sec in item.get("sections") or []:
+                for row in sec.get("rows") or []:
+                    content = (row.get("content") or "").strip()
+                    original = (row.get("original") or "").strip()
+                    if _should_distill_row(row.get("label") or "", content, original):
+                        distilled = _compress_clause(content)
+                        if distilled and distilled != content:
+                            row["content"] = distilled
+
+
 def catalog_for_keys(
     dim_keys: list[str],
     category: str | None = DEFAULT_CATEGORY,
@@ -176,7 +289,8 @@ def catalog_for_keys(
                 fields = "、".join(sec["rows"])
                 lines.append(f"- 板块 {sec['id']}「{sec['title']}」字段：{fields}")
     return "\n".join(lines) + (
-        "\n\n每个字段的值必须是对象 {\"摘要\": \"...\", \"原文\": \"...\"}，禁止只返回字符串。"
+        "\n\n每个字段的值必须是对象 {\"摘要\": \"提炼后的事实\", \"原文\": \"对应条款原文\"}。"
+        "摘要给人快速看懂要求，禁止粘贴招标正文；原文留给锁定评标尺子，须含条款号。"
     )
 
 
@@ -299,6 +413,9 @@ def merge_tree(stored: list | None, category: str | None = DEFAULT_CATEGORY) -> 
                 sec_map[sec["id"]] = row_map
             fills[item["id"]] = sec_map
     apply_fills(tree, fills)
+    _migrate_legacy_tables(tree, fills)
+    ensure_originals(tree)
+    distill_display(tree)
     mark_completed(tree)
     return tree
 
@@ -340,10 +457,213 @@ def _row_contents(item: dict) -> list[tuple[str, str, str]]:
     return out
 
 
+_RISK_LABELS = ("风险点", "详细描述", "风险等级", "来源/依据")
+
+
+def _zip_aligned_rows(item: dict, labels: tuple[str, ...]) -> list[list[str]]:
+    """把按行对齐的多列表格还原成逐条记录。"""
+    by: dict[str, list[str]] = {label: [] for label in labels}
+    for sec in item.get("sections") or []:
+        for row in sec.get("rows") or []:
+            label = row.get("label") or ""
+            if label in by:
+                by[label] = [ln.strip() for ln in (row_body(row) or "").split("\n")]
+    n = max((len(v) for v in by.values()), default=0)
+    out: list[list[str]] = []
+    for i in range(n):
+        rec = [(by[label][i] if i < len(by[label]) else "") for label in labels]
+        if any(rec):
+            out.append(rec)
+    return out
+
+
+def _zip_risk_rows(item: dict) -> list[dict]:
+    """把废标四列按行对齐成报告同款风险点。"""
+    title = ""
+    for sec in item.get("sections") or []:
+        title = sec.get("title") or title
+    out: list[dict] = []
+    for rec in _zip_aligned_rows(item, _RISK_LABELS):
+        point, desc, level, source = (rec + ["", "", "", ""])[:4]
+        if not (point or desc):
+            continue
+        out.append({"title": title, "point": point, "desc": desc, "level": level, "source": source})
+    return out
+
+
+_COMPOSE_LABELS = ("序号", "文件名称", "格式要求", "是否必须", "备注")
+_QUALDOC_LABELS = ("资料类别", "具体资料", "是否必须", "备注")
+_OLD_RISK_LABEL = "废标风险点（风险点/描述/等级/条款号）"
+_OLD_COMPOSE_LABEL = "投标文件组成清单（文件名/格式/是否必须/备注）"
+_OLD_QUALDOC_LABEL = "资格审查资料详细清单（资料类别/具体资料/是否必须/备注）"
+
+
+def _split_legacy_lines(blob: str) -> list[str]:
+    text = (blob or "").replace("【答疑补遗为准】", "").strip()
+    if not text:
+        return []
+    lines = [ln.strip("；;· ").strip() for ln in re.split(r"\n+", text) if ln.strip()]
+    if len(lines) == 1 and ("；" in lines[0] or ";" in lines[0]):
+        lines = [x.strip() for x in re.split(r"[；;]", lines[0]) if x.strip()]
+    return lines
+
+
+def _parse_legacy_risk(blob: str) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for line in _split_legacy_lines(blob):
+        point, rest = "", line
+        m = re.match(r"^([^：:]{2,40})[：:](.+)$", line)
+        if m:
+            point, rest = m.group(1).strip(), m.group(2).strip()
+        level, source = "", ""
+        tail = re.search(r"[（(]([^）)]+)[）)]\s*$", rest)
+        if tail:
+            rest = rest[: tail.start()].strip()
+            for part in re.split(r"[，,、]", tail.group(1)):
+                part = part.strip()
+                if not part:
+                    continue
+                if part[:1] in "高中低" and not level:
+                    level = part[:1]
+                else:
+                    source = f"{source}、{part}" if source else part
+        if not point:
+            point = rest[:18] if rest else line[:18]
+        if point or rest:
+            rows.append([point, rest or point, level, source])
+    return rows
+
+
+def _parse_legacy_compose(blob: str) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for i, line in enumerate(_split_legacy_lines(blob), start=1):
+        line = re.sub(r"^[\d一二三四五六七八九十]+[.、．)）]\s*", "", line)
+        parts = [p.strip() for p in re.split(r"\s*/\s*", line) if p.strip()]
+        if len(parts) >= 2:
+            name, fmt = parts[0], parts[1]
+            must = parts[2] if len(parts) > 2 else ""
+            remark = " / ".join(parts[3:]) if len(parts) > 3 else ""
+        else:
+            m = re.match(r"^(.+?)[：:](.+)$", line)
+            name, fmt, must, remark = (m.group(1).strip(), m.group(2).strip(), "", "") if m else (line, "", "", "")
+        if "必须" in must or must in {"是", "须"}:
+            must = "是"
+        elif must in {"否", "非必须"}:
+            must = "否"
+        elif "按需" in must or "如有" in must:
+            must = "按需"
+        if name:
+            rows.append([str(i), name, fmt, must, remark])
+    return rows
+
+
+def _parse_legacy_qualdoc(blob: str) -> list[list[str]]:
+    rows: list[list[str]] = []
+    last_kind = ""
+    for line in _split_legacy_lines(blob):
+        parts = [p.strip() for p in re.split(r"\s*/\s*", line) if p.strip()]
+        if len(parts) >= 2:
+            kind, name = parts[0], parts[1]
+            must = parts[2] if len(parts) > 2 else ""
+            remark = " / ".join(parts[3:]) if len(parts) > 3 else ""
+        else:
+            m = re.match(r"^(.+?)[：:](.+)$", line)
+            kind, name, must, remark = (m.group(1).strip(), m.group(2).strip(), "", "") if m else ("", line, "", "")
+        if kind:
+            last_kind = kind
+        else:
+            kind = last_kind
+        if name:
+            rows.append([kind, name, must, remark])
+    return rows
+
+
+def _table_line_counts(sec: dict, cols: tuple[str, ...]) -> list[int]:
+    counts: list[int] = []
+    for row in sec.get("rows") or []:
+        if row.get("label") not in cols:
+            continue
+        lines = [ln.strip() for ln in (row.get("content") or "").split("\n") if ln.strip()]
+        if lines:
+            counts.append(len(lines))
+    return counts
+
+
+def _already_aligned_table(sec: dict, cols: tuple[str, ...]) -> bool:
+    counts = _table_line_counts(sec, cols)
+    if len(counts) < 2:
+        return False
+    peak = max(counts)
+    return peak >= 2 and sum(1 for n in counts if n >= peak - 1) >= 2
+
+
+def _fill_text(value) -> str:
+    summary, original = coerce_fill(value)
+    return summary or original
+
+
+def _pick_legacy_blob(sec: dict, sec_fill: dict, cols: tuple[str, ...], old_label: str) -> str:
+    blob = _fill_text(sec_fill.get(old_label)) if isinstance(sec_fill, dict) else ""
+    if blob.strip():
+        return blob
+    if isinstance(sec_fill, dict):
+        extras = []
+        for key, value in sec_fill.items():
+            if key in cols or key == old_label:
+                continue
+            text = _fill_text(value)
+            if text.strip():
+                extras.append(text)
+        if extras:
+            return "\n".join(extras)
+    nonempty = [
+        (row.get("content") or "").strip()
+        for row in sec.get("rows") or []
+        if row.get("label") in cols and (row.get("content") or "").strip()
+    ]
+    if len(nonempty) == 1:
+        return nonempty[0]
+    return ""
+
+
+def _write_aligned_cols(sec: dict, cols: tuple[str, ...], parsed: list[list[str]]) -> None:
+    by = {col: "\n".join(row[i] if i < len(row) else "" for row in parsed) for i, col in enumerate(cols)}
+    for row in sec.get("rows") or []:
+        if row.get("label") in by:
+            row["content"] = by[row["label"]]
+            if not (row.get("original") or "").strip():
+                row["original"] = by[row["label"]]
+
+
+def _migrate_legacy_tables(tree: list[dict], fills: dict) -> None:
+    specs = (
+        (None, _OLD_RISK_LABEL, _RISK_LABELS, _parse_legacy_risk),
+        ("req-compose", _OLD_COMPOSE_LABEL, _COMPOSE_LABELS, _parse_legacy_compose),
+        ("req-qualdocs", _OLD_QUALDOC_LABEL, _QUALDOC_LABELS, _parse_legacy_qualdoc),
+    )
+    for dim in tree:
+        for item in dim.get("items") or []:
+            item_fill = fills.get(item.get("id")) or {}
+            for old_id, old_label, cols, parser in specs:
+                if old_id and item.get("id") != old_id:
+                    continue
+                if old_id is None and not str(item.get("id") or "").startswith("reject-"):
+                    continue
+                for sec in item.get("sections") or []:
+                    if _already_aligned_table(sec, cols):
+                        continue
+                    sec_fill = item_fill.get(sec.get("id")) or {}
+                    blob = _pick_legacy_blob(sec, sec_fill if isinstance(sec_fill, dict) else {}, cols, old_label)
+                    parsed = parser(blob)
+                    if not parsed:
+                        continue
+                    _write_aligned_cols(sec, cols, parsed)
+
+
 # 派生四类尺子时的单类上限：早期为 20，滨湖/濉溪等工程标一个项目的技术因素+
 # 第七章考题+商务客观件轻松超过 20 条，截断会漏掉「无市政道路」这类括号命题，
 # 因此统一放宽到 60，两类 category 都受益。
-_MAX_DERIVED_ITEMS = 60
+_MAX_DERIVED_ITEMS = 200
 
 
 _MISC_OTHER_ID = "misc-other"
@@ -373,7 +693,7 @@ def derive_engine_fields(tree: list[dict], category: str | None = DEFAULT_CATEGO
     qual_item_ids = QUAL_ITEM_IDS_BY_CATEGORY[key]
     format_item_ids = FORMAT_ITEM_IDS_BY_CATEGORY[key]
     # 软件服务类里"review-"前缀代表技术/服务/售后主观评审项；
-    # 工程类：施工组织设计、商务机构评分、合同技术指标为主观项，报价公式为客观项。
+    # 工程类：技术标评分、商务机构评分、合同技术指标为主观项，报价公式为客观项。
     subject_prefixes = (
         ("review-", "eval-tech") if key == "软件服务类" else ("eval-tech", "eval-business", "contract-tech")
     )
@@ -493,16 +813,32 @@ def derive_engine_fields(tree: list[dict], category: str | None = DEFAULT_CATEGO
                         }
                     )
             if item_id in must_item_types:
-                for title, _label, content in rows:
-                    must_respond.append(
-                        {
-                            "id": f"mr-{uuid.uuid4().hex[:8]}",
-                            "clause": content,
-                            "original": title or "未标注",
-                            "type": must_item_types[item_id],
-                            "status": "待响应",
-                        }
-                    )
+                risk_rows = _zip_risk_rows(item)
+                if risk_rows:
+                    for risk in risk_rows:
+                        clause = f"{risk['point']}：{risk['desc']}" if risk["desc"] else risk["point"]
+                        if risk["level"]:
+                            clause = f"{clause}（{risk['level']}）"
+                        must_respond.append(
+                            {
+                                "id": f"mr-{uuid.uuid4().hex[:8]}",
+                                "clause": clause,
+                                "original": risk["source"] or risk["title"] or "未标注",
+                                "type": must_item_types[item_id],
+                                "status": "待响应",
+                            }
+                        )
+                else:
+                    for title, _label, content in rows:
+                        must_respond.append(
+                            {
+                                "id": f"mr-{uuid.uuid4().hex[:8]}",
+                                "clause": content,
+                                "original": title or "未标注",
+                                "type": must_item_types[item_id],
+                                "status": "待响应",
+                            }
+                        )
             if item_id in qual_item_ids:
                 for title, label, content in rows:
                     level = "星号" if any(k in content for k in ("必须", "须具备", "不通过", "无效标")) else "建议"
@@ -515,6 +851,38 @@ def derive_engine_fields(tree: list[dict], category: str | None = DEFAULT_CATEGO
                         }
                     )
             if item_id in format_item_ids:
+                if item_id == "req-compose":
+                    zipped = _zip_aligned_rows(item, _COMPOSE_LABELS)
+                    if zipped:
+                        for rec in zipped:
+                            seq, name, fmt, must, remark = (rec + ["", "", "", "", ""])[:5]
+                            parts = [p for p in (fmt, f"是否必须：{must}" if must else "", remark) if p]
+                            format_requirements.append(
+                                {
+                                    "title": name or f"组成文件{seq}",
+                                    "desc": "；".join(parts) or name,
+                                    "source": seq or item.get("label") or "投标文件组成",
+                                    "level": "废标" if must == "是" else "强制",
+                                    "sourceItemId": item_id,
+                                }
+                            )
+                        continue
+                if item_id == "req-qualdocs":
+                    zipped = _zip_aligned_rows(item, _QUALDOC_LABELS)
+                    if zipped:
+                        for rec in zipped:
+                            kind, name, must, remark = (rec + ["", "", "", ""])[:4]
+                            parts = [p for p in (kind, f"是否必须：{must}" if must else "", remark) if p]
+                            format_requirements.append(
+                                {
+                                    "title": name or kind or "资格审查资料",
+                                    "desc": "；".join(parts) or name,
+                                    "source": kind or item.get("label") or "资格审查资料",
+                                    "level": "废标" if must == "是" else "强制",
+                                    "sourceItemId": item_id,
+                                }
+                            )
+                        continue
                 for title, label, content in rows:
                     level = "废标" if any(k in content for k in ("无效标", "废标", "否决")) else "强制"
                     format_requirements.append(
@@ -527,11 +895,18 @@ def derive_engine_fields(tree: list[dict], category: str | None = DEFAULT_CATEGO
                         }
                     )
 
+    omitted = {
+        "scoreRules": max(0, len(score_rules) - _MAX_DERIVED_ITEMS),
+        "mustRespond": max(0, len(must_respond) - _MAX_DERIVED_ITEMS),
+        "qualification": max(0, len(qualification) - _MAX_DERIVED_ITEMS),
+        "formatRequirements": max(0, len(format_requirements) - _MAX_DERIVED_ITEMS),
+    }
     return {
         "scoreRules": score_rules[:_MAX_DERIVED_ITEMS],
         "mustRespond": must_respond[:_MAX_DERIVED_ITEMS],
         "qualification": qualification[:_MAX_DERIVED_ITEMS],
         "formatRequirements": format_requirements[:_MAX_DERIVED_ITEMS],
+        "omittedCount": omitted,
     }
 
 

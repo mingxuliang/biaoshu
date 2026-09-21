@@ -14,7 +14,7 @@ from ..audit import actor_from_request, project_label, write_audit
 from ..auth import get_current_user
 from ..db import get_db
 from ..engines.parse_export import checklist_to_docx
-from ..engines.parse_schema import merge_tree
+from ..engines.parse_schema import derive_engine_fields, merge_tree
 from ..engines.tender_package import (
     ALLOWED_EXTS,
     BLOCKED_EXTS,
@@ -30,7 +30,9 @@ from ..schemas import (
     CreateTenderParseJobIn,
     CustomRuleIn,
     CustomRuleOut,
+    TenderLocateOut,
     TenderParseJobOut,
+    TenderSheetPreviewOut,
     TenderUploadOut,
     UpdateCustomRuleIn,
 )
@@ -71,6 +73,8 @@ def _checklist_to_out(checklist: EvaluationChecklist, db: Session) -> ChecklistO
         vetoParams=checklist.engine_params_json or {},
         package=pkg,
         error=checklist.error,
+        extractStats=data.get("extractStats") or {},
+        omittedCount=data.get("omittedCount") or {},
     )
 
 
@@ -256,6 +260,61 @@ def tender_preview_page(
     )
 
 
+@router.post("/tender-documents/{doc_id}/locate", response_model=TenderLocateOut)
+def locate_tender_text(
+    doc_id: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> TenderLocateOut:
+    """按抽出字段定位到招标原文的具体条款行，并返回高亮框。"""
+    doc = db.get(TenderDocument, doc_id)
+    if not doc:
+        raise HTTPException(404, "文件不存在")
+    require_project(db, current_user, doc.project_id)
+    query = str((payload or {}).get("q") or "").strip()
+    label = str((payload or {}).get("label") or "").strip()[:80]
+    if not query:
+        return TenderLocateOut(found=False)
+    ext = os.path.splitext(doc.filename or "")[1].lower()
+    if ext != ".pdf":
+        return TenderLocateOut(found=False)
+    try:
+        from ..engines.tender_locate import locate_in_pdf
+
+        with storage.as_local(doc.storage_path) as path:
+            hit = locate_in_pdf(path, query, label)
+    except FileNotFoundError:
+        raise HTTPException(404, "文件不存在") from None
+    except Exception:
+        return TenderLocateOut(found=False)
+    return TenderLocateOut(**hit)
+
+
+@router.get("/tender-documents/{doc_id}/sheet-preview", response_model=TenderSheetPreviewOut)
+def tender_sheet_preview(
+    doc_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+) -> TenderSheetPreviewOut:
+    """Excel 按工作表格子预览，保留列对齐。"""
+    doc = db.get(TenderDocument, doc_id)
+    if not doc:
+        raise HTTPException(404, "文件不存在")
+    require_project(db, current_user, doc.project_id)
+    ext = os.path.splitext(doc.filename or "")[1].lower()
+    if ext not in {".xlsx", ".xls"}:
+        raise HTTPException(400, "仅 Excel 支持表格预览")
+    try:
+        from ..engines.tender_package import extract_xlsx_preview
+
+        with storage.as_local(doc.storage_path) as path:
+            sheets = extract_xlsx_preview(path)
+    except FileNotFoundError:
+        raise HTTPException(404, "文件不存在") from None
+    except Exception as exc:
+        raise HTTPException(400, f"Excel 预览失败：{exc}") from exc
+    return TenderSheetPreviewOut(filename=doc.filename or "", sheets=sheets)
+
+
 @router.delete("/tender-documents/{doc_id}")
 def delete_tender_document(
     doc_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
@@ -394,7 +453,13 @@ def lock_checklist(
     if not checklist or checklist.project_id != project_id:
         raise HTTPException(404, "评标尺子不存在")
     if checklist.status != "done":
-        raise HTTPException(400, "解析尚未完成，暂不能锁定")
+        raise HTTPException(400, "解析尚未完成或已失败，暂不能锁定")
+    data = checklist.checklist_json or {}
+    stats = data.get("extractStats") if isinstance(data.get("extractStats"), dict) else {}
+    if checklist.error:
+        raise HTTPException(400, f"解析结果不完整，不能锁定：{checklist.error}")
+    if "usableHanzi" in stats and int(stats.get("usableHanzi") or 0) < 800:
+        raise HTTPException(400, f"招标正文有效汉字仅 {stats.get('usableHanzi') or 0}，不足以作为评标尺子，请更换可复制文字的文件后重新解析")
 
     others = (
         db.query(EvaluationChecklist)
@@ -405,6 +470,18 @@ def lock_checklist(
         other.locked = False
     checklist.locked = True
     data = checklist.checklist_json or {}
+    project = db.get(Project, project_id)
+    category = (project.category if project else None) or "软件服务类"
+    tree = merge_tree(data.get("dimensions"), category)
+    engine = derive_engine_fields(tree, category)
+    data = dict(data)
+    data["dimensions"] = tree
+    data["scoreRules"] = engine["scoreRules"]
+    data["mustRespond"] = engine["mustRespond"]
+    data["qualification"] = engine["qualification"]
+    data["formatRequirements"] = engine["formatRequirements"]
+    data["omittedCount"] = engine.get("omittedCount") or {}
+    checklist.checklist_json = data
     n_rules = len(data.get("scoreRules") or [])
     n_must = len(data.get("mustRespond") or [])
     write_audit(

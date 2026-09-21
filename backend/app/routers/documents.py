@@ -44,14 +44,28 @@ async def upload_bid_document(
 
     if ext == ".doc":
         raise HTTPException(400, "暂不支持旧版 .doc 格式，请在 Word 中另存为 .docx 后重新上传")
-    if ext != ".docx":
-        raise HTTPException(400, "仅支持 .docx 格式的 Word 文档")
+    if ext not in {".docx", ".pdf"}:
+        raise HTTPException(400, "仅支持 .docx 或可复制文字的 PDF")
 
     content = await file.read()
-    try:
-        docx.Document(io.BytesIO(content))
-    except Exception as exc:
-        raise HTTPException(400, "文档已损坏或无法解析，请重新上传") from exc
+    if ext == ".docx":
+        try:
+            docx.Document(io.BytesIO(content))
+        except Exception as exc:
+            raise HTTPException(400, "文档已损坏或无法解析，请重新上传") from exc
+    else:
+        import pymupdf as fitz
+
+        try:
+            with fitz.open(stream=content, filetype="pdf") as pdf:
+                if pdf.page_count < 1:
+                    raise ValueError("空文档")
+                if pdf.needs_pass:
+                    raise HTTPException(400, "加密 PDF 无法预审，请提交未加密文件")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(400, "PDF 已损坏或无法解析，请重新上传") from exc
 
     key = storage.put_bytes(f"bid-documents/{project_id}", content, ext)
     resolved_kind = normalize_kind(kind, filename)

@@ -64,6 +64,15 @@ def ocr_image_bytes(data: bytes) -> tuple[str, str]:
     return cleaned, STATUS_OK if cleaned else STATUS_EMPTY
 
 
+def ocr_pixmap(pix: Any) -> tuple[str, str]:
+    """对已渲染的 PDF 页做 OCR，失败返回空。"""
+    try:
+        img = pixmap_to_image(pix)
+    except Exception:
+        return "", STATUS_EMPTY
+    return _ocr_pil(img)
+
+
 def ocr_pdf_pages(path: str, max_pages: int = 8) -> tuple[str, str]:
     ready, _reason = tesseract_ready()
     if not ready:

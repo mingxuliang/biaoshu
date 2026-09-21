@@ -450,7 +450,33 @@ def anchor_findings(sections: list[dict], issues: list[dict]) -> list[dict]:
         target["problem"] = {"issueId": issue["id"], "highlight": highlight or target["text"]}
         used_para_ids.add(target["id"])
 
+    stamp_issue_chapters(sections, issues)
     return sections
+
+
+def stamp_issue_chapters(sections: list[dict], issues: list[dict]) -> list[dict]:
+    """把锚定到的目录章节写回问题，供修改闭环按章筛选。"""
+    by_issue: dict[str, tuple[str, str]] = {}
+    for sec in sections or []:
+        sid = str(sec.get("id") or "")
+        heading = (sec.get("heading") or "").strip()
+        if not sid:
+            continue
+        for para in sec.get("paragraphs") or []:
+            iid = str((para.get("problem") or {}).get("issueId") or "")
+            if iid:
+                by_issue[iid] = (sid, heading)
+    for issue in issues or []:
+        if not isinstance(issue, dict):
+            continue
+        hit = by_issue.get(str(issue.get("id") or ""))
+        if hit:
+            issue["sectionId"] = hit[0]
+            issue["chapter"] = hit[1]
+        else:
+            issue.setdefault("sectionId", "")
+            issue.setdefault("chapter", "")
+    return issues
 
 
 def clear_problems(sections: list[dict]) -> list[dict]:

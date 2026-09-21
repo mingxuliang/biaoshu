@@ -301,6 +301,7 @@ def _extract_pdf_pack(path: str) -> dict:
         )
 
     with fitz.open(path) as doc:
+        ocr_pages = 0
         for page_i, page in enumerate(doc, start=1):
             label = f"第{page_i}页"
             text = (page.get_text() or "").strip()
@@ -362,12 +363,33 @@ def _extract_pdf_pack(path: str) -> dict:
                         dpi=info.get("dpi") or 0,
                     )
                     page_images += 1
-            if len(text) < PDF_SPARSE_CHARS and page_images == 0:
+            if len(text) < PDF_SPARSE_CHARS and ocr_pages < 40:
+                ocr_text = ""
                 try:
+                    from .ocr import ocr_pixmap
+
                     pix = page.get_pixmap(matrix=fitz.Matrix(1.6, 1.6), alpha=False)
-                    img = pixmap_to_image(pix)
-                    jpeg = image_to_jpeg_bytes(img, quality=JPEG_QUALITY, max_side=JPEG_MAX_SIDE)
-                    push_jpeg(jpeg, label, True, width=int(pix.width or 0), height=int(pix.height or 0), dpi=115)
+                    ocr_text, _status = ocr_pixmap(pix)
                 except Exception:
-                    push_jpeg(None, label, False)
+                    ocr_text = ""
+                if ocr_text:
+                    ocr_pages += 1
+                    for line in ocr_text.splitlines():
+                        raw = line.strip()
+                        if not raw:
+                            continue
+                        item = _para_base(idx, raw)
+                        if item["isHeading"]:
+                            heading = raw[:40]
+                            label = heading
+                        paragraphs.append(item)
+                        idx += 1
+                elif page_images == 0:
+                    try:
+                        pix = page.get_pixmap(matrix=fitz.Matrix(1.6, 1.6), alpha=False)
+                        img = pixmap_to_image(pix)
+                        jpeg = image_to_jpeg_bytes(img, quality=JPEG_QUALITY, max_side=JPEG_MAX_SIDE)
+                        push_jpeg(jpeg, label, True, width=int(pix.width or 0), height=int(pix.height or 0), dpi=115)
+                    except Exception:
+                        push_jpeg(None, label, False)
     return {"paragraphs": paragraphs, "images": images}

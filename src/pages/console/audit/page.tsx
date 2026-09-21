@@ -3,7 +3,7 @@ import { useSearchParams, Link } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import Toast from "../components/Toast";
 import ProgressRing from "../components/ProgressRing";
-import PreReviewReport from "./components/PreReviewReport";
+import PreReviewReport, { CustomRulesReviewBlock } from "./components/PreReviewReport";
 import TenderRuleReportView from "./components/TenderRuleReport";
 import DocumentSourceGate, { type PreReviewDoc, type PreReviewDocs } from "./components/DocumentSourceGate";
 import ProjectSelectionGate from "../components/ProjectSelectionGate";
@@ -22,7 +22,7 @@ import {
   type ReviewReportPair,
   type TrendPoint,
 } from "@/lib/api";
-import { issueChapter, issueRuleLabel, splitBidAndTender } from "@/lib/excerpt";
+import { issueChapter, issueRuleKind, issueRuleLabel, NO_BID_EXCERPT_HINT, splitBidAndTender, type IssueRuleKind } from "@/lib/excerpt";
 
 type TabKey = "result" | "trend" | "report" | "tender";
 
@@ -72,6 +72,7 @@ export default function AuditPage() {
   const selectedId = searchParams.get("project") || "";
   const currentProject = projects.find((p) => p.id === selectedId);
   const [activeTab, setActiveTab] = useState<TabKey>("result");
+  const [issueKind, setIssueKind] = useState<IssueRuleKind>("tender");
   const [reviewing, setReviewing] = useState(false);
   const [secondReviewing, setSecondReviewing] = useState(false);
   const [docs, setDocs] = useState<PreReviewDocs | null>(null);
@@ -89,6 +90,16 @@ export default function AuditPage() {
   const report = bizReport || techReport;
   const view = activeReport;
   const busy = reviewing || secondReviewing;
+  const scopeLevelKeys = reportScope === "business" ? ["L1", "L2"] : ["L3", "L4", "L5"];
+  const resultIssues = (view?.issues || []).filter(
+    (issue) =>
+      scopeLevelKeys.includes(issue.level) ||
+      (issue.rule || "").startsWith("自定义规则") ||
+      (issue.location || "").startsWith("自定义规则"),
+  );
+  const tenderIssues = resultIssues.filter((issue) => issueRuleKind(issue) === "tender");
+  const reviewIssues = resultIssues.filter((issue) => issueRuleKind(issue) === "review");
+  const listedIssues = issueKind === "tender" ? tenderIssues : reviewIssues;
 
   useEffect(() => {
     const bidDocumentId = searchParams.get("bidDocumentId");
@@ -211,7 +222,7 @@ export default function AuditPage() {
       const results = await Promise.all(
         jobs.map(async (job) => {
           const created = await createPrereviewJob(currentProject.id, job.doc.bidDocumentId, job.scope);
-          return pollJobUntilDone(created.job_id, { intervalMs: 2500, timeoutMs: 15 * 60 * 1000 });
+          return pollJobUntilDone(created.job_id, { intervalMs: 2500, timeoutMs: 30 * 60 * 1000 });
         }),
       );
       const failed = results.find((r) => r.status === "failed");
@@ -287,9 +298,19 @@ export default function AuditPage() {
       "",
       "问题摘要：",
       ...target.issues.slice(0, 20).map((issue, i) => {
-        const { excerpt, tenderQuote } = splitBidAndTender(issue.excerpt, issue.tenderQuote, issue.rule);
-        return `${i + 1}. [${issue.severity}] ${issueRuleLabel(issue)} @ ${issueChapter(issue.location) || issue.location}：${excerpt || "本项为缺项/未响应，投标书中没有可引用的命中句"}`;
+        const { excerpt } = splitBidAndTender(issue.excerpt, issue.tenderQuote, issue.rule);
+        return `${i + 1}. [${issue.severity}] ${issueRuleLabel(issue)} @ ${issueChapter(issue.location) || issue.location}：${excerpt || NO_BID_EXCERPT_HINT}`;
       }),
+      ...(target.customRules || []).length
+        ? [
+            "",
+            "自定义规则对照：",
+            ...(target.customRules || []).map(
+              (rule, i) =>
+                `${i + 1}. [${rule.status}] ${rule.title}（${rule.severity} · ${rule.sourceLabel || "—"}）：${rule.reason || ""}`,
+            ),
+          ]
+        : [],
     ];
     try {
       await navigator.clipboard.writeText(lines.join("\n"));
@@ -670,37 +691,65 @@ export default function AuditPage() {
                 {/* 预审报告问题 */}
                 <div className="overflow-hidden rounded-lg border border-background-300 bg-background-100 lg:max-h-[420px] lg:overflow-y-auto">
                   <div className="sticky top-0 border-b border-background-300 bg-background-50 px-4 py-3">
-                    <div className="flex items-center justify-between">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex items-center gap-2 text-sm font-medium text-foreground-800">
                         <i className="ri-file-list-3-line text-primary-500"></i>
                         预审问题清单 · 第 {view.round} 轮
                       </div>
-                      <Link
-                        to={`/console/review?project=${currentProject.id}&scope=${reportScope}`}
-                        className="flex h-7 cursor-pointer items-center gap-1 whitespace-nowrap rounded-md bg-primary-500 px-2.5 text-xs font-medium text-background-50 transition-colors hover:bg-primary-600"
-                      >
-                        去修改
-                        <i className="ri-arrow-right-line"></i>
-                      </Link>
+                      <div className="flex items-center gap-2">
+                        <div className="inline-flex rounded-lg border border-background-300 bg-background-100 p-0.5">
+                          {([
+                            ["tender", "招标问题", tenderIssues.length],
+                            ["review", "预审规则问题", reviewIssues.length],
+                          ] as const).map(([key, label, count]) => (
+                            <button
+                              key={key}
+                              type="button"
+                              onClick={() => setIssueKind(key)}
+                              className={`cursor-pointer rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                                issueKind === key
+                                  ? "bg-gradient-to-r from-primary-500 to-primary-600 text-background-50"
+                                  : "text-foreground-600 hover:text-foreground-900"
+                              }`}
+                            >
+                              {label} · {count}
+                            </button>
+                          ))}
+                        </div>
+                        <Link
+                          to={`/console/review?project=${currentProject.id}&scope=${reportScope}`}
+                          className="flex h-7 cursor-pointer items-center gap-1 whitespace-nowrap rounded-md bg-primary-500 px-2.5 text-xs font-medium text-background-50 transition-colors hover:bg-primary-600"
+                        >
+                          去修改
+                          <i className="ri-arrow-right-line"></i>
+                        </Link>
+                      </div>
                     </div>
                   </div>
                   <ul className="divide-y divide-background-200">
-                    {view.issues.filter((issue) => (reportScope === "business" ? ["L1", "L2"] : ["L3", "L4", "L5"]).includes(issue.level)).map((issue) => {
+                    {listedIssues.map((issue) => {
                       const { excerpt } = splitBidAndTender(issue.excerpt, issue.tenderQuote, issue.rule);
+                      const ruleLabel = issueRuleLabel(issue);
                       return (
                       <li key={issue.id}>
                         <Link
                           to={`/console/review?project=${currentProject.id}&scope=${reportScope}&issue=${issue.id}`}
                           className="block cursor-pointer px-4 py-3 transition-colors hover:bg-primary-50/60"
                         >
-                          <div className="flex items-center justify-between">
+                          <div className="flex items-center justify-between gap-2">
                             <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${severityStyle[issue.severity]}`}>
                               {issue.severity}
                             </span>
                             <span className="font-label text-[10px] text-foreground-500">{issue.level} · {issueChapter(issue.location) || "未标注章节"}</span>
                           </div>
+                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5 rounded-md border border-accent-200 bg-accent-50 px-2 py-1.5">
+                            <span className="inline-flex items-center gap-0.5 rounded bg-accent-500 px-1.5 py-0.5 text-[10px] font-semibold text-background-50">
+                              命中规则
+                            </span>
+                            <span className="text-xs font-semibold leading-snug text-accent-800">{ruleLabel}</span>
+                          </div>
                           <p className="mt-1.5 text-xs leading-relaxed text-foreground-700">
-                            {excerpt ? `「${excerpt}」` : "本项为缺项/未响应，投标书中没有可引用的命中句"}
+                            {excerpt ? `「${excerpt}」` : NO_BID_EXCERPT_HINT}
                           </p>
                           <p className="mt-1 text-[11px] text-foreground-500">建议：{issue.suggestion}</p>
                           <p className="mt-1.5 text-[11px] text-primary-600">点击定位到修改闭环原文 →</p>
@@ -708,17 +757,24 @@ export default function AuditPage() {
                       </li>
                       );
                     })}
-                    {view.issues.filter((issue) => (reportScope === "business" ? ["L1", "L2"] : ["L3", "L4", "L5"]).includes(issue.level)).length === 0 && (
+                    {listedIssues.length === 0 && (
                       <li className="px-4 py-10 text-center">
-                        {view.waste + view.risk + view.suggest > 0 || view.overall < 90 ? (
+                        {resultIssues.length === 0 && (view.waste + view.risk + view.suggest > 0 || view.overall < 90) ? (
                           <>
                             <i className="ri-error-warning-line text-3xl text-accent-400"></i>
                             <p className="mt-2 text-sm text-foreground-600">分层得分已扣分，问题明细未写入。请重新发起预审。</p>
                           </>
-                        ) : (
+                        ) : resultIssues.length === 0 ? (
                           <>
                             <i className="ri-checkbox-circle-line text-3xl text-primary-400"></i>
                             <p className="mt-2 text-sm text-foreground-600">本轮无预审问题，标书已达标</p>
+                          </>
+                        ) : (
+                          <>
+                            <i className="ri-file-list-3-line text-3xl text-foreground-300"></i>
+                            <p className="mt-2 text-sm text-foreground-600">
+                              {issueKind === "tender" ? "当前暂无招标问题" : "当前暂无预审规则问题"}
+                            </p>
                           </>
                         )}
                       </li>
@@ -763,6 +819,18 @@ export default function AuditPage() {
                   </ul>
                 </div>
               )}
+
+              <div className="mt-3 overflow-hidden rounded-lg border border-background-300 bg-background-100">
+                <div className="border-b border-background-300 bg-background-50 px-4 py-3">
+                  <div className="flex items-center gap-2 text-sm font-medium text-foreground-800">
+                    <i className="ri-list-check-3 text-primary-500"></i>
+                    自定义规则对照 · 第 {view.round} 轮
+                  </div>
+                </div>
+                <div className="px-4 py-3">
+                  <CustomRulesReviewBlock rules={view.customRules} />
+                </div>
+              </div>
               </>
               ) : (
                 <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-background-300 bg-background-100 px-6 py-12 text-center">
@@ -831,6 +899,8 @@ export default function AuditPage() {
                 risk={view.risk}
                 suggest={view.suggest}
                 scope={reportScope}
+                tenderRules={view.tenderRules}
+                customRules={view.customRules}
                 exporting={exporting}
                 onExport={() => { if (!exporting) void exportReport((view.scope as BidScope) || reportScope); }}
                 onCopy={() => { void copyReportSummary(); }}

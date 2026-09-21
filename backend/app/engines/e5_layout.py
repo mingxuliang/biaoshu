@@ -128,28 +128,42 @@ def run(
                     rule="F06.06 版式终审-暗标残留",
                     suggestion="若本项目要求暗标评审，请在 Word「文件→信息→检查文档」中清除作者等个人身份信息",
                 )
-            )
-
-    if file_form_enabled and context is not None:
-        if getattr(context, "encrypted", False):
-            findings.append(
-                _finding(
-                    severity="废标",
-                    location="全文 / 文件形态",
-                    excerpt="投标文件无法正常打开或已加密",
-                    rule="F06.06 版式终审-文件加密",
-                    suggestion="请提交未加密、可正常打开的 .docx；加密文件无法完成预审抽取",
                 )
-            )
-        if getattr(context, "scanned_pdf", False):
-            findings.append(
-                _finding(
-                    severity="降档",
-                    location="全文 / 扫描件 PDF",
-                    excerpt="检测到纯图片扫描 PDF，几乎无文字层",
-                    rule="F06.06 版式终审-扫描件 PDF",
-                    suggestion="请改用可复制文字的 Word/PDF，避免评审端无法检索",
-                )
-            )
 
+    if file_form_enabled:
+        findings.extend(file_form_findings(context))
+
+    return findings
+
+
+def file_form_findings(context) -> list[dict]:
+    """加密 / 纯扫描：商务标也要拦，不依赖 E5 全文版式。"""
+    findings: list[dict] = []
+    if context is None:
+        return findings
+    if getattr(context, "encrypted", False):
+        findings.append(
+            _finding(
+                severity="废标",
+                location="全文 / 文件形态",
+                excerpt="投标文件无法正常打开或已加密",
+                rule="F06.06 版式终审-文件加密",
+                suggestion="请提交未加密、可正常打开的 .docx 或 PDF；加密文件无法完成预审抽取",
+            )
+        )
+        findings[-1]["evidenceOk"] = True
+        findings[-1]["engine"] = "e5_layout"
+    if getattr(context, "scanned_pdf", False):
+        findings.append(
+            _finding(
+                severity="降档",
+                location="全文 / 扫描件 PDF",
+                excerpt="检测到纯图片扫描 PDF，几乎无文字层",
+                rule="F06.06 版式终审-扫描件 PDF",
+                suggestion="请改用可复制文字的 Word/PDF，避免评审端无法检索",
+            )
+        )
+        findings[-1]["evidenceOk"] = True
+        findings[-1]["engine"] = "e5_layout"
+        findings[-1]["issueClass"] = "human_check"
     return findings

@@ -24,8 +24,14 @@ import {
   type BidRevisionVersion,
   type ReviewReportPair,
 } from "@/lib/api";
-import type { PreReviewIssue } from "@/mocks/preReview";
-import { visibleNeedles } from "@/lib/excerpt";
+import {
+  UNASSIGNED_SECTION_ID,
+  assignIssuesToSections,
+  filterIssuesForSection,
+  groupIssuesByChapter,
+  headingBySectionId,
+  pendingCountBySection,
+} from "@/lib/reviewChapters";
 
 interface ToastState {
   message: string;
@@ -62,7 +68,9 @@ export default function ReviewPage() {
 
   const viewerRef = useRef<BidDocxViewerHandle>(null);
   const [viewerAnchoredIds, setViewerAnchoredIds] = useState<string[]>([]);
+  const [viewerIssueSections, setViewerIssueSections] = useState<Record<string, string>>({});
   const onViewerAnchored = useCallback((ids: string[]) => setViewerAnchoredIds(ids), []);
+  const onViewerIssueChapters = useCallback((map: Record<string, string>) => setViewerIssueSections(map), []);
 
   const showToast = (message: string, type: ToastState["type"] = "success") => {
     setToast({ message, type, visible: true });
@@ -119,6 +127,8 @@ export default function ReviewPage() {
     setVersions([]);
     setActiveIssueId(null);
     setActiveSectionId(null);
+    setViewerAnchoredIds([]);
+    setViewerIssueSections({});
 
     getOrCreateBidRevision(currentProject.id, bookletScope)
       .then((data) => {
@@ -144,66 +154,35 @@ export default function ReviewPage() {
     };
   }, [currentProject?.id, bookletScope]);
 
-  /* 章节 → 问题映射，用于目录/清单高亮联动 */
-  const sectionIssueMap = useMemo(() => {
-    const map: Record<string, PreReviewIssue[]> = {};
-    (revision?.sections || []).forEach((s) => {
-      s.paragraphs.forEach((p) => {
-        if (!p.problem) return;
-        const issue = revision?.issues.find((i) => i.id === p.problem!.issueId);
-        if (issue) {
-          map[s.id] = map[s.id] || [];
-          map[s.id].push(issue);
-        }
-      });
-    });
-    return map;
-  }, [revision]);
-
   const issueSectionMap = useMemo(() => {
-    const map: Record<string, string> = {};
-    const sections = revision?.sections || [];
-    const indexHead = /详细评审索引|评审索引表/;
-    (revision?.issues || []).forEach((issue) => {
-      const needles = visibleNeedles(issue.excerpt, issue.location).map((n) => n.replace(/\s+/g, ""));
-      let bestId = "";
-      let bestScore = -1;
-      for (const s of sections) {
-        const heading = (s.heading || "").replace(/\s+/g, "");
-        if (!heading || heading === "文档开头" || indexHead.test(s.heading || "")) continue;
-        for (const n of needles) {
-          if (n.length < 6) continue;
-          let score = -1;
-          if (heading === n) score = 4;
-          else if (heading.endsWith(n)) score = 3;
-          else if (heading.includes(n)) score = 2;
-          else if (n.length >= 12 && n.includes(heading)) score = 1;
-          if (score > bestScore) {
-            bestScore = score;
-            bestId = s.id;
-          }
-        }
-      }
-      if (bestId) map[issue.id] = bestId;
-    });
-    sections.forEach((s) => {
-      if (indexHead.test(s.heading || "")) return;
-      s.paragraphs.forEach((p) => {
-        if (p.problem && !map[p.problem.issueId]) map[p.problem.issueId] = s.id;
-      });
-    });
-    return map;
-  }, [revision]);
+    const base = assignIssuesToSections(revision?.issues || [], revision?.sections || []);
+    return { ...base, ...viewerIssueSections };
+  }, [revision, viewerIssueSections]);
+
+  const sectionHeadings = useMemo(() => headingBySectionId(revision?.sections || []), [revision]);
+  const issueCounts = useMemo(
+    () => pendingCountBySection(revision?.issues || [], revision?.sections || [], issueSectionMap),
+    [revision, issueSectionMap],
+  );
+  const visibleIssues = useMemo(
+    () => filterIssuesForSection(revision?.issues || [], revision?.sections || [], issueSectionMap, activeSectionId),
+    [revision, issueSectionMap, activeSectionId],
+  );
+  const issueGroups = useMemo(
+    () => groupIssuesByChapter(visibleIssues, revision?.sections || [], issueSectionMap),
+    [visibleIssues, revision, issueSectionMap],
+  );
 
   const jumpToSection = (sectionId: string) => {
-    setActiveSectionId(sectionId);
+    setActiveSectionId((prev) => (prev === sectionId ? null : sectionId));
+    setActiveIssueId(null);
+    if (sectionId === UNASSIGNED_SECTION_ID) return;
+    if (activeSectionId === sectionId) return;
     const found = viewerRef.current?.scrollToSection(sectionId);
     if (found === false) showToast("未找到该章节在文档中的位置，请稍后重试", "error");
   };
 
   const jumpToIssue = (issueId: string) => {
-    const sectionId = issueSectionMap[issueId];
-    if (sectionId) setActiveSectionId(sectionId);
     setActiveIssueId(issueId);
     const tryScroll = () => viewerRef.current?.scrollToIssue(issueId);
     if (tryScroll()) return;
@@ -215,7 +194,8 @@ export default function ReviewPage() {
   };
 
   const jumpAll = () => {
-    const first = revision?.issues.find((i) => !i.resolved) || revision?.issues[0];
+    const pool = visibleIssues.length ? visibleIssues : revision?.issues || [];
+    const first = pool.find((i) => !i.resolved) || pool[0];
     if (first) {
       jumpToIssue(first.id);
       showToast("已按问题顺序锚定首个待处理问题，可用右侧清单逐一跳转", "info");
@@ -552,7 +532,8 @@ export default function ReviewPage() {
         <DocTree
           sections={revision.sections}
           activeSectionId={activeSectionId}
-          activeIssueId={activeIssueId}
+          issueCounts={issueCounts}
+          unassignedCount={issueCounts[UNASSIGNED_SECTION_ID] || 0}
           onSelectSection={jumpToSection}
         />
         <div className="relative h-full min-h-0 overflow-hidden rounded-lg border border-background-300 bg-background-100">
@@ -565,15 +546,19 @@ export default function ReviewPage() {
             fileName={revision.sourceFileName || `${currentProject.name}-${bookletLabel}.docx`}
             active
             onAnchored={onViewerAnchored}
+            onIssueChapters={onViewerIssueChapters}
           />
         </div>
         <IssuePanel
-          issues={revision.issues}
+          issues={visibleIssues}
+          groups={issueGroups}
           activeIssueId={activeIssueId}
+          filterHeading={activeSectionId ? sectionHeadings[activeSectionId] || null : null}
           applyingIssueId={applyingIssueId}
-          anchoredIds={viewerAnchoredIds.length ? viewerAnchoredIds : Object.keys(issueSectionMap)}
+          anchoredIds={viewerAnchoredIds.length ? viewerAnchoredIds : Object.keys(issueSectionMap).filter((id) => issueSectionMap[id] !== UNASSIGNED_SECTION_ID)}
           onIssueClick={jumpToIssue}
           onJumpAll={jumpAll}
+          onClearFilter={() => setActiveSectionId(null)}
           onToggleResolved={toggleIssueResolved}
           onApplySuggestion={applySuggestion}
         />

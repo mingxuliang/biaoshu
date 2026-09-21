@@ -151,8 +151,11 @@ def chapter_from_location(location: str = "") -> str:
     return rest[-1]
 
 
+_RULE_CODE = re.compile(r"^F\d{2}\.\d{2}\s+")
+
+
 def display_rule(rule: str = "", suggestion: str = "", strategy_key: str = "") -> str:
-    """五维语义条目改成命中的高分策略/规则名；其它引擎保留原规则编号。"""
+    """五维语义条目改成命中的高分策略/规则名；其它引擎去掉 F 编号只留规则名。"""
     key = (strategy_key or "").strip()
     if key in _STRATEGY_BY_KEY:
         return _STRATEGY_BY_KEY[key]
@@ -171,7 +174,7 @@ def display_rule(rule: str = "", suggestion: str = "", strategy_key: str = "") -
     raw = (rule or "").strip()
     if _GENERIC_SEMANTIC.search(raw):
         return "五维语义评审"
-    return raw or "未标注规则"
+    return _RULE_CODE.sub("", raw).strip() or "未标注规则"
 
 
 def _strip_wrap(text: str) -> str:
