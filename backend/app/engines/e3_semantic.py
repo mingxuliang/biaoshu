@@ -20,8 +20,10 @@ from .rules_data import (
     DIMENSION_LABELS,
     DIMENSION_RUBRIC,
     FILLER_SELF_CHECK_RULES,
+    GRADE_ORDER,
     HIGH_SCORE_STRATEGIES,
     TECH_SCORE_MODULES,
+    worst_grade,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,21 +42,19 @@ _VAGUE_SUGGEST = re.compile(r"不够量化|建议加强针对性|进一步完善
 
 
 def _merge_chunk_results(results: list[dict], lengths: list[int], weights: dict) -> dict:
-    total = float(sum(lengths) or 1)
+    # 去分数化：不再按字数加权平均出一个数字分，直接对每维取"跨分块最差等级"——
+    # 全书任一分块把某一维评到 D，这一维最终就是 D，不会被其它分块的高分"稀释"。
     dims: dict[str, dict] = {}
     for key in weights:
-        weighted = 0.0
+        grades: list[str] = []
         reasons: list[str] = []
-        for r, n in zip(results, lengths):
+        for r in results:
             d = (r.get("dimensions") or {}).get(key) or {}
-            try:
-                weighted += float(d.get("score") or 70) * n
-            except (TypeError, ValueError):
-                weighted += 70.0 * n
+            grades.append(str(d.get("grade") or "C"))
             reason = (d.get("reason") or "").strip()
             if reason and len(reasons) < 8:
                 reasons.append(reason)
-        dims[key] = {"score": round(weighted / total, 1), "reason": "；".join(reasons)[:800]}
+        dims[key] = {"grade": worst_grade(grades), "reason": "；".join(reasons)[:800]}
 
     rank = {"降档": 0, "扣分": 1, "建议": 2}
     issues: list[dict] = []
@@ -332,14 +332,17 @@ def _build_system_prompt(
 issues 每段最多 4 条，优先降档/扣分。excerpt 必须摘自本段【正文】或【附图N】占位，禁止摘目录行或带点线页码的目录条目。location 写章节名，不要写「目录」。
 禁止空泛建议（如「不够量化」「建议加强针对性」「进一步完善」）；只能报能指出缺哪个数字、哪张图、哪条规范或哪段未响应的问题。贴不上原句的条目不要输出。
 
+本预审报告不打分、不算分，五维评审只需给出定性等级：A=优（完全符合，仅建议）、B=良（存在扣分级小问题）、
+C=中（存在降档级问题）、D=差（存在废标级问题）。请按这一维度里最严重的问题定级，不要折算成分数再倒推等级。
+
 请仅返回严格的 JSON，不要包含任何其他文字说明，格式如下：
 {{
   "dimensions": {{
-    "completeness": {{"score": 0-100, "reason": "..."}},
-    "relevance": {{"score": 0-100, "reason": "..."}},
-    "compliance": {{"score": 0-100, "reason": "..."}},
-    "feasibility": {{"score": 0-100, "reason": "..."}},
-    "standardization": {{"score": 0-100, "reason": "..."}}
+    "completeness": {{"grade": "A|B|C|D", "reason": "..."}},
+    "relevance": {{"grade": "A|B|C|D", "reason": "..."}},
+    "compliance": {{"grade": "A|B|C|D", "reason": "..."}},
+    "feasibility": {{"grade": "A|B|C|D", "reason": "..."}},
+    "standardization": {{"grade": "A|B|C|D", "reason": "..."}}
   }},
   "issues": [
     {{"severity": "扣分|降档|建议", "location": "章节名/正文位置", "excerpt": "正文原句", "suggestion": "【预审规则-高分策略：《分类》】条款：……。按此写法可拿高分。随后给出可直接替换原文的句子", "strategyKey": "quantify", "applyText": "可直接替换 excerpt 的正文句子"}}
@@ -352,12 +355,10 @@ def _normalize(data: dict, weights: dict, chunk_text: str = "") -> dict:
     dims: dict[str, dict] = {}
     for key in weights:
         d = (data.get("dimensions") or {}).get(key, {}) or {}
-        score = d.get("score", 70)
-        try:
-            score = max(0.0, min(100.0, float(score)))
-        except (TypeError, ValueError):
-            score = 70.0
-        dims[key] = {"score": score, "reason": d.get("reason", "")}
+        grade = str(d.get("grade") or "").strip().upper()
+        if grade not in GRADE_ORDER:
+            grade = "C"  # 模型没给合法等级时按中性偏谨慎处理，不再用 70 分兜底
+        dims[key] = {"grade": grade, "reason": d.get("reason", "")}
 
     issues = []
     for item in (data.get("issues") or [])[:4]:
@@ -393,7 +394,7 @@ def _normalize(data: dict, weights: dict, chunk_text: str = "") -> dict:
 
 def _fallback_result(reason: str, weights: dict | None = None) -> dict:
     weights = weights or DEFAULT_WEIGHTS
-    dims = {key: {"score": 70.0, "reason": reason} for key in weights}
+    dims = {key: {"grade": "C", "reason": reason} for key in weights}
     issues = [
         {
             "engine": "e3_semantic",

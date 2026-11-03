@@ -136,7 +136,7 @@ class EvidenceGateTests(unittest.TestCase):
 
     def test_e3_normalize_drops_unsnapped(self) -> None:
         data = {
-            "dimensions": {"completeness": {"score": 80, "reason": "ok"}},
+            "dimensions": {"completeness": {"grade": "B", "reason": "ok"}},
             "issues": [{"severity": "扣分", "location": "章", "excerpt": "并不存在的摘句", "suggestion": "x"}],
         }
         out = _normalize(data, {"completeness": 100}, "本章只写了进度计划和质量保证体系。")
@@ -144,7 +144,7 @@ class EvidenceGateTests(unittest.TestCase):
 
     def test_e3_normalize_drops_vague_suggestion(self) -> None:
         data = {
-            "dimensions": {"completeness": {"score": 80, "reason": "ok"}},
+            "dimensions": {"completeness": {"grade": "B", "reason": "ok"}},
             "issues": [
                 {
                     "severity": "建议",

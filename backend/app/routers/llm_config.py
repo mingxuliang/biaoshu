@@ -40,6 +40,7 @@ def _model_to_out(model: LlmModel, provider: LlmProvider) -> LlmModelOut:
         speed=model.speed or "",
         vision=looks_like_vision_model(model.api_model or "", name=model.name or ""),
         ready=provider_ready(provider) and bool((model.api_model or "").strip()),
+        task=model.task if model.task in ("chat", "image") else "chat",
     )
 
 
@@ -105,8 +106,10 @@ def list_writer_models(
     for provider in load_providers(db):
         if not provider.enabled:
             continue
+        if not provider_ready(provider) or (provider.kind or "") == "local":
+            continue
         for model in provider.models or []:
-            if not model.enabled:
+            if not model.enabled or (model.task or "chat") == "image":
                 continue
             out.append(_model_to_out(model, provider))
     out.sort(key=lambda m: (0 if m.isDefault else 1, m.providerName, m.name))
@@ -217,6 +220,7 @@ def create_llm_model(
         ctx=payload.ctx or "",
         speed=payload.speed or "",
         sort_order=len(provider.models or []),
+        task="chat",
     )
     if model.is_default:
         _clear_defaults(db)
@@ -287,5 +291,10 @@ def test_llm_model(
     model = db.get(LlmModel, model_id)
     if not model:
         raise HTTPException(404, "模型不存在")
+    if (model.task or "chat") == "image":
+        provider = db.get(LlmProvider, model.provider_id)
+        if provider is None or not provider_ready(provider):
+            return LlmTestOut(ok=False, message="生图模型未配置火山方舟秘钥")
+        return LlmTestOut(ok=True, message=f"生图模型已接入：{model.api_model}。装饰配图会调用它，这里不试画。")
     ok, message, latency, preview = ping_model(model_id)
     return LlmTestOut(ok=ok, message=message, latencyMs=latency, preview=preview)

@@ -69,6 +69,8 @@ def ensure_schema() -> None:
         conn.execute(text("UPDATE bid_documents SET kind = 'combined' WHERE kind IS NULL OR kind = ''"))
         conn.execute(text("ALTER TABLE review_runs ADD COLUMN IF NOT EXISTS scope VARCHAR DEFAULT 'full'"))
         conn.execute(text("UPDATE review_runs SET scope = 'full' WHERE scope IS NULL OR scope = ''"))
+        conn.execute(text("ALTER TABLE llm_models ADD COLUMN IF NOT EXISTS task VARCHAR DEFAULT 'chat'"))
+        conn.execute(text("UPDATE llm_models SET task = 'chat' WHERE task IS NULL OR task = ''"))
         conn.execute(text("ALTER TABLE bid_revisions ADD COLUMN IF NOT EXISTS scope VARCHAR DEFAULT 'business'"))
         conn.execute(
             text(
@@ -87,6 +89,9 @@ def ensure_schema() -> None:
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_bid_revisions_project_scope "
                 "ON bid_revisions (project_id, scope)"
             )
+        )
+        conn.execute(
+            text("ALTER TABLE review_runs ADD COLUMN IF NOT EXISTS standard_review_json JSON DEFAULT '{}'::json")
         )
 
 

@@ -120,12 +120,17 @@ def get_default_model_id() -> str:
     try:
         row = (
             db.query(LlmModel)
-            .filter(LlmModel.is_default.is_(True), LlmModel.enabled.is_(True))
+            .filter(LlmModel.is_default.is_(True), LlmModel.enabled.is_(True), LlmModel.task != "image")
             .first()
         )
         if row:
             return row.id
-        row = db.query(LlmModel).filter(LlmModel.enabled.is_(True)).order_by(LlmModel.sort_order.asc()).first()
+        row = (
+            db.query(LlmModel)
+            .filter(LlmModel.enabled.is_(True), LlmModel.task != "image")
+            .order_by(LlmModel.sort_order.asc())
+            .first()
+        )
         if row:
             return row.id
     except Exception:  # noqa: BLE001
@@ -153,6 +158,8 @@ def get_vision_model_id() -> str | None:
         for row in rows:
             provider = row.provider
             if provider is None or not provider_ready(provider):
+                continue
+            if (row.task or "chat") == "image":
                 continue
             if not looks_like_vision_model(row.api_model or "", name=row.name or ""):
                 continue
@@ -185,6 +192,8 @@ def get_vision_model_id() -> str | None:
 
 
 def _from_row(model: LlmModel, provider: LlmProvider) -> ResolvedLlm:
+    if (model.task or "chat") == "image":
+        raise LlmError(f"「{model.name}」是豆包生图模型，不能用于目录、正文或对话", provider.kind)
     if not provider_ready(provider):
         raise LlmError(f"「{provider.name}」未配置 Base URL 或秘钥，请到系统模块「模型配置」补全", provider.kind)
     api_model = (model.api_model or "").strip()
@@ -213,9 +222,9 @@ def _lookup_db(model_id: str | None) -> ResolvedLlm | None:
         if row is None and alias:
             row = q.filter(LlmModel.api_model == alias).first()
         if row is None and not raw:
-            row = q.filter(LlmModel.is_default.is_(True), LlmModel.enabled.is_(True)).first()
+            row = q.filter(LlmModel.is_default.is_(True), LlmModel.enabled.is_(True), LlmModel.task != "image").first()
             if row is None:
-                row = q.filter(LlmModel.enabled.is_(True)).order_by(LlmModel.sort_order.asc()).first()
+                row = q.filter(LlmModel.enabled.is_(True), LlmModel.task != "image").order_by(LlmModel.sort_order.asc()).first()
         if row is None or row.provider is None:
             return None
         return _from_row(row, row.provider)

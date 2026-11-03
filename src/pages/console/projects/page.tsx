@@ -13,6 +13,15 @@ import { projectTypes, projectStatuses, type Project } from "@/mocks/projects";
 import { useProjects } from "@/context/ProjectContext";
 import { useAuth } from "@/context/AuthContext";
 import { hasPerm } from "@/lib/permissions";
+import { LIGHT_LABEL } from "@/lib/grade";
+
+const lightColor: Record<"绿" | "橙" | "红", string> = {
+  绿: "#16a34a",
+  橙: "#ea580c",
+  红: "#dc2626",
+};
+
+const LIGHT_RANK: Record<string, number> = { 红: 3, 橙: 2, 绿: 1 };
 
 interface ToastState {
   message: string;
@@ -24,7 +33,7 @@ const statCards = [
   { key: "total", label: "全部项目", icon: "ri-folder-2-line", gradient: "from-primary-400 to-primary-600", bar: "from-primary-500 to-primary-400" },
   { key: "active", label: "进行中", icon: "ri-loader-4-line", gradient: "from-accent-400 to-accent-500", bar: "from-accent-500 to-accent-400" },
   { key: "progress", label: "平均进度", icon: "ri-percent-line", gradient: "from-secondary-400 to-secondary-500", bar: "from-secondary-400 to-secondary-300" },
-  { key: "score", label: "平均预测得分", icon: "ri-focus-3-line", gradient: "from-primary-400 to-primary-600", bar: "from-primary-500 to-primary-400" },
+  { key: "light", label: "高风险项目", icon: "ri-alarm-warning-line", gradient: "from-accent-400 to-accent-500", bar: "from-accent-500 to-accent-400" },
 ];
 
 export default function ProjectsPage() {
@@ -52,10 +61,9 @@ export default function ProjectsPage() {
 
   const stats = useMemo(() => {
     const active = projects.filter((p) => p.status === "撰写中" || p.status === "评标中").length;
-    const scored = projects.filter((p) => p.score > 0);
     const avgProgress = Math.round(projects.reduce((s, p) => s + p.progress, 0) / Math.max(projects.length, 1));
-    const avgScore = scored.length ? (scored.reduce((s, p) => s + p.score, 0) / scored.length).toFixed(1) : "—";
-    return { total: projects.length, active, avgProgress, avgScore };
+    const highRisk = projects.filter((p) => p.light === "红").length;
+    return { total: projects.length, active, avgProgress, highRisk };
   }, [projects]);
 
   const filtered = useMemo(() => {
@@ -67,8 +75,8 @@ export default function ProjectsPage() {
     });
     if (sortBy === "deadline") {
       list = [...list].sort((a, b) => a.deadline.localeCompare(b.deadline));
-    } else if (sortBy === "score") {
-      list = [...list].sort((a, b) => b.score - a.score);
+    } else if (sortBy === "light") {
+      list = [...list].sort((a, b) => (LIGHT_RANK[b.light ?? ""] ?? 0) - (LIGHT_RANK[a.light ?? ""] ?? 0));
     } else {
       list = [...list].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     }
@@ -168,7 +176,7 @@ export default function ProjectsPage() {
     <div>
       <PageHeader
         title="标书项目管理中心"
-        description="统一监控投标项目整体进程：跟踪撰写进度、AI 预测得分、人员分配与文件归档。"
+        description="统一监控投标项目整体进程：跟踪撰写进度、AI 预审风险灯、人员分配与文件归档。"
         actions={
           canEditProject ? (
           <button
@@ -199,7 +207,7 @@ export default function ProjectsPage() {
                 {card.key === "total" && stats.total}
                 {card.key === "active" && stats.active}
                 {card.key === "progress" && `${stats.avgProgress}%`}
-                {card.key === "score" && stats.avgScore}
+                {card.key === "light" && stats.highRisk}
               </div>
             </div>
             <div className={`absolute bottom-0 left-0 right-0 h-[2px] bg-gradient-to-r ${card.bar} opacity-0 transition-opacity duration-300 group-hover:opacity-100`} />
@@ -258,7 +266,7 @@ export default function ProjectsPage() {
           >
             <option value="created">最近更新</option>
             <option value="deadline">截止时间</option>
-            <option value="score">预测得分</option>
+            <option value="light">风险灯</option>
           </select>
         </div>
       </div>
@@ -274,7 +282,7 @@ export default function ProjectsPage() {
                 <th className="px-3 py-3 font-medium">负责人</th>
                 <th className="px-3 py-3 font-medium">项目团队</th>
                 <th className="px-3 py-3 font-medium">撰写进度</th>
-                <th className="px-3 py-3 font-medium">预测得分</th>
+                <th className="px-3 py-3 font-medium">风险灯</th>
                 <th className="px-3 py-3 font-medium">截止日期</th>
                 <th className="px-3 py-3 font-medium">状态</th>
                 <th className="px-3 py-3 text-right font-medium">操作</th>
@@ -349,8 +357,14 @@ export default function ProjectsPage() {
                       </div>
                     </td>
                     <td className="px-3 py-3.5">
-                      {project.score > 0 ? (
-                        <span className="font-heading text-gradient text-sm font-bold">{project.score}</span>
+                      {project.light ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="relative flex h-2 w-2">
+                            <span className="absolute inline-flex h-full w-full rounded-full opacity-50" style={{ backgroundColor: lightColor[project.light] }} />
+                            <span className="relative inline-flex h-2 w-2 rounded-full" style={{ backgroundColor: lightColor[project.light] }} />
+                          </span>
+                          <span className="text-sm font-medium" style={{ color: lightColor[project.light] }}>{LIGHT_LABEL[project.light]}</span>
+                        </span>
                       ) : (
                         <span className="text-sm text-foreground-500">—</span>
                       )}

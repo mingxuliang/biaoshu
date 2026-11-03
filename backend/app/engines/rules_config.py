@@ -136,6 +136,8 @@ class ProjectChecklist:
     tender_corpus: str = ""
     extract_stats: dict = field(default_factory=dict)
     weight_name: str = ""
+    tech_rules: list = field(default_factory=list)
+    drawing_rules: list = field(default_factory=list)
 
 
 def load_project_checklist(db: Session, project_id: str) -> ProjectChecklist:
@@ -170,4 +172,6 @@ def load_project_checklist(db: Session, project_id: str) -> ProjectChecklist:
         version=row.version,
         tender_corpus=str(data.get("tenderCorpus") or "")[:200_000],
         extract_stats=data.get("extractStats") if isinstance(data.get("extractStats"), dict) else {},
+        tech_rules=_list("techRules"),
+        drawing_rules=_list("drawingRules"),
     )

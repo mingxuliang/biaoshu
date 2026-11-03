@@ -28,7 +28,7 @@ export interface Project {
   budget: string;
   deadline: string;
   progress: number;
-  score: number;
+  light?: "绿" | "橙" | "红" | null; // 最新一轮预审的风险灯，代替原来的数字得分
   status: ProjectStatus;
   createdAt: string;
   tenderDoc?: TenderUpload;

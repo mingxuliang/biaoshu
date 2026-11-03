@@ -1,11 +1,12 @@
 // M06 AI 预审中心（演示数据）
 
+export type Grade = "A" | "B" | "C" | "D";
+
 export interface PreReviewLevel {
   key: string;
   name: string;
   desc: string;
-  score: number;
-  full: number;
+  grade: Grade;
   issues: number;
   status: "通过" | "风险" | "未达标";
 }
@@ -33,11 +34,11 @@ export interface PreReviewIssue {
 }
 
 export const preReviewLevels: PreReviewLevel[] = [
-  { key: "L1", name: "一票否决扫描", desc: "星号条款、废标条款、资质证件、暗标残留", score: 96, full: 100, issues: 1, status: "通过" },
-  { key: "L2", name: "商务客观核验", desc: "业绩匹配度、人员证书、财务一致性、信用材料", score: 88, full: 100, issues: 3, status: "风险" },
-  { key: "L3", name: "技术标五维打分", desc: "完整性/针对性/合规性/可落地性/规范性", score: 82.5, full: 100, issues: 6, status: "通过" },
-  { key: "L4", name: "虚词与模板查重", desc: "虚词密度、高危句式、相似度比对", score: 79, full: 100, issues: 4, status: "风险" },
-  { key: "L5", name: "版式终审", desc: "标题层级、目录页码、图表编号、空白页", score: 91, full: 100, issues: 2, status: "通过" },
+  { key: "L1", name: "一票否决扫描", desc: "星号条款、废标条款、资质证件、暗标残留", grade: "D", issues: 1, status: "未达标" },
+  { key: "L2", name: "商务客观核验", desc: "业绩匹配度、人员证书、财务一致性、信用材料", grade: "C", issues: 3, status: "风险" },
+  { key: "L3", name: "技术标五维打分", desc: "完整性/针对性/合规性/可落地性/规范性", grade: "A", issues: 0, status: "通过" },
+  { key: "L4", name: "虚词与模板查重", desc: "虚词密度、高危句式、相似度比对", grade: "B", issues: 4, status: "通过" },
+  { key: "L5", name: "版式终审", desc: "标题层级、目录页码、图表编号、空白页", grade: "A", issues: 2, status: "通过" },
 ];
 
 export const preReviewIssues: PreReviewIssue[] = [
@@ -49,10 +50,10 @@ export const preReviewIssues: PreReviewIssue[] = [
   { id: "pi6", level: "L5", severity: "建议", location: "全文 / 目录", excerpt: "第 5 章标题页码与正文不符（偏差 2 页）", rule: "F06.06 版式终审", tenderQuote: "目录自动生成且页码须与正文一致，否则按未实质性响应评审。", suggestion: "更新目录域代码后重新生成" },
 ];
 
-export const dimensionBreakdown = [
-  { name: "完整性", weight: 30, score: 88 },
-  { name: "针对性", weight: 25, score: 80 },
-  { name: "合规性", weight: 20, score: 86 },
-  { name: "可落地性", weight: 15, score: 78 },
-  { name: "规范性", weight: 10, score: 84 },
+export const dimensionBreakdown: { name: string; weight: number; grade: Grade }[] = [
+  { name: "完整性", weight: 30, grade: "A" },
+  { name: "针对性", weight: 25, grade: "B" },
+  { name: "合规性", weight: 20, grade: "A" },
+  { name: "可落地性", weight: 15, grade: "C" },
+  { name: "规范性", weight: 10, grade: "B" },
 ];

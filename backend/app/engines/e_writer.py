@@ -934,6 +934,129 @@ def _wrap_tech_chapter(requirement: str, solution: str, layout: dict | None = No
     return apply_tech_markdown_style(md, layout if isinstance(layout, dict) else None)
 
 
+_A4_WIDTH_MM = 210.0
+_A4_HEIGHT_MM = 297.0
+_PT_MM = 25.4 / 72
+_FONT_NAME_PT = {
+    "小二": 18,
+    "三号": 16,
+    "小三": 15,
+    "四号": 14,
+    "小四": 12,
+    "五号": 10.5,
+    "小五": 9,
+}
+
+
+def _pref_float(value, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _body_pt(layout: dict | None) -> float:
+    data = layout if isinstance(layout, dict) else {}
+    if data.get("bodySizePt") is not None:
+        return max(8.0, _pref_float(data.get("bodySizePt"), 12))
+    return float(_FONT_NAME_PT.get(str(data.get("fontSize") or ""), 12))
+
+
+def _line_pt(layout: dict | None, body_pt: float) -> float:
+    data = layout if isinstance(layout, dict) else {}
+    spacing = str(data.get("lineSpacing") or "")
+    fixed = re.search(r"固定值\s*(\d+(?:\.\d+)?)\s*磅", spacing)
+    if fixed:
+        return max(float(fixed.group(1)), body_pt)
+    mul = data.get("lineSpacingMul")
+    if mul is None:
+        if spacing.startswith("2"):
+            mul = 2
+        elif "1.5" in spacing:
+            mul = 1.5
+        else:
+            mul = 1.5
+    return max(body_pt * max(_pref_float(mul, 1.5), 1), body_pt)
+
+
+def chars_per_page(layout: dict | None) -> int:
+    """按 A4、页边距、正文字号和行距估算一页可容纳的汉字数。"""
+    data = layout if isinstance(layout, dict) else {}
+    margins = data.get("margins") if isinstance(data.get("margins"), dict) else {}
+    left = _pref_float(margins.get("left"), 2)
+    right = _pref_float(margins.get("right"), 2)
+    top = _pref_float(margins.get("top"), 2)
+    bottom = _pref_float(margins.get("bottom"), 2)
+    width_mm = _A4_WIDTH_MM - (left + right) * 10
+    height_mm = _A4_HEIGHT_MM - (top + bottom) * 10
+    if width_mm < 40 or height_mm < 40:
+        return 800
+    body_pt = _body_pt(data)
+    line_pt = _line_pt(data, body_pt)
+    chars_line = max(8, int(width_mm / (body_pt * _PT_MM)))
+    lines = max(8, int(height_mm / (line_pt * _PT_MM)))
+    return chars_line * lines
+
+
+def resolve_body_pages(page: dict | None) -> int:
+    """正文页数。封面、正文、附录之和与总页数不一致时，用总页数减去封面和附录。"""
+    if not isinstance(page, dict):
+        return 0
+
+    def _pages(key: str) -> int:
+        return max(0, int(_pref_float(page.get(key), 0)))
+
+    total, cover, body, appendix = _pages("total"), _pages("cover"), _pages("body"), _pages("appendix")
+    if cover + body + appendix != total:
+        body = max(0, total - cover - appendix)
+    return body
+
+
+def _tech_leaves(outline: list[dict] | None) -> list[dict]:
+    nodes = [n for n in (outline or []) if isinstance(n, dict) and n.get("id")]
+    parent_ids = {str(n.get("parentId")) for n in nodes if n.get("parentId")}
+    leaves: list[dict] = []
+    for node in nodes:
+        if str(node["id"]) in parent_ids:
+            continue
+        kind = chapter_kind(
+            str(node.get("title") or ""),
+            node.get("part"),
+            str(node.get("idea") or ""),
+            str(node.get("requirement") or ""),
+        )
+        if kind == "tech":
+            leaves.append(node)
+    return leaves
+
+
+def chapter_char_targets(
+    outline: list[dict] | None,
+    page: dict | None,
+    layout: dict | None,
+) -> dict[str, int]:
+    """把正文页数按评分权重分给技术标叶子章，返回每章目标汉字数。"""
+    body_pages = resolve_body_pages(page)
+    leaves = _tech_leaves(outline)
+    if body_pages <= 0 or not leaves:
+        return {}
+    total_chars = body_pages * chars_per_page(layout)
+    weights: list[float] = []
+    for node in leaves:
+        weights.append(max(_pref_float(node.get("weight"), 0), 0))
+    if sum(weights) <= 0:
+        raw = [total_chars / len(leaves)] * len(leaves)
+    else:
+        weight_sum = sum(weights)
+        raw = [total_chars * weight / weight_sum for weight in weights]
+    floors = [int(value) for value in raw]
+    leftover = total_chars - sum(floors)
+    order = sorted(range(len(leaves)), key=lambda i: raw[i] - floors[i], reverse=True)
+    for index in order[:leftover]:
+        floors[index] += 1
+    return {str(node["id"]): max(floors[index], 1) for index, node in enumerate(leaves)}
+
+
 def generate_chapter_content(
     project_name: str,
     chapter_title: str,
@@ -949,6 +1072,8 @@ def generate_chapter_content(
     knowledge_images: list[dict] | None = None,
     part: str | None = None,
     requirement: str | None = None,
+    outline: list[dict] | None = None,
+    chapter_id: str | None = None,
 ) -> str:
     """生成单章正文。失败或未配置 Key 时返回提示性占位文本，不抛错。"""
     kind = chapter_kind(chapter_title, part, chapter_idea, requirement or "")
@@ -973,6 +1098,8 @@ def generate_chapter_content(
         knowledge_images,
         req_text,
         tech_mode=True,
+        outline=outline,
+        chapter_id=chapter_id,
     )
     timeout = 180 if (knowledge_snippets or knowledge_images or product_features or qualification_assets) else 90
     system = TECH_SOLUTION_SYSTEM
@@ -1057,6 +1184,8 @@ def _build_chapter_context(
     knowledge_images: list[dict] | None = None,
     tender_requirement: str | None = None,
     tech_mode: bool = False,
+    outline: list[dict] | None = None,
+    chapter_id: str | None = None,
 ) -> str:
     lines = [
         f"项目名称：{project_name or '（未命名项目）'}",
@@ -1165,7 +1294,17 @@ def _build_chapter_context(
                 f"{i}. {prefix}{img.get('caption') or img.get('heading') or '原文附图'}"
                 f"（所属：{img.get('heading') or ''}）"
             )
-    style = (writing_prefs or {}).get("style") or {}
+    prefs = writing_prefs if isinstance(writing_prefs, dict) else {}
+    target = chapter_char_targets(outline, prefs.get("page"), prefs.get("layout")).get(str(chapter_id or ""))
+    if target:
+        low = max(1, int(target * 0.8))
+        high = max(low, int(target * 1.2))
+        lines.append("")
+        lines.append(
+            f"篇幅要求：本章目标约 {target} 字。请把解决方案控制在 {low} 到 {high} 字"
+            "（目标的 0.8 倍到 1.2 倍），不要明显超出。"
+        )
+    style = prefs.get("style") or {}
     if isinstance(style, dict) and any(style.get(k) for k in ("tone", "length", "firmName", "strictness")):
         lines.append("")
         lines.append("撰写偏好：")

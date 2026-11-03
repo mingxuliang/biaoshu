@@ -20,7 +20,8 @@ _CJK = re.compile(r"[\u4e00-\u9fff]")
 _GENERIC = ("必须", "应当", "须", "应", "提交", "提供", "出具", "附上", "要求", "投标人", "招标人")
 _WS = re.compile(r"\s+")
 
-CAPS = {"star": 8, "must": 5, "qualification": 5, "format": 5, "score": 8, "custom": 8}
+# 与解析派生上限对齐：招标解析字段都要进预审，不再用 5/8 条截断。
+CAPS = {"star": 80, "must": 80, "qualification": 80, "format": 80, "score": 200, "custom": 80}
 
 
 @dataclass
@@ -188,13 +189,20 @@ def check_clause(
     paragraphs: list[dict] | None = None,
     title: str = "",
 ) -> CoverResult:
+    """单条版本：星号/废标条款、投标保证金等一票否决级检查用这条，风险最高，不能只靠
+    关键词窗口。委托给 check_clauses_batch 复用「零候选升级分块通读」兜底，避免关键词
+    检索找不到候选时直接把「未检出候选」喂给模型判未响应，误判成假废标/假降档。
+    """
     text = (clause or "").strip()
     if len(text) < 4:
         return CoverResult(answered=True, reason="条款过短，不作为未响应")
-    if lexical_covered(text, bid, title):
-        return CoverResult(answered=True, reason="投标书已出现对应表述")
-    cands = retrieve(text, paragraphs)
-    return _verify_llm(text, cands)
+    result = check_clauses_batch(
+        [{"id": "0", "clause": text, "title": title}],
+        bid=bid,
+        paragraphs=paragraphs,
+        full_text=bid,
+    )
+    return result.get("0") or CoverResult(answered=True, reason="核验异常，按宁缺毋滥视为已响应")
 
 
 def check_clauses_batch(
@@ -208,11 +216,13 @@ def check_clauses_batch(
 
     items: [{"id"（本批内唯一）, "clause"（核对用条款/评分点文本）, "title"（可选，用于标题字面命中与展示）}]
 
-    每条先跑现有免费路径：`lexical_covered` 字面命中，或 `retrieve` 关键词窗口检索到候选
-    就用 `_verify_llm` 窄范围校验——这部分本来就没错，不动。只有 `retrieve` 完全找不到候选
-    的条目（例如评分尺子本是评委语言，投标书原文根本搜不到）才收集成一批，整批升级调用
-    `clause_scan.scan_items()` 按章节分块通读投标书正文（每份预审对这一类条目只跑一次分块
-    扫描，不是逐条调模型）。
+    每条先跑现有免费路径：`lexical_covered` 字面命中——命中直接判已响应，不动。
+    `retrieve` 关键词窗口检索到候选后用 `_verify_llm` 窄范围校验：若判「已响应」直接采信
+    （误判代价低，不升级）；若判「未响应」不直接采信——候选可能只是关键词凑巧命中、并非
+    真正对应段落，真正的应答内容可能写在文档别处、窗口检索没扫到，这种情况和「retrieve
+    完全找不到候选」一起收集成一批，整批升级调用 `clause_scan.scan_items()` 按章节分块
+    通读投标书正文复核（每份预审对这一类条目只跑一次分块扫描，不是逐条调模型）。只有
+    分块通读也确认未响应，才最终落成缺项，避免把「窗口找歪/找窄」误判成「投标书没写」。
 
     返回按 items 的 "id" 建索引的结果字典，调用方现有的 `_collect()` / CAPS 截断逻辑不用改。
     """
@@ -234,7 +244,11 @@ def check_clauses_batch(
             continue
         cands = retrieve(clause, paragraphs)
         if cands:
-            results[item_id] = _verify_llm(clause, cands)
+            narrow = _verify_llm(clause, cands)
+            if narrow.answered:
+                results[item_id] = narrow
+                continue
+            pending_scan.append({"id": item_id, "query": clause, "title": title})
             continue
         pending_scan.append({"id": item_id, "query": clause, "title": title})
 

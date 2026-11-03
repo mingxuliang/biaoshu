@@ -41,8 +41,7 @@ class PreReviewLevelOut(BaseModel):
     key: str
     name: str
     desc: str
-    score: float
-    full: int = 100
+    grade: Literal["A", "B", "C", "D"] = "A"
     issues: int
     status: Literal["通过", "风险", "未达标"]
 
@@ -69,17 +68,16 @@ class PreReviewIssueOut(BaseModel):
 
 class DimensionOut(BaseModel):
     name: str
-    weight: int
-    score: float
+    weight: int  # 仅作展示用的相对重要度标注，不再参与任何加权算分
+    grade: Literal["A", "B", "C", "D"] = "A"
 
 
 class TechModuleOut(BaseModel):
-    """技术评分模块逐项打分，与规则页「技术评分」tab 卡片一一对应（含工程量逻辑匹配）。"""
+    """技术评分模块逐项定性核验，与规则页「技术评分」tab 卡片一一对应（含工程量逻辑匹配）。"""
 
     key: str
     module: str
-    maxScore: float
-    score: float
+    grade: Literal["A", "B", "C", "D"] = "A"
     status: str
     summary: str
 
@@ -136,9 +134,60 @@ class CustomRuleReviewOut(BaseModel):
     reason: str = ""
 
 
+class StandardClauseHitOut(BaseModel):
+    code: str = ""
+    clauseNo: str = ""
+    specialty: str = ""
+    excerpt: str = ""
+
+
+class StandardCheckOut(BaseModel):
+    item: str = ""
+    bid: str = ""
+    result: str = ""
+
+
+class StandardPointOut(BaseModel):
+    id: str = ""
+    source: str = ""
+    name: str = ""
+    detail: str = ""
+    verdict: str = ""
+    excerpt: str = ""
+    reason: str = ""
+    booklet: str = ""
+    mustWrite: str = ""
+    parameters: str = ""
+    standards: list[str] = []
+    chapter: str = ""
+    axis: str = ""
+    drawingNo: str = ""
+    clauses: list[StandardClauseHitOut] = []
+    knowledge: list[StandardClauseHitOut] = []
+    score: float | None = None
+    maxScore: float | None = None
+    grade: str = ""
+    weight: str = ""
+    weightedScore: float | None = None
+    problems: str = ""
+    suggestion: str = ""
+    strategy: str = ""
+    scoreRule: str = ""
+    checks: list[StandardCheckOut] = []
+    excerpts: list[str] = []
+    strengths: str = ""
+    revisions: str = ""
+    noncompliance: str = ""
+
+
+class StandardReviewOut(BaseModel):
+    specialty: str = "通用"
+    note: str = ""
+    points: list[StandardPointOut] = []
+
+
 class ReviewReportOut(BaseModel):
     round: int
-    overall: float
     waste: int
     risk: int
     suggest: int
@@ -149,6 +198,7 @@ class ReviewReportOut(BaseModel):
     techModules: list[TechModuleOut] = []
     tenderRules: TenderRuleReportOut | None = None
     customRules: list[CustomRuleReviewOut] = []
+    standardReview: StandardReviewOut | None = None
     issues: list[PreReviewIssueOut]
 
 
@@ -160,7 +210,9 @@ class ReviewReportPairOut(BaseModel):
 
 class TrendPointOut(BaseModel):
     round: int
-    score: float
+    waste: int = 0
+    risk: int = 0
+    suggest: int = 0
     issues: int
     scope: str = "full"
 
@@ -270,6 +322,36 @@ class TenderPackageSlotOut(BaseModel):
     excerpt: str = ""
     displayIn: str = ""
     jumpKey: str = ""
+
+
+class TenderLeafRuleOut(BaseModel):
+    factor: str = ""
+    score: str = ""
+    grades: str = ""
+    mustWrite: str = ""
+    parameters: str = ""
+    standards: list[str] = []
+    chapter: str = ""
+    axis: str = ""
+
+
+class DrawingReviewRuleOut(BaseModel):
+    drawingNo: str = ""
+    title: str = ""
+    parameters: str = ""
+    notes: str = ""
+    standards: list[str] = []
+    chapter: str = ""
+    axis: str = ""
+
+
+class ProjectStandardRulesOut(BaseModel):
+    projectId: str
+    version: Optional[int] = None
+    locked: bool = False
+    note: str = ""
+    tenderRules: list[TenderLeafRuleOut] = []
+    drawingRules: list[DrawingReviewRuleOut] = []
 
 
 class ChecklistOut(BaseModel):
@@ -447,7 +529,7 @@ class ProjectOut(BaseModel):
     budget: str
     deadline: str
     progress: int
-    score: float
+    light: Literal["绿", "橙", "红"] | None = None  # 最新一轮预审的风险灯，代替原来的数字得分
     status: Literal["撰写中", "评标中", "已提交", "已中标", "未中标"]
     createdAt: str
     tenderDoc: Optional[TenderUploadMetaOut] = None
@@ -584,6 +666,27 @@ class WriterImageOut(BaseModel):
 class GenerateWriterImageIn(BaseModel):
     prompt: str
     mode: Literal["normal", "flow", "arch"] = "normal"
+    style: Optional[str] = None
+
+
+class WriterDiagramIn(BaseModel):
+    draftId: str
+    chapterId: str
+    kind: Literal[
+        "function",
+        "technical",
+        "deployment",
+        "organization",
+        "construction",
+        "schedule",
+        "quality",
+        "safety",
+        "inspection",
+    ]
+
+
+class WriterDiagramOut(WriterImageOut):
+    notice: str = ""
 
 
 class OptimizeImagePromptIn(BaseModel):
@@ -1142,6 +1245,7 @@ class LlmModelOut(BaseModel):
     speed: str = ""
     vision: bool = False
     ready: bool = False
+    task: str = "chat"
 
 
 class LlmProviderOut(BaseModel):

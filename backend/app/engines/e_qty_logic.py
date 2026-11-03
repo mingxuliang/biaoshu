@@ -64,7 +64,6 @@ _METRIC_KIND = {
 }
 
 _SEVERITY_RANK = {"废标": 4, "降档": 3, "扣分": 2, "建议": 1}
-_SEVERITY_DEDUCT_RATIO = {"废标": 1.0, "降档": 0.6, "扣分": 0.4, "建议": 0.15, "无法比对": 0.15}
 
 
 @dataclass
@@ -767,13 +766,11 @@ def _worst(findings: list[dict]) -> dict | None:
 
 def module_score(findings: list[dict], *, no_boq: bool = False) -> dict:
     meta = next((m for m in rules_data.TECH_SCORE_MODULES if m["key"] == "qty_logic"), {})
-    max_score = meta.get("score", 10)
     if no_boq:
         return {
             "key": "qty_logic",
             "module": meta.get("module", "工程量逻辑匹配"),
-            "maxScore": max_score,
-            "score": round(max_score * (1 - _SEVERITY_DEDUCT_RATIO["无法比对"]), 1),
+            "grade": "B",  # 招标清单没抽出工程量，无法比对，不算实质性问题，按中性偏谨慎处理
             "status": "无法比对",
             "summary": (findings[0]["suggestion"] if findings else "招标清单未抽出工程量，无法比对"),
         }
@@ -781,8 +778,7 @@ def module_score(findings: list[dict], *, no_boq: bool = False) -> dict:
         return {
             "key": "qty_logic",
             "module": meta.get("module", "工程量逻辑匹配"),
-            "maxScore": max_score,
-            "score": max_score,
+            "grade": "A",
             "status": "达标",
             "summary": "清单与施组总量、主材采购、土方产能交叉核验通过",
         }
@@ -790,17 +786,15 @@ def module_score(findings: list[dict], *, no_boq: bool = False) -> dict:
     severity = worst["severity"] if worst else "建议"
     if all("无法比对" in (f.get("suggestion") or "") or "无法比对" in (f.get("rule") or "") for f in findings) and severity == "建议":
         status = "无法比对"
-        ratio = _SEVERITY_DEDUCT_RATIO["无法比对"]
+        grade = "B"
     else:
         status = severity
-        ratio = _SEVERITY_DEDUCT_RATIO.get(severity, 0.15)
-    score = max(0.0, round(max_score - max_score * ratio, 1))
+        grade = rules_data.grade_from_findings([worst] if worst else [])
     summary = "；".join(dict.fromkeys((f.get("suggestion") or "")[:80] for f in findings if f.get("suggestion")))
     return {
         "key": "qty_logic",
         "module": meta.get("module", "工程量逻辑匹配"),
-        "maxScore": max_score,
-        "score": score,
+        "grade": grade,
         "status": status,
         "summary": summary[:240] or (worst.get("suggestion") if worst else ""),
     }

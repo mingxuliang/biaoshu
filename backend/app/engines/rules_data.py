@@ -881,4 +881,40 @@ SEVERITY_PENALTY = {
     "建议": 3,
 }
 
+# ---------------------------------------------------------------------------
+# 去分数化：AI 预审报告的各项指标（L1-L5 层级、五维评审、技术评分模块……）不再用
+# 数字加权/扣分算出一个 0-100 分，而是直接用问题严重度推出 A/B/C/D 定性等级。
+# "模拟评委打分"（e_tender_score.py，对照招标书自带的量化评标办法）不属于这里，继续用数字。
+# ---------------------------------------------------------------------------
+GRADE_ORDER = {"A": 0, "B": 1, "C": 2, "D": 3}  # 数值越大越差，供"取最差等级"合并用
+GRADE_LABEL = {
+    "A": "优（仅建议或无问题）",
+    "B": "良（存在扣分项）",
+    "C": "中（存在降档项）",
+    "D": "差（存在废标项）",
+}
+
+
+def grade_from_findings(findings: list[dict] | None) -> str:
+    """按问题严重度直接推等级，不做任何加权/扣分算术：
+    有废标→D；否则有降档→C；否则有扣分→B；只有建议或没问题→A。
+    """
+    severities = {f.get("severity") for f in (findings or []) if isinstance(f, dict)}
+    if "废标" in severities:
+        return "D"
+    if "降档" in severities:
+        return "C"
+    if "扣分" in severities:
+        return "B"
+    return "A"
+
+
+def worst_grade(grades: list[str] | None) -> str:
+    """多个等级合并取最差的一个（比如多分块结果合并、多层级合并成一个分册结论）。"""
+    valid = [g for g in (grades or []) if g in GRADE_ORDER]
+    if not valid:
+        return "A"
+    return max(valid, key=lambda g: GRADE_ORDER[g])
+
+
 REWRITE_BY_WORD = {item["word"]: item["rewrite"] for item in FILLER_WORDS}

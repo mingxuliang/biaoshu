@@ -16,7 +16,8 @@ import {
   type WriterImageItem,
 } from "@/lib/api";
 import { isOriginalFormTitle, isSkipAiWrite } from "@/lib/outlineNum";
-import type { LayoutConfig } from "@/mocks/writerSteps";
+import type { ImageConfig, LayoutConfig, PageConfig } from "@/mocks/writerSteps";
+import { chapterCharTargets } from "@/lib/pageBudget";
 
 interface ToastState {
   message: string;
@@ -35,6 +36,8 @@ interface ContentStepProps {
   knowledgeRefs: Record<string, KnowledgeRef[]>;
   onKnowledgeRefsChange: (next: Record<string, KnowledgeRef[]>) => void;
   layout?: LayoutConfig | null;
+  page?: PageConfig | null;
+  imageSettings?: ImageConfig | null;
   onBack: () => void;
 }
 
@@ -49,6 +52,8 @@ export default function ContentStep({
   knowledgeRefs,
   onKnowledgeRefsChange,
   layout,
+  page,
+  imageSettings,
   onBack,
 }: ContentStepProps) {
   const [activeId, setActiveId] = useState<string>(outline[0]?.id ?? "");
@@ -73,6 +78,8 @@ export default function ContentStep({
   const activeNode = outline.find((c) => c.id === activeId);
   const doneCount = outline.filter((c) => c.status === "已完成" || c.status === "用原文").length;
   const totalWords = outline.reduce((s, c) => s + (c.words || 0), 0);
+  const chapterTarget = activeNode ? chapterCharTargets(outline, page, layout)[activeNode.id] : undefined;
+  const chapterWritten = (chapterContents[activeId] || "").replace(/\s/g, "").length;
 
   const startGenerate = async (chapterId: string) => {
     if (generatingRef.current) return;
@@ -187,6 +194,12 @@ export default function ContentStep({
             <span>
               全文约 <span className="font-label text-gradient font-medium">{totalWords}</span> 字
             </span>
+            {chapterTarget ? (
+              <span>
+                本章目标约 <span className="font-label text-gradient font-medium">{chapterTarget}</span> 字 / 已写{" "}
+                <span className="font-label text-gradient font-medium">{chapterWritten}</span> 字
+              </span>
+            ) : null}
           </div>
         </div>
       </div>
@@ -221,6 +234,8 @@ export default function ContentStep({
             chapterNum={activeNode?.num}
             chapterTitle={activeNode?.title}
             chapterIdea={activeNode?.idea}
+            chapterContent={chapterContents[activeId] || ""}
+            imageSettings={imageSettings}
             knowledgeRefs={knowledgeRefs}
             onKnowledgeRefsChange={onKnowledgeRefsChange}
             onInsertImage={handleInsertImage}

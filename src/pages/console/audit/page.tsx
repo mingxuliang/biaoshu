@@ -2,9 +2,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams, Link } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import Toast from "../components/Toast";
-import ProgressRing from "../components/ProgressRing";
 import PreReviewReport, { CustomRulesReviewBlock } from "./components/PreReviewReport";
-import TenderRuleReportView from "./components/TenderRuleReport";
 import DocumentSourceGate, { type PreReviewDoc, type PreReviewDocs } from "./components/DocumentSourceGate";
 import ProjectSelectionGate from "../components/ProjectSelectionGate";
 import { useProjects } from "@/context/ProjectContext";
@@ -23,14 +21,14 @@ import {
   type TrendPoint,
 } from "@/lib/api";
 import { issueChapter, issueRuleKind, issueRuleLabel, NO_BID_EXCERPT_HINT, splitBidAndTender, type IssueRuleKind } from "@/lib/excerpt";
+import { GRADE_BADGE_CLASS, GRADE_LABEL, GRADE_TEXT_CLASS, LIGHT_LABEL, lightFromCounts } from "@/lib/grade";
 
-type TabKey = "result" | "trend" | "report" | "tender";
+type TabKey = "result" | "trend" | "report";
 
 const tabs: { key: TabKey; label: string; icon: string }[] = [
   { key: "result", label: "预审结果", icon: "ri-file-shield-2-line" },
   { key: "trend", label: "历史趋势", icon: "ri-line-chart-line" },
   { key: "report", label: "青天预审报告", icon: "ri-file-chart-line" },
-  { key: "tender", label: "招标规则预审报告", icon: "ri-auction-line" },
 ];
 
 const levelStyle: Record<string, string> = {
@@ -97,9 +95,17 @@ export default function AuditPage() {
       (issue.rule || "").startsWith("自定义规则") ||
       (issue.location || "").startsWith("自定义规则"),
   );
-  const tenderIssues = resultIssues.filter((issue) => issueRuleKind(issue) === "tender");
+  const isTechScoreIssue = (issue: { rule?: string; location?: string }) =>
+    /技术标评分/.test(`${issue.rule || ""}\n${issue.location || ""}`);
+  const tenderIssues = resultIssues.filter(
+    (issue) => issueRuleKind(issue) === "tender" && !isTechScoreIssue(issue),
+  );
   const reviewIssues = resultIssues.filter((issue) => issueRuleKind(issue) === "review");
+  const rulerItems = (view?.tenderRules?.groups ?? [])
+    .filter((group) => /技术标评分/.test(`${group.key || ""}${group.label || ""}`))
+    .flatMap((group) => (group.items || []).map((item) => ({ ...item, groupLabel: group.label })));
   const listedIssues = issueKind === "tender" ? tenderIssues : reviewIssues;
+  const tenderCount = tenderIssues.length + rulerItems.length;
 
   useEffect(() => {
     const bidDocumentId = searchParams.get("bidDocumentId");
@@ -233,8 +239,8 @@ export default function AuditPage() {
       setReports(pair);
       await refreshTrend(currentProject.id);
       const parts = [
-        pair.business ? `商务 ${pair.business.overall} 分` : "",
-        pair.tech ? `技术 ${pair.tech.overall} 分` : "",
+        pair.business ? `商务 风险灯${pair.business.light}` : "",
+        pair.tech ? `技术 风险灯${pair.tech.light}` : "",
       ].filter(Boolean);
       showToast(`分册预审完成：${parts.join("；") || "已生成报告"}`);
     } catch (err) {
@@ -260,14 +266,9 @@ export default function AuditPage() {
   };
 
   const bookletTrend = trend.filter((d) => (d.scope || reportScope) === reportScope);
-  const maxTrendScore = bookletTrend.length ? Math.max(...bookletTrend.map((d) => d.score), 1) : 100;
-  const levelScore = (key: string) => view?.levels.find((lv) => lv.key === key)?.score ?? 0;
-  const scoreFormula =
-    reportScope === "business"
-      ? `L1 ${levelScore("L1")}×40% + L2 ${levelScore("L2")}×60%`
-      : `L3 ${levelScore("L3")}×55% + L4 ${levelScore("L4")}×25% + L5 ${levelScore("L5")}×20%`;
+  const levelGrade = (key: string) => view?.levels.find((lv) => lv.key === key)?.grade ?? "A";
   const prevTrendPoint = bookletTrend.length >= 2 ? bookletTrend[bookletTrend.length - 2] : null;
-  const exportReady = !!view && view.overall >= 90 && view.waste === 0;
+  const exportReady = !!view && view.light === "绿";
 
   const exportReport = async (scope?: BidScope) => {
     const usedScope: BidScope = scope === "tech" || reportScope === "tech" ? "tech" : "business";
@@ -292,9 +293,9 @@ export default function AuditPage() {
     if (!target || !currentProject) return;
     const lines = [
       `${target.scope === "tech" ? "技术标" : "商务标"}预审报告 · ${currentProject.name}（${currentProject.code}）`,
-      `第 ${target.round} 轮 · 本册得分 ${target.overall} · 风险灯 ${target.light}`,
+      `第 ${target.round} 轮 · 风险灯 ${target.light}`,
       `废标 ${target.waste} 项 · 扣分 ${target.risk} 项 · 建议 ${target.suggest} 项`,
-      ...(target.levels || []).map((lv) => `${lv.key} ${lv.name}：${lv.score} 分，${lv.issues} 项，${lv.status}`),
+      ...(target.levels || []).map((lv) => `${lv.key} ${lv.name}：等级 ${lv.grade}，${lv.issues} 项，${lv.status}`),
       "",
       "问题摘要：",
       ...target.issues.slice(0, 20).map((issue, i) => {
@@ -456,10 +457,10 @@ export default function AuditPage() {
           className="h-8 w-full cursor-pointer rounded-md border border-primary-300 bg-background-50 px-2.5 text-xs font-medium text-foreground-800 outline-none focus:border-primary-400 sm:w-auto sm:min-w-[200px]"
         >
           <option value="business" disabled={!docs?.business}>
-            商务标{bizReport ? ` · ${bizReport.overall} 分` : ""}
+            商务标{bizReport ? ` · 风险灯${bizReport.light}` : ""}
           </option>
           <option value="tech" disabled={!docs?.tech}>
-            技术标{techReport ? ` · ${techReport.overall} 分` : ""}
+            技术标{techReport ? ` · 风险灯${techReport.light}` : ""}
           </option>
         </select>
       </div>
@@ -484,13 +485,9 @@ export default function AuditPage() {
               {reportScope === "business" ? "商务标" : "技术标"}相比第 {prevTrendPoint.round} 轮：
             </span>
             <span className="font-label flex items-center gap-1 text-foreground-600">
-              本册得分 <span className="font-heading text-sm font-bold text-foreground-900">{prevTrendPoint.score}</span>
+              风险灯 <span className="font-heading text-sm font-bold text-foreground-900">{lightFromCounts(prevTrendPoint.waste, prevTrendPoint.risk)}</span>
               <i className="ri-arrow-right-line text-primary-500"></i>
-              <span className="font-heading text-sm font-bold text-primary-600">{view.overall}</span>
-              <span className="rounded bg-primary-100 px-1.5 py-0.5 text-[10px] font-medium text-primary-600">
-                {view.overall - prevTrendPoint.score >= 0 ? "+" : ""}
-                {Math.round((view.overall - prevTrendPoint.score) * 10) / 10}
-              </span>
+              <span className="font-heading text-sm font-bold text-primary-600">{view.light}</span>
             </span>
             <span className="font-label flex items-center gap-1 text-foreground-600">
               问题数 <span className="font-heading text-sm font-bold text-foreground-900">{prevTrendPoint.issues}</span>
@@ -535,17 +532,22 @@ export default function AuditPage() {
           </span>
           <p className="text-sm font-medium text-foreground-800">尚未运行分册预审</p>
           <p className="max-w-md text-xs text-foreground-500">
-            点击右上角「预审商务标 / 预审技术标」。商务标只评 L1+L2，技术标只评 L3–L5，两册各自满分 100，互不加权。
+            点击右上角「预审商务标 / 预审技术标」。商务标只评 L1+L2，技术标只评 L3–L5，两册各自按 A/B/C/D 等级评定，互不加权。
           </p>
         </div>
       ) : (
         <>
           {activeTab === "result" && (
             <>
-              {/* 当前分册得分 */}
+              {/* 当前分册风险灯 */}
               <div className="mb-4 flex flex-col gap-3 rounded-lg border border-primary-200 bg-primary-50/30 p-3.5 sm:flex-row sm:items-center">
                 {view ? (
-                  <ProgressRing value={view.overall} size={72} stroke={6} />
+                  <span
+                    className="flex h-[72px] w-[72px] shrink-0 items-center justify-center rounded-full border-4 text-2xl font-bold"
+                    style={{ borderColor: lightColor[view.light], color: lightColor[view.light] }}
+                  >
+                    {view.light}
+                  </span>
                 ) : (
                   <span className="flex h-[72px] w-[72px] items-center justify-center rounded-full border border-dashed border-background-300 text-[11px] text-foreground-400">
                     {docs?.[reportScope] ? "未预审" : "未上传"}
@@ -553,16 +555,13 @@ export default function AuditPage() {
                 )}
                 <div className="min-w-0 flex-1">
                   <div className="font-label text-[11px] text-foreground-500">
-                    {reportScope === "business" ? "商务标得分" : "技术标得分"} · 满分 100 · 不与另一册加权
+                    {reportScope === "business" ? "商务标评审结论" : "技术标评审结论"} · 不与另一册加权
                   </div>
-                  <div className="font-heading text-gradient text-2xl font-bold">{view ? view.overall : "—"}</div>
+                  <div className="font-heading text-gradient text-2xl font-bold">{view ? LIGHT_LABEL[view.light] : "—"}</div>
                   {view && (
-                    <>
-                      <div className="text-[11px] text-foreground-500">
-                        第 {view.round} 轮 · 灯 {view.light} · 废标 {view.waste} · 扣分 {view.risk} · 建议 {view.suggest}
-                      </div>
-                      <div className="mt-1 text-[11px] text-foreground-500">计分：{scoreFormula}</div>
-                    </>
+                    <div className="text-[11px] text-foreground-500">
+                      第 {view.round} 轮 · 灯 {view.light} · 废标 {view.waste} · 扣分 {view.risk} · 建议 {view.suggest}
+                    </div>
                   )}
                   {docs?.[reportScope] && (
                     <button
@@ -629,8 +628,8 @@ export default function AuditPage() {
                           <div className="truncate text-[11px] text-foreground-500">{level.desc}</div>
                         </div>
                         <div className="text-right">
-                          <div className={`font-heading text-sm font-bold ${level.status === "风险" ? "text-accent-600" : "text-gradient"}`}>
-                            {level.score}
+                          <div className={`font-heading text-sm font-bold ${GRADE_TEXT_CLASS[level.grade]}`}>
+                            {level.grade}
                           </div>
                           <div className="font-label text-[10px] text-foreground-500">{level.issues} 项</div>
                         </div>
@@ -639,50 +638,47 @@ export default function AuditPage() {
                   </ul>
                 </div>
 
-                {/* 五维打分 / 本册计分 */}
+                {/* 五维评审 / 本册层级结论 */}
                 <div className="overflow-hidden rounded-lg border border-background-300 bg-background-100">
                   <div className="border-b border-background-300 bg-background-50 px-4 py-3">
                     <div className="flex items-center gap-2 text-sm font-medium text-foreground-800">
                       <i className={`${reportScope === "business" ? "ri-percent-line" : "ri-focus-3-line"} text-primary-500`}></i>
-                      {reportScope === "business" ? "商务标计分说明" : `技术标五维打分 · 第 ${view.round} 轮`}
+                      {reportScope === "business" ? "商务标层级结论" : `技术标五维评审 · 第 ${view.round} 轮`}
                     </div>
                   </div>
                   {reportScope === "business" ? (
                     <ul className="divide-y divide-background-200">
                       <li className="flex items-center justify-between px-4 py-3 text-sm">
                         <span className="text-foreground-700">L1 一票否决</span>
-                        <span className="font-heading font-bold text-foreground-900">{levelScore("L1")} × 40%</span>
+                        <span className={`font-heading font-bold ${GRADE_TEXT_CLASS[levelGrade("L1")]}`}>{levelGrade("L1")}</span>
                       </li>
                       <li className="flex items-center justify-between px-4 py-3 text-sm">
                         <span className="text-foreground-700">L2 商务核验</span>
-                        <span className="font-heading font-bold text-foreground-900">{levelScore("L2")} × 60%</span>
+                        <span className={`font-heading font-bold ${GRADE_TEXT_CLASS[levelGrade("L2")]}`}>{levelGrade("L2")}</span>
                       </li>
                       <li className="px-4 py-3 text-xs leading-relaxed text-foreground-500">
-                        商务标满分 100，只评 L1+L2，不与技术标加权。当前 {view.overall} = {scoreFormula}。
+                        商务标只评 L1+L2，两层各自按问题严重度定级，不与技术标加权，不再计算总分。
                       </li>
                     </ul>
                   ) : (
                   <ul className="divide-y divide-background-200">
                     {!(view.dimensions || []).length ? (
                       <li className="px-4 py-8 text-center text-xs text-foreground-500">
-                        本册暂无五维得分。
+                        本册暂无五维评审。
                       </li>
                     ) : view.dimensions.map((dim) => (
                       <li key={dim.name} className="flex items-center gap-3 px-4 py-3">
                         <span className="font-label w-20 shrink-0 text-xs text-foreground-600">{dim.name}</span>
-                        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-background-200">
-                          <div
-                            className="h-full rounded-full bg-gradient-to-r from-primary-500 to-primary-400"
-                            style={{ width: `${dim.score}%` }}
-                          />
-                        </div>
-                        <span className="font-label w-14 shrink-0 text-right text-xs text-foreground-500">
-                          {dim.score} / 权重 {dim.weight}%
+                        <span className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-semibold ${GRADE_BADGE_CLASS[dim.grade]}`}>
+                          {dim.grade} · {GRADE_LABEL[dim.grade]}
+                        </span>
+                        <span className="font-label ml-auto shrink-0 text-right text-xs text-foreground-500">
+                          权重 {dim.weight}%
                         </span>
                       </li>
                     ))}
                     <li className="px-4 py-3 text-xs leading-relaxed text-foreground-500">
-                      技术标满分 100，只评 L3+L4+L5，不与商务标加权。当前 {view.overall} = {scoreFormula}。
+                      技术标只评 L3+L4+L5，五维各自按严重度定级，不与商务标加权，不再计算总分。
                     </li>
                   </ul>
                   )}
@@ -699,7 +695,7 @@ export default function AuditPage() {
                       <div className="flex items-center gap-2">
                         <div className="inline-flex rounded-lg border border-background-300 bg-background-100 p-0.5">
                           {([
-                            ["tender", "招标问题", tenderIssues.length],
+                            ["tender", "招标问题", tenderCount],
                             ["review", "预审规则问题", reviewIssues.length],
                           ] as const).map(([key, label, count]) => (
                             <button
@@ -757,12 +753,34 @@ export default function AuditPage() {
                       </li>
                       );
                     })}
-                    {listedIssues.length === 0 && (
+                    {issueKind === "tender" && rulerItems.map((item) => (
+                      <li key={item.id} className="px-4 py-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="inline-flex items-center whitespace-nowrap rounded-md border border-primary-200 bg-primary-50 px-1.5 py-0.5 text-[10px] font-medium text-primary-600">
+                            {item.status}
+                          </span>
+                          <span className="font-label text-[10px] text-foreground-500">
+                            {item.maxScore ? `${item.score}/${item.maxScore} 分` : "解析字段对照"}
+                          </span>
+                        </div>
+                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5 rounded-md border border-accent-200 bg-accent-50 px-2 py-1.5">
+                          <span className="inline-flex items-center gap-0.5 rounded bg-accent-500 px-1.5 py-0.5 text-[10px] font-semibold text-background-50">
+                            评标尺子
+                          </span>
+                          <span className="text-xs font-semibold leading-snug text-accent-800">{item.name}</span>
+                        </div>
+                        <p className="mt-1.5 text-xs leading-relaxed text-foreground-700">「{item.rule}」</p>
+                        <p className="mt-1 text-[11px] text-foreground-500">
+                          {item.evidence ? `投标依据：${item.evidence}` : NO_BID_EXCERPT_HINT}
+                        </p>
+                      </li>
+                    ))}
+                    {listedIssues.length === 0 && !(issueKind === "tender" && rulerItems.length > 0) && (
                       <li className="px-4 py-10 text-center">
-                        {resultIssues.length === 0 && (view.waste + view.risk + view.suggest > 0 || view.overall < 90) ? (
+                        {resultIssues.length === 0 && view.waste + view.risk + view.suggest > 0 ? (
                           <>
                             <i className="ri-error-warning-line text-3xl text-accent-400"></i>
-                            <p className="mt-2 text-sm text-foreground-600">分层得分已扣分，问题明细未写入。请重新发起预审。</p>
+                            <p className="mt-2 text-sm text-foreground-600">分层等级存在扣分/降档，问题明细未写入。请重新发起预审。</p>
                           </>
                         ) : resultIssues.length === 0 ? (
                           <>
@@ -810,8 +828,8 @@ export default function AuditPage() {
                           </span>
                         </div>
                         <div className="mt-1 flex items-baseline gap-1">
-                          <span className="font-heading text-sm font-bold text-foreground-900">{m.score}</span>
-                          <span className="text-[11px] text-foreground-500">/ 满分 {m.maxScore} 分</span>
+                          <span className={`font-heading text-sm font-bold ${GRADE_TEXT_CLASS[m.grade]}`}>{m.grade}</span>
+                          <span className="text-[11px] text-foreground-500">{GRADE_LABEL[m.grade]}</span>
                         </div>
                         <p className="mt-1 text-[11px] leading-relaxed text-foreground-500">{m.summary}</p>
                       </li>
@@ -850,7 +868,7 @@ export default function AuditPage() {
               <div className="mb-4 flex items-center justify-between">
                 <div className="flex items-center gap-2 text-sm font-medium text-foreground-800">
                   <i className="ri-line-chart-line text-primary-500"></i>
-                  各轮{reportScope === "business" ? "商务标" : "技术标"}分数与问题数趋势
+                  各轮{reportScope === "business" ? "商务标" : "技术标"}问题数量趋势
                 </div>
                 <span className="font-label text-xs text-foreground-500">预审中锁定导出，回改后重跑验证效果</span>
               </div>
@@ -858,25 +876,35 @@ export default function AuditPage() {
                 <p className="py-10 text-center text-sm text-foreground-500">当前分册暂无历史轮次数据</p>
               ) : (
                 <>
-                  <div className="flex items-end justify-around gap-4 px-2 pt-6">
-                    {bookletTrend.map((d) => (
-                      <div key={`${d.scope || reportScope}-${d.round}`} className="flex flex-col items-center gap-2">
-                        <span className="font-heading text-sm font-bold text-foreground-700">{d.score}</span>
+                  <div className="flex flex-wrap items-stretch gap-3">
+                    {bookletTrend.map((d) => {
+                      const roundLight = lightFromCounts(d.waste, d.risk);
+                      return (
                         <div
-                          className={`w-16 rounded-t-md bg-gradient-to-t transition-all ${
-                            d.score === maxTrendScore ? "from-primary-500 to-primary-400" : "from-secondary-400 to-secondary-300"
-                          }`}
-                          style={{ height: `${(d.score / maxTrendScore) * 140}px` }}
-                        />
-                        <span className="font-label text-xs text-foreground-600">
-                          {reportScope === "business" ? "商务" : "技术"}·第{d.round}轮
-                        </span>
-                        <span className="text-[11px] text-foreground-500">{d.issues} 个问题</span>
-                      </div>
-                    ))}
+                          key={`${d.scope || reportScope}-${d.round}`}
+                          className="flex min-w-[150px] flex-1 flex-col gap-2 rounded-lg border border-background-300 bg-background-50 p-3"
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="font-label text-xs font-semibold text-foreground-700">
+                              {reportScope === "business" ? "商务" : "技术"}·第{d.round}轮
+                            </span>
+                            <span className="relative flex h-2 w-2">
+                              <span className="absolute inline-flex h-full w-full rounded-full opacity-50" style={{ backgroundColor: lightColor[roundLight] }} />
+                              <span className="relative inline-flex h-2 w-2 rounded-full" style={{ backgroundColor: lightColor[roundLight] }} />
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                            <span className="rounded bg-accent-50 px-1.5 py-0.5 font-medium text-accent-600">废标 {d.waste}</span>
+                            <span className="rounded bg-secondary-100 px-1.5 py-0.5 font-medium text-secondary-600">扣分/降档 {d.risk}</span>
+                            <span className="rounded bg-primary-50 px-1.5 py-0.5 font-medium text-primary-600">建议 {d.suggest}</span>
+                          </div>
+                          <span className="text-[11px] text-foreground-500">共 {d.issues} 个问题</span>
+                        </div>
+                      );
+                    })}
                   </div>
                   <p className="mt-4 text-xs text-foreground-500">
-                    说明：每轮「预审 + 回改」形成快照，可对比第 N 轮与第 N+1 轮报告，观察回改是否生效。
+                    说明：每轮「预审 + 回改」形成快照，可对比第 N 轮与第 N+1 轮报告，观察各严重度问题数量是否下降。
                   </p>
                 </>
               )}
@@ -893,7 +921,7 @@ export default function AuditPage() {
                 issues={view.issues}
                 dimensions={view.dimensions}
                 techModules={view.techModules}
-                overall={view.overall}
+                light={view.light}
                 round={view.round}
                 waste={view.waste}
                 risk={view.risk}
@@ -901,6 +929,7 @@ export default function AuditPage() {
                 scope={reportScope}
                 tenderRules={view.tenderRules}
                 customRules={view.customRules}
+                standardReview={view.standardReview}
                 exporting={exporting}
                 onExport={() => { if (!exporting) void exportReport((view.scope as BidScope) || reportScope); }}
                 onCopy={() => { void copyReportSummary(); }}
@@ -913,20 +942,6 @@ export default function AuditPage() {
             </div>
           )}
 
-          {activeTab === "tender" && (
-            view ? (
-            <TenderRuleReportView
-              projectName={currentProject.name}
-              projectCode={currentProject.code}
-              round={view.round}
-              data={view.tenderRules}
-            />
-            ) : (
-              <p className="rounded-lg border border-dashed border-background-300 bg-background-100 px-4 py-10 text-center text-sm text-foreground-500">
-                当前分册暂无招标规则预审结果。
-              </p>
-            )
-          )}
         </>
       )}
 

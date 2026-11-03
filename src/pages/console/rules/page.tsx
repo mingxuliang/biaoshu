@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import PageHeader from "../components/PageHeader";
 import Toast from "../components/Toast";
 import Modal from "../components/Modal";
+import StandardRulesPanel from "./components/StandardRulesPanel";
 import {
   ApiError,
   activateWeightTemplate,
@@ -27,7 +28,7 @@ import {
   type WeightTemplate,
 } from "@/lib/api";
 
-type TabKey = "weight" | "veto" | "business" | "tech" | "word" | "dup" | "threshold" | "strategy" | "package";
+type TabKey = "weight" | "veto" | "business" | "tech" | "word" | "dup" | "threshold" | "strategy" | "package" | "standard";
 
 const tabs: { key: TabKey; label: string; icon: string }[] = [
   { key: "weight", label: "五维权重", icon: "ri-focus-3-line" },
@@ -39,6 +40,7 @@ const tabs: { key: TabKey; label: string; icon: string }[] = [
   { key: "threshold", label: "查重阈值", icon: "ri-scales-3-line" },
   { key: "strategy", label: "高分策略", icon: "ri-lightbulb-line" },
   { key: "package", label: "属地细则包", icon: "ri-map-2-line" },
+  { key: "standard", label: "规范对标", icon: "ri-ruler-line" },
 ];
 
 const dimLabel = [
@@ -223,6 +225,7 @@ export default function RulesPage() {
     threshold: null,
     strategy: null,
     package: { label: "新增细则包", onClick: () => setPackageModalOpen(true) },
+    standard: null,
   };
 
   const catalogOf = (kind: CatalogRule["kind"]) => catalogRules.filter((r) => r.kind === kind);
@@ -528,6 +531,8 @@ export default function RulesPage() {
               onToggle={toggleCatalog}
             />
           )}
+
+          {activeTab === "standard" && <StandardRulesPanel />}
 
           {/* 属地细则包 */}
           {activeTab === "package" && (

@@ -37,7 +37,6 @@ from ..schemas import (
     UpdateProjectIn,
 )
 from .documents import _bid_doc_to_summary
-from ..engines.bid_kind import booklet_overall
 from ..engines.tender_package import effective_kind
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -82,7 +81,7 @@ def _to_project_out(
     team: list[TeamMemberOut],
     tender_doc: TenderDocument | None,
     progress: int | None = None,
-    score: float | None = None,
+    light: str | None = None,
 ) -> ProjectOut:
     tender_doc_out = None
     if tender_doc:
@@ -99,7 +98,7 @@ def _to_project_out(
         budget=project.budget or "待定",
         deadline=project.deadline or "",
         progress=progress if progress is not None else (project.progress or 0),
-        score=score if score is not None else (project.score or 0),
+        light=light if light in ("绿", "橙", "红") else None,
         status=project.status or "撰写中",
         createdAt=project.created_at.strftime("%Y-%m-%d") if project.created_at else "",
         tenderDoc=tender_doc_out,
@@ -123,26 +122,26 @@ def _latest_done_run(db: Session, project_id: str, scope: str) -> ReviewRun | No
 
 
 def _prereview_booklet_desc(db: Session, project_id: str, fallback: ReviewRun) -> str:
-    """时间线只展示商务/技术分册得分，不用 L1–L5 加权综合分。"""
+    """时间线只展示商务/技术分册的风险灯结论，不再用分数。"""
     full = _latest_done_run(db, project_id, "full")
     parts: list[str] = []
     for scope, label in (("business", "商务标"), ("tech", "技术标")):
         run = _latest_done_run(db, project_id, scope) or full
         if not run:
             continue
-        run_scope = getattr(run, "scope", None) or "full"
-        score = booklet_overall(run.levels_json or [], scope) if run_scope == "full" else run.overall
-        parts.append(f"{label} {score} 分")
+        light = run.light if run.light in ("绿", "橙", "红") else "橙"
+        parts.append(f"{label}风险灯 {light}")
     if parts:
         return "；".join(parts)
-    return f"本册 {fallback.overall} 分"
+    fallback_light = fallback.light if fallback.light in ("绿", "橙", "红") else "橙"
+    return f"本册风险灯 {fallback_light}"
 
 
-def _live_metrics(db: Session, project_ids: list[str]) -> dict[str, tuple[int, float]]:
-    """进度来自真实流程节点；预测得分取最新分册预审，不用综合分。"""
+def _live_metrics(db: Session, project_ids: list[str]) -> dict[str, tuple[int, str | None]]:
+    """进度来自真实流程节点；风险灯取最新分册预审，不用综合分。"""
     if not project_ids:
         return {}
-    metrics: dict[str, tuple[int, float]] = {pid: (0, 0.0) for pid in project_ids}
+    metrics: dict[str, tuple[int, str | None]] = {pid: (0, None) for pid in project_ids}
 
     tender_ids = {
         row[0]
@@ -167,12 +166,13 @@ def _live_metrics(db: Session, project_ids: list[str]) -> dict[str, tuple[int, f
         .order_by(ReviewRun.round.desc())
         .all()
     )
-    scores: dict[str, float] = {}
+    lights: dict[str, str] = {}
     for run in runs:
         run_scope = getattr(run, "scope", None) or "full"
         if run_scope not in ("business", "tech"):
             continue
-        scores.setdefault(run.project_id, float(run.overall or 0))
+        if run.light in ("绿", "橙", "红"):
+            lights.setdefault(run.project_id, run.light)
 
     revision_ids = {
         row[0]
@@ -203,13 +203,13 @@ def _live_metrics(db: Session, project_ids: list[str]) -> dict[str, tuple[int, f
                 progress += 10 + int(40 * done / total)
             elif (draft.step or 1) > 1:
                 progress += 10
-        if pid in scores:
+        if pid in lights:
             progress += 10
         if pid in revision_ids:
             progress += 5
         if pid in export_ids:
             progress += 5
-        metrics[pid] = (min(100, progress), scores.get(pid, 0.0))
+        metrics[pid] = (min(100, progress), lights.get(pid))
     return metrics
 
 
@@ -240,8 +240,8 @@ def list_projects(
             p,
             teams.get(p.id, []),
             latest_tender_by_project.get(p.id),
-            metrics.get(p.id, (0, 0.0))[0],
-            metrics.get(p.id, (0, 0.0))[1],
+            metrics.get(p.id, (0, None))[0],
+            metrics.get(p.id, (0, None))[1],
         )
         for p in projects
     ]
@@ -274,7 +274,7 @@ def create_project(
     db.commit()
     db.refresh(project)
     team = _teams_for_projects(db, [project.id]).get(project.id, [])
-    return _to_project_out(project, team, None, 0, 0.0)
+    return _to_project_out(project, team, None, 0, None)
 
 
 @router.get("/{project_id}", response_model=ProjectOut)
@@ -284,8 +284,8 @@ def get_project(
     require_project(db, current_user, project_id)
     project = db.get(Project, project_id)
     team = _teams_for_projects(db, [project_id]).get(project_id, [])
-    progress, score = _live_metrics(db, [project_id]).get(project_id, (0, 0.0))
-    return _to_project_out(project, team, _latest_tender_doc(db, project_id), progress, score)
+    progress, light = _live_metrics(db, [project_id]).get(project_id, (0, None))
+    return _to_project_out(project, team, _latest_tender_doc(db, project_id), progress, light)
 
 
 @router.patch("/{project_id}", response_model=ProjectOut)
@@ -304,8 +304,8 @@ def update_project(
     db.commit()
     db.refresh(project)
     team = _teams_for_projects(db, [project_id]).get(project_id, [])
-    progress, score = _live_metrics(db, [project_id]).get(project_id, (0, 0.0))
-    return _to_project_out(project, team, _latest_tender_doc(db, project_id), progress, score)
+    progress, light = _live_metrics(db, [project_id]).get(project_id, (0, None))
+    return _to_project_out(project, team, _latest_tender_doc(db, project_id), progress, light)
 
 
 @router.delete("/{project_id}", status_code=204)

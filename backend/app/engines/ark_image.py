@@ -36,47 +36,97 @@ _SIZE_BY_MODE = {
     "arch": "2560x1440",
 }
 
+_STYLE_HINT = {
+    "专业商务风": "画面风格为专业商务，配色克制，适合正式标书。",
+    "简约扁平风": "画面风格为简约扁平插画，少阴影。",
+    "科技渐变风": "画面风格为科技渐变，不要出现乱码文字。",
+    "写实摄影风": "画面风格为写实摄影，自然光线。",
+}
+
 
 class ArkImageError(Exception):
     """生图失败（配置缺失、方舟拒绝、下载失败等）。"""
 
 
-def build_prompt(user_prompt: str, mode: str) -> str:
+def build_prompt(user_prompt: str, mode: str, style: str | None = None) -> str:
     prefix = _MODE_PREFIX.get(mode, _MODE_PREFIX["normal"])
     text = (user_prompt or "").strip() or "投标文件相关示意图"
-    return f"{prefix}{text}"
+    hint = _STYLE_HINT.get(style or "", "") if mode == "normal" else ""
+    return f"{prefix}{hint}{text}"
 
 
-def generate_and_save(project_id: str, prompt: str, mode: str) -> tuple[str, str]:
-    """调用方舟生图并落盘。返回 (storage_path, filename)。"""
+def resolve_image_endpoint() -> tuple[str, str, str]:
+    """返回 (api_key, base_url, api_model)。优先用模型配置里的豆包生图模型。"""
     settings = get_settings()
-    if not settings.ark_api_key:
-        raise ArkImageError("未配置方舟 ARK_API_KEY，无法生成图片")
+    api_key = (settings.ark_api_key or "").strip()
+    base_url = (settings.ark_base_url or "https://ark.cn-beijing.volces.com/api/v3").strip()
+    api_model = (settings.ark_image_model or "doubao-seedream-4-0-250828").strip()
+    try:
+        from ..db import SessionLocal
+        from ..models import LlmModel, LlmProvider
+
+        db = SessionLocal()
+        try:
+            provider = (
+                db.query(LlmProvider)
+                .filter(LlmProvider.kind == "doubao", LlmProvider.enabled.is_(True))
+                .order_by(LlmProvider.created_at.asc())
+                .first()
+            )
+            if provider and (provider.api_key or "").strip():
+                api_key = provider.api_key.strip()
+            if provider and (provider.base_url or "").strip():
+                base_url = provider.base_url.strip()
+            if provider is not None:
+                image = (
+                    db.query(LlmModel)
+                    .filter(
+                        LlmModel.provider_id == provider.id,
+                        LlmModel.enabled.is_(True),
+                        LlmModel.task == "image",
+                    )
+                    .order_by(LlmModel.sort_order.asc())
+                    .first()
+                )
+                if image and (image.api_model or "").strip():
+                    api_model = image.api_model.strip()
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 —— 库还没迁移时仍可用环境变量里的 Seedream
+        pass
+    if not api_key:
+        raise ArkImageError("未配置豆包生图秘钥，请到「模型配置」填写火山方舟 API Key")
+    return api_key, base_url, api_model
+
+
+def generate_and_save(project_id: str, prompt: str, mode: str, style: str | None = None) -> tuple[str, str]:
+    """调用方舟生图并落盘。返回 (storage_path, filename)。"""
+    api_key, base_url, api_model = resolve_image_endpoint()
 
     mode = mode if mode in VALID_MODES else "normal"
-    full_prompt = build_prompt(prompt, mode)
+    full_prompt = build_prompt(prompt, mode, style)
     size = _SIZE_BY_MODE.get(mode, "2K")
 
     payload = {
-        "model": settings.ark_image_model,
+        "model": api_model,
         "prompt": full_prompt,
         "size": size,
         "response_format": "url",
         "watermark": False,
     }
-    headers = {"Authorization": f"Bearer {settings.ark_api_key}"}
+    headers = {"Authorization": f"Bearer {api_key}"}
 
     try:
-        data = _call_generations(settings.ark_base_url, payload, headers)
+        data = _call_generations(base_url, payload, headers)
     except ArkImageError as exc:
         if "size" in str(exc).lower() or "watermark" in str(exc).lower():
             fallback = {
-                "model": settings.ark_image_model,
+                "model": api_model,
                 "prompt": full_prompt,
                 "size": "2K",
                 "response_format": "url",
             }
-            data = _call_generations(settings.ark_base_url, fallback, headers)
+            data = _call_generations(base_url, fallback, headers)
         else:
             raise
 

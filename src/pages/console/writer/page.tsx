@@ -374,6 +374,8 @@ export default function WriterPage() {
               setDraft((d) => (d ? { ...d, knowledgeRefs: next } : d));
             }}
             layout={settingsPayload.layout}
+            page={settingsPayload.page}
+            imageSettings={settingsPayload.image}
             onBack={goBack}
           />
         )}

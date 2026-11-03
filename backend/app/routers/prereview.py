@@ -14,7 +14,7 @@ from ..engines import e_tender_score, rules_config
 from ..engines.excerpt_guard import chapter_from_location, display_rule, split_bid_and_tender
 from ..engines.e_business_vision import is_transport_stub_finding
 from ..engines.docx_extract import extract_document_plain_text, extract_full_text, extract_paragraphs
-from ..engines.bid_kind import filter_tender_rules, normalize_kind, normalize_scope, project_booklet_payload, booklet_overall, BOOKLET_LEVELS
+from ..engines.bid_kind import filter_tender_rules, normalize_kind, normalize_scope, project_booklet_payload, BOOKLET_LEVELS
 from ..engines.review_export import review_run_to_docx
 from ..models import BidDocument, Project, ReviewFinding, ReviewRun, User
 from ..permissions import PERM_REVIEW, require_project
@@ -155,28 +155,40 @@ def list_review_runs(
     for r in runs:
         run_scope = getattr(r, "scope", None) or "full"
         if run_scope == "full" and scope not in ("business", "tech", "full"):
-            levels = r.levels_json or []
             for booklet in ("business", "tech"):
-                overall = booklet_overall(levels, booklet)
                 keys = set(BOOKLET_LEVELS[booklet])
-                issues_n = sum(int(lv.get("issues") or 0) for lv in levels if isinstance(lv, dict) and lv.get("key") in keys)
-                points.append(TrendPointOut(round=r.round, score=overall, issues=issues_n, scope=booklet))
+                waste, risk, suggest, issues_n = _severity_counts_for_levels(db, r.id, keys)
+                points.append(
+                    TrendPointOut(round=r.round, waste=waste, risk=risk, suggest=suggest, issues=issues_n, scope=booklet)
+                )
             continue
         if run_scope == "full" and scope in ("business", "tech"):
-            overall = booklet_overall(r.levels_json or [], scope)
             keys = set(BOOKLET_LEVELS[scope])
-            issues_n = sum(int(lv.get("issues") or 0) for lv in (r.levels_json or []) if isinstance(lv, dict) and lv.get("key") in keys)
-            points.append(TrendPointOut(round=r.round, score=overall, issues=issues_n, scope=scope))
+            waste, risk, suggest, issues_n = _severity_counts_for_levels(db, r.id, keys)
+            points.append(
+                TrendPointOut(round=r.round, waste=waste, risk=risk, suggest=suggest, issues=issues_n, scope=scope)
+            )
             continue
         points.append(
             TrendPointOut(
                 round=r.round,
-                score=r.overall,
+                waste=r.waste,
+                risk=r.risk,
+                suggest=r.suggest,
                 issues=(r.waste + r.risk + r.suggest),
                 scope=run_scope,
             )
         )
     return points
+
+
+def _severity_counts_for_levels(db: Session, run_id: str, keys: set[str]) -> tuple[int, int, int, int]:
+    """旧版「合订全量」轮次没有分册单独统计，按 Finding 表里的 level 现算该分册的严重度计数。"""
+    rows = db.query(ReviewFinding.severity).filter(ReviewFinding.run_id == run_id, ReviewFinding.level.in_(keys)).all()
+    waste = sum(1 for (sev,) in rows if sev == "废标")
+    risk = sum(1 for (sev,) in rows if sev in ("降档", "扣分"))
+    suggest = sum(1 for (sev,) in rows if sev == "建议")
+    return waste, risk, suggest, len(rows)
 
 
 def _backfill_tender_rules(db: Session, run: ReviewRun) -> dict:
@@ -259,6 +271,89 @@ def _custom_rules_payload(raw) -> list[dict]:
     return out
 
 
+def _standard_review_payload(raw) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    points = []
+    for item in raw.get("points") or []:
+        if not isinstance(item, dict):
+            continue
+        clauses = []
+        for clause in item.get("clauses") or []:
+            if not isinstance(clause, dict):
+                continue
+            clauses.append(
+                {
+                    "code": str(clause.get("code") or ""),
+                    "clauseNo": str(clause.get("clauseNo") or clause.get("clause_no") or ""),
+                    "specialty": str(clause.get("specialty") or ""),
+                    "excerpt": str(clause.get("excerpt") or ""),
+                }
+            )
+        points.append(
+            {
+                "id": str(item.get("id") or ""),
+                "source": str(item.get("source") or ""),
+                "name": str(item.get("name") or ""),
+                "detail": str(item.get("detail") or ""),
+                "verdict": str(item.get("verdict") or ""),
+                "excerpt": str(item.get("excerpt") or ""),
+                "reason": str(item.get("reason") or ""),
+                "booklet": str(item.get("booklet") or ""),
+                "mustWrite": str(item.get("mustWrite") or ""),
+                "parameters": str(item.get("parameters") or ""),
+                "standards": [
+                    str(code).strip()
+                    for code in (item.get("standards") if isinstance(item.get("standards"), list) else [item.get("standards") or ""])
+                    if str(code).strip()
+                ],
+                "chapter": str(item.get("chapter") or ""),
+                "axis": str(item.get("axis") or ""),
+                "drawingNo": str(item.get("drawingNo") or ""),
+                "clauses": clauses,
+                "score": item.get("score"),
+                "maxScore": item.get("maxScore"),
+                "grade": str(item.get("grade") or ""),
+                "weight": str(item.get("weight") or ""),
+                "weightedScore": item.get("weightedScore"),
+                "problems": str(item.get("problems") or ""),
+                "suggestion": str(item.get("suggestion") or ""),
+                "strategy": str(item.get("strategy") or ""),
+                "scoreRule": str(item.get("scoreRule") or ""),
+                "checks": [
+                    {
+                        "item": str(row.get("item") or ""),
+                        "bid": str(row.get("bid") or ""),
+                        "result": str(row.get("result") or ""),
+                    }
+                    for row in (item.get("checks") or [])
+                    if isinstance(row, dict) and row.get("item")
+                ],
+                "excerpts": [str(text) for text in (item.get("excerpts") or []) if str(text).strip()],
+                "strengths": str(item.get("strengths") or ""),
+                "revisions": str(item.get("revisions") or ""),
+                "noncompliance": str(item.get("noncompliance") or ""),
+                "knowledge": [
+                    {
+                        "code": str(hit.get("title") or ""),
+                        "clauseNo": str(hit.get("heading") or ""),
+                        "specialty": "",
+                        "excerpt": str(hit.get("excerpt") or "")[:120],
+                    }
+                    for hit in (item.get("knowledge") or [])
+                    if isinstance(hit, dict) and (hit.get("excerpt") or hit.get("title"))
+                ],
+            }
+        )
+    if not points and not raw.get("note"):
+        return None
+    return {
+        "specialty": str(raw.get("specialty") or "通用"),
+        "note": str(raw.get("note") or ""),
+        "points": points,
+    }
+
+
 def _run_to_report(db: Session, run: ReviewRun, as_scope: str | None = None) -> ReviewReportOut:
     tender_rules = run.tender_rules_json or {}
     if not (isinstance(tender_rules, dict) and tender_rules.get("groups")):
@@ -268,7 +363,6 @@ def _run_to_report(db: Session, run: ReviewRun, as_scope: str | None = None) -> 
     light = run.light if run.light in ("绿", "橙", "红") else "橙"
     payload = {
         "round": run.round,
-        "overall": run.overall,
         "waste": run.waste,
         "risk": run.risk,
         "suggest": run.suggest,
@@ -279,6 +373,7 @@ def _run_to_report(db: Session, run: ReviewRun, as_scope: str | None = None) -> 
         "techModules": run.tech_modules_json or [],
         "tenderRules": tender_rules or None,
         "customRules": custom_rules,
+        "standardReview": _standard_review_payload(getattr(run, "standard_review_json", None)),
         "issues": issues,
     }
     run_scope = payload["scope"]
@@ -328,7 +423,6 @@ def export_latest_review_report(
     project = db.get(Project, project_id)
     issues = _findings_as_issue_dicts(db, run.id)
     payload = {
-        "overall": run.overall or 0,
         "light": run.light or "",
         "waste": run.waste or 0,
         "risk": run.risk or 0,
@@ -338,6 +432,7 @@ def export_latest_review_report(
         "techModules": run.tech_modules_json or [],
         "issues": issues,
         "customRules": _custom_rules_payload(getattr(run, "custom_rules_json", None)),
+        "standardReview": _standard_review_payload(getattr(run, "standard_review_json", None)),
         "scope": getattr(run, "scope", None) or "full",
     }
     payload = project_booklet_payload(payload, export_scope)
@@ -346,7 +441,6 @@ def export_latest_review_report(
         project_name=project.name if project else "",
         project_code=project.code if project else "",
         round_no=run.round,
-        overall=payload["overall"],
         light=payload["light"],
         waste=payload["waste"],
         risk=payload["risk"],
@@ -356,6 +450,7 @@ def export_latest_review_report(
         issues=payload["issues"],
         tech_modules=payload.get("techModules") or [],
         custom_rules=payload.get("customRules") or [],
+        standard_review=payload.get("standardReview"),
         finished_at=run.finished_at,
         scope=run_scope,
     )

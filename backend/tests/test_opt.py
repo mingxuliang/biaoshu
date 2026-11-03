@@ -88,22 +88,30 @@ class ParseMatchTests(unittest.TestCase):
         )
         self.assertEqual(findings, [])
 
-    def test_zero_weight_score_rule_is_not_treated_as_answer_item(self) -> None:
-        """没有分值的条目（如「专用合同条款」违约金/验收期限、"本段未出现XX公式"占位说明）
-        不是真正的评分点，不应被当成「必须在投标书里出现」的应答项，也不该触发任何模型调用。"""
-        findings = parse_match_run(
-            "投标书正文完全不提这件事",
-            score_rules=[
-                {
-                    "dimension": "专用合同条款（技术要求）",
-                    "detail": "违约、索赔与工期奖罚：逾期竣工违约金的上限：合同价款的4%",
-                    "weight": 0,
-                    "sourceItemId": "contract-tech",
+    def test_zero_weight_contract_clause_still_checked_for_coverage(self) -> None:
+        """招标解析抽出的合同条款即使没有分值，也要进预审对照；未覆盖则出缺项。"""
+        with patch("app.engines.clause_scan.scan_items") as mock_scan:
+            mock_scan.return_value = {
+                "0": {
+                    "answered": False,
+                    "excerpt": "",
+                    "reason": "对照本项招标要求，投标书中未见相应的实质性响应内容。",
+                    "unanswered_confirmed": True,
                 }
-            ],
-            strategy_keys={"checklist_map"},
-        )
-        self.assertEqual(findings, [])
+            }
+            findings = parse_match_run(
+                "投标书正文完全不提这件事",
+                score_rules=[
+                    {
+                        "dimension": "专用合同条款（技术要求）",
+                        "detail": "违约、索赔与工期奖罚：逾期竣工违约金的上限：合同价款的4%",
+                        "weight": 0,
+                        "sourceItemId": "contract-tech",
+                    }
+                ],
+            )
+        self.assertEqual(len(findings), 1)
+        self.assertIn("专用合同条款", findings[0]["rule"])
 
     def test_grading_language_score_rule_is_not_treated_as_answer_item(self) -> None:
         """评委打分/分档语言（如「分档/赋分规则」）本就是评标口径，投标书原文搜不到这些
@@ -173,8 +181,7 @@ class GradingFilterTests(unittest.TestCase):
         self.assertTrue(is_grading_rule(label, content))
 
     def test_expand_score_items_ignores_stray_percent_deep_in_clause_text(self) -> None:
-        """weight 缺省时，只在条目开头附近找「（N分）/N%」标注；专用合同条款里散落在段落
-        深处、与分值无关的百分比（如违约金上限）不能被误当成本条评分权重。"""
+        """合同条款进预审，但不把段落深处的违约金比例拆成假评分点。"""
         from app.engines.e_tender_score import expand_score_items
 
         score_rules = [
@@ -190,7 +197,9 @@ class GradingFilterTests(unittest.TestCase):
             }
         ]
         items = expand_score_items(score_rules, None)
-        self.assertEqual(items, [])
+        self.assertEqual(len(items), 1)
+        self.assertTrue(items[0]["coverOnly"])
+        self.assertEqual(items[0]["maxScore"], 0.0)
 
     def test_expand_score_items_still_picks_up_score_near_head(self) -> None:
         """条目开头附近真的标了分值（如「XX方案（10分）」），仍要正常识别为评分点。"""
@@ -201,9 +210,8 @@ class GradingFilterTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["maxScore"], 10.0)
 
-    def test_expand_score_items_excludes_contract_tech_payment_clause(self) -> None:
-        """专用合同条款（付款进度/质保金等履约条款）不是投标时的评分点；文字里散落多处
-        百分比时，不能被 _split_factors 误拆成好几条名字截断的假「评分项」。"""
+    def test_expand_score_items_keeps_contract_tech_as_single_cover_item(self) -> None:
+        """专用合同条款要进招标规则预审；付款/质保金百分比不能被拆成多条假评分项。"""
         from app.engines.e_tender_score import expand_score_items
 
         score_rules = [
@@ -218,7 +226,9 @@ class GradingFilterTests(unittest.TestCase):
             }
         ]
         items = expand_score_items(score_rules, None)
-        self.assertEqual(items, [])
+        self.assertEqual(len(items), 1)
+        self.assertTrue(items[0]["coverOnly"])
+        self.assertIn("预付款", items[0]["rule"])
 
 
 class ClauseScanTests(unittest.TestCase):
@@ -389,6 +399,118 @@ class ChunkTests(unittest.TestCase):
         self.assertGreater(total, MAX_REVIEW_CHARS * 0.8)
 
 
+class PriceRegexTests(unittest.TestCase):
+    """报价/基准价正则要能抓到中文标书常见的「不带千分位逗号」大数字写法，
+    不能只支持带逗号分组的写法（现实中很少见），否则报价超预算/恶意低价/报价偏离
+    这几项检查会在多数真实标书上直接不触发。"""
+
+    def test_e1_budget_cap_veto_fires_without_comma_separator(self) -> None:
+        from app.engines.e1_veto import run as e1_run
+
+        paragraphs = [{"index": 0, "text": "投标总价：120000万元，大写：壹拾贰亿元整。"}]
+        findings = e1_run(paragraphs, {"budget_cap_wan": 100000}, [], None, None, None, None)
+        self.assertTrue(any("预算上限" in (f.get("rule") or "") for f in findings))
+
+    def test_e1_malicious_low_price_veto_fires_without_comma_separator(self) -> None:
+        from app.engines.e1_veto import run as e1_run
+
+        text = "投标总价：70000万元。评标基准价：100000万元。"
+        paragraphs = [{"index": 0, "text": text}]
+        findings = e1_run(paragraphs, {}, [], {"price_deviation_malicious": 20}, None, None, None)
+        self.assertTrue(any("恶意低价" in (f.get("rule") or "") for f in findings))
+
+    def test_e2_price_deviation_fires_without_comma_separator(self) -> None:
+        from app.engines.e2_business import run as e2_run
+
+        text = "投标总价：85000万元。评标基准价：100000万元。"
+        paragraphs = [{"index": 0, "text": text}]
+        findings = e2_run(paragraphs, {}, None, [], None, None, None, None, {"price_deviation"})
+        self.assertTrue(any("报价偏离" in (f.get("rule") or "") for f in findings))
+
+
+class DataLoopWindowTests(unittest.TestCase):
+    """高峰人数×宿舍/临建面积人均验算：两个数字必须出现在同一小窗口附近才能配对，
+    不能在全文里各自 search 第一个命中就相除——不同章节的数字很可能说的不是同一件事，
+    强行配对会把毫不相关的数字凑成一条假的「人均不足4㎡」扣分。"""
+
+    def test_unrelated_numbers_in_far_apart_sections_do_not_pair(self) -> None:
+        from app.engines.e2_business import run as e2_run
+
+        paragraphs = [
+            {"index": 0, "text": "1标段高峰人数30人，负责基础阶段施工。"},
+        ] + [
+            {"index": i, "text": f"第{i}节 无关内容 填充填充填充填充。"} for i in range(1, 20)
+        ] + [
+            {"index": 20, "text": "全场地临建总面积2000平方米，供全部标段共用。"},
+        ]
+        findings = e2_run(paragraphs, {}, None, [], None, None, None, {"data_loop"}, None)
+        self.assertFalse(any("人均" in (f.get("suggestion") or "") for f in findings))
+
+    def test_numbers_in_same_window_still_pair_and_flag(self) -> None:
+        from app.engines.e2_business import run as e2_run
+
+        paragraphs = [
+            {"index": 0, "text": "高峰人数200人，集中安排住宿。"},
+            {"index": 1, "text": "宿舍临建面积600平方米，满足基本住宿需求。"},
+        ]
+        findings = e2_run(paragraphs, {}, None, [], None, None, None, {"data_loop"}, None)
+        self.assertTrue(any("人均" in (f.get("suggestion") or "") for f in findings))
+
+
+class TextboxExtractionTests(unittest.TestCase):
+    """word 文本框（形状/SmartArt）里的文字要能被抽取到，不能整段丢失。
+
+    python-docx 的 paragraph.text 不含文本框内容；投标书封面、施组流程图、组织架构图
+    常把关键说明文字放在文本框里，抽不到会导致引擎判断时看不到这段文字，误判成「未响应」。
+    """
+
+    def _make_docx_with_textbox(self, tmp_dir: str, textbox_text: str) -> str:
+        from docx.oxml import OxmlElement
+
+        document = docx.Document()
+        document.add_paragraph("正文第一段，不在文本框里。")
+        p = document.add_paragraph()
+        run = p.add_run()
+        drawing = OxmlElement("w:drawing")
+        txbx = OxmlElement("w:txbxContent")
+        inner_p = OxmlElement("w:p")
+        inner_r = OxmlElement("w:r")
+        inner_t = OxmlElement("w:t")
+        inner_t.text = textbox_text
+        inner_r.append(inner_t)
+        inner_p.append(inner_r)
+        txbx.append(inner_p)
+        drawing.append(txbx)
+        run._r.append(drawing)
+        path = str(Path(tmp_dir) / "textbox.docx")
+        document.save(path)
+        return path
+
+    def test_textbox_texts_extracts_raw_strings(self) -> None:
+        from app.engines.docx_extract import textbox_texts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._make_docx_with_textbox(tmp, "临近周边住宅区文明施工保障措施：夜间22点后停止施工。")
+            texts = textbox_texts(docx.Document(path))
+        self.assertTrue(any("夜间22点后停止施工" in t for t in texts))
+
+    def test_extract_paragraphs_includes_textbox_text(self) -> None:
+        from app.engines.docx_extract import extract_paragraphs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._make_docx_with_textbox(tmp, "文本框专项说明：设置隔音屏障降噪。")
+            paras = extract_paragraphs(path)
+        self.assertTrue(any("设置隔音屏障降噪" in (p.get("text") or "") for p in paras))
+
+    def test_extract_review_pack_includes_textbox_text(self) -> None:
+        from app.engines.bid_media import _extract_docx_pack
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._make_docx_with_textbox(tmp, "文本框专项说明：设置隔音屏障降噪。")
+            pack = _extract_docx_pack(path)
+        self.assertTrue(any("设置隔音屏障降噪" in (p.get("text") or "") for p in pack["paragraphs"]))
+
+
 class WritebackTests(unittest.TestCase):
     def test_writeback_replaces_text_keeps_bold(self) -> None:
         document = docx.Document()
@@ -406,20 +528,19 @@ class WritebackTests(unittest.TestCase):
 
 
 class ReviewExportTests(unittest.TestCase):
-    def test_report_docx_contains_score_and_issues(self) -> None:
+    def test_report_docx_contains_grade_and_issues(self) -> None:
         from app.engines.review_export import review_run_to_docx
 
         blob = review_run_to_docx(
             project_name="华北演示",
             project_code="HB-001",
             round_no=3,
-            overall=82.5,
             light="橙",
             waste=1,
             risk=4,
             suggest=2,
-            levels=[{"key": "L1", "name": "一票否决扫描", "score": 90, "issues": 1, "status": "风险", "desc": "否决项"}],
-            dimensions=[{"name": "完整性", "weight": 20, "score": 80}],
+            levels=[{"key": "L1", "name": "一票否决扫描", "grade": "B", "issues": 1, "status": "风险", "desc": "否决项"}],
+            dimensions=[{"name": "完整性", "weight": 20, "grade": "B"}],
             issues=[
                 {
                     "severity": "废标",
@@ -435,7 +556,7 @@ class ReviewExportTests(unittest.TestCase):
         loaded = docx.Document(io.BytesIO(blob))
         text = "\n".join(p.text for p in loaded.paragraphs)
         self.assertTrue("预审报告" in text)
-        self.assertIn("82.5", text)
+        self.assertIn("等级 B", text)
         self.assertIn("未盖公章", text)
         self.assertIn("投标函未加盖公章", text)
         self.assertIn("自定义规则对照", text)
@@ -540,6 +661,76 @@ class DistillDisplayTests(unittest.TestCase):
         )
         self.assertEqual(merged_row["original"], blob)
         self.assertNotEqual(merged_row["content"].strip(), blob)
+
+
+class GradeScoreRemovalTests(unittest.TestCase):
+    """去分数化：AI 预审报告自己的各项指标改用 A/B/C/D 等级 + 严重度直推，
+    不再做加权求和/扣分算术（模拟评委打分 e_tender_score 不在此范围，继续用数字）。"""
+
+    def test_grade_from_findings_worst_severity_wins(self) -> None:
+        from app.engines.rules_data import grade_from_findings
+
+        self.assertEqual(grade_from_findings([]), "A")
+        self.assertEqual(grade_from_findings([{"severity": "建议"}]), "A")
+        self.assertEqual(grade_from_findings([{"severity": "扣分"}]), "B")
+        self.assertEqual(grade_from_findings([{"severity": "降档"}, {"severity": "扣分"}]), "C")
+        self.assertEqual(grade_from_findings([{"severity": "废标"}, {"severity": "建议"}]), "D")
+
+    def test_worst_grade_picks_lowest(self) -> None:
+        from app.engines.rules_data import worst_grade
+
+        self.assertEqual(worst_grade(["A", "B", "A"]), "B")
+        self.assertEqual(worst_grade(["A", "D", "C"]), "D")
+        self.assertEqual(worst_grade([]), "A")
+
+    def test_status_from_grade_mapping(self) -> None:
+        from app.engines.orchestrator import _status_from_grade
+
+        self.assertEqual(_status_from_grade("A"), "通过")
+        self.assertEqual(_status_from_grade("B"), "通过")
+        self.assertEqual(_status_from_grade("C"), "风险")
+        self.assertEqual(_status_from_grade("D"), "未达标")
+
+    def test_e3_semantic_merge_chunk_results_takes_worst_grade_not_average(self) -> None:
+        """五维评审跨分块合并：任一分块把某维评到 D，全书这一维就是 D，不能被其它分块稀释。"""
+        from app.engines.e3_semantic import _merge_chunk_results
+
+        results = [
+            {"dimensions": {"completeness": {"grade": "A", "reason": "第一段没问题"}}, "issues": []},
+            {"dimensions": {"completeness": {"grade": "D", "reason": "第二段严重缺项"}}, "issues": []},
+            {"dimensions": {"completeness": {"grade": "B", "reason": "第三段有点小问题"}}, "issues": []},
+        ]
+        merged = _merge_chunk_results(results, [100, 100, 100], {"completeness": 30})
+        self.assertEqual(merged["dimensions"]["completeness"]["grade"], "D")
+
+    def test_e3_semantic_normalize_defaults_invalid_grade_to_neutral(self) -> None:
+        from app.engines.e3_semantic import _normalize
+
+        out = _normalize({"dimensions": {"completeness": {"reason": "模型没给等级"}}}, {"completeness": 30})
+        self.assertEqual(out["dimensions"]["completeness"]["grade"], "C")
+
+    def test_tech_module_entry_grade_from_severity(self) -> None:
+        from app.engines.e3_tech_modules import _module_entry
+
+        ok = _module_entry("org_outline", None)
+        self.assertEqual(ok["grade"], "A")
+        self.assertNotIn("score", ok)
+        self.assertNotIn("maxScore", ok)
+
+        bad = _module_entry(
+            "org_outline",
+            {"severity": "扣分", "suggestion": "补开篇", "rule": "T01", "excerpt": ""},
+        )
+        self.assertEqual(bad["grade"], "B")
+
+    def test_booklet_grade_takes_worst_across_levels(self) -> None:
+        from app.engines.bid_kind import booklet_grade
+
+        levels = [
+            {"key": "L1", "grade": "A"},
+            {"key": "L2", "grade": "C"},
+        ]
+        self.assertEqual(booklet_grade(levels, "business"), "C")
 
 
 if __name__ == "__main__":

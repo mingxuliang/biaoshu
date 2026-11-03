@@ -355,7 +355,9 @@ export default function ModelsPage() {
                               <td className="py-2 font-medium text-foreground-800">{model.name}</td>
                               <td className="py-2 font-mono text-[11px] text-foreground-600">{model.apiModel}</td>
                               <td className="py-2">
-                                {model.vision ? (
+                                {model.task === "image" ? (
+                                  <span className="inline-flex items-center rounded-full bg-accent-100 px-2 py-0.5 text-[10px] font-medium text-accent-700">生图</span>
+                                ) : model.vision ? (
                                   <span className="inline-flex items-center rounded-full bg-primary-50 px-2 py-0.5 text-[10px] font-medium text-primary-700">多模态看图</span>
                                 ) : (
                                   <span className="inline-flex items-center rounded-full bg-secondary-100 px-2 py-0.5 text-[10px] text-secondary-600">文本</span>

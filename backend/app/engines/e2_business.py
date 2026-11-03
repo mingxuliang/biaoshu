@@ -21,8 +21,8 @@ FOUR_PIECES = ["中标通知书", "合同", "竣工验收", "官网"]
 PERFORMANCE_QUANTIFIER_PATTERN = re.compile(r"\d+(?:\.\d+)?\s*(?:项|个|万元|㎡|平方米|年|月|km|公里)")
 
 ASSET_LIABILITY_PATTERN = re.compile(r"资产负债率\D{0,10}(\d{1,3}(?:\.\d+)?)\s*%")
-PRICE_WAN_PATTERN = re.compile(r"(?:投标报价|总报价|投标总价)\D{0,12}(-?\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*万元")
-BASE_PRICE_PATTERN = re.compile(r"(?:评标基准价|基准价|拦标价)\D{0,12}(\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*万元")
+PRICE_WAN_PATTERN = re.compile(r"(?:投标报价|总报价|投标总价)\D{0,12}(-?\d+(?:,\d{3})*(?:\.\d+)?)\s*万元")
+BASE_PRICE_PATTERN = re.compile(r"(?:评标基准价|基准价|拦标价)\D{0,12}(\d+(?:,\d{3})*(?:\.\d+)?)\s*万元")
 FINANCE_TOPIC_KEYWORDS = ("财务指标", "资产负债率", "财务状况")
 FINANCE_COMPLETENESS_KEYWORDS = (("营业收入", "营收"), ("现金流",), ("审计报告",))
 
@@ -384,21 +384,33 @@ def _bid_material_findings(
         )
 
     if data_loop_enabled:
-        people_n = re.search(r"(?:高峰人数|劳动力|施工人数)\D{0,8}(\d{2,4})\s*人", full_text)
-        area_n = re.search(r"(?:宿舍|临建)\D{0,12}(\d{2,5})\s*(?:㎡|平方米|平米)", full_text)
-        if people_n and area_n:
+        # 只在「提到高峰人数」的段落附近一个小窗口里找宿舍/临建面积，不在全文里各自
+        # search 第一个命中就配对——标书常在完全不同的章节各写一次「高峰人数」「临建
+        # 面积」（比如总纲里的人数峰值和临建布置章节的总面积，指的不是同一件事），
+        # 隔章节强行拿两个数字做人均面积除法，容易把毫不相关的数字凑成一条假的「人均
+        # 不足4㎡」扣分。改成要求两个数字出现在同一小窗口内才计算，找不到就不检查。
+        for idx, p in enumerate(paragraphs):
+            text = p["text"]
+            if not any(k in text for k in ("高峰人数", "劳动力", "施工人数")):
+                continue
+            window = "\n".join(pp["text"] for pp in paragraphs[max(0, idx - 2) : idx + 6])
+            people_n = re.search(r"(?:高峰人数|劳动力|施工人数)\D{0,8}(\d{2,4})\s*人", window)
+            area_n = re.search(r"(?:宿舍|临建)\D{0,12}(\d{2,5})\s*(?:㎡|平方米|平米)", window)
+            if not (people_n and area_n):
+                continue
             headcount = int(people_n.group(1))
             area = int(area_n.group(1))
             if headcount > 0 and area / headcount < 4:
                 extra.append(
                     _finding(
                         severity="扣分",
-                        location="技术标 / 数据链闭环",
+                        location=f"技术标 / 数据链闭环 / 段落 {p['index']}",
                         excerpt=f"{people_n.group(0)}；{area_n.group(0)}",
                         rule="F06.07 高峰人数与宿舍面积交叉验算",
                         suggestion="高峰人数与宿舍/临建面积交叉验算人均不足 4㎡。请按人均不少于 4㎡ 调整临建面积或劳动力峰值",
                     )
                 )
+            break
 
     if code_cite_enabled and "废止" in full_text and re.search(r"GB[/\s]?\d|JGJ|JTG", full_text):
         extra.append(

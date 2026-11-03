@@ -9,6 +9,13 @@ import { useProjects } from "@/context/ProjectContext";
 import { useAuth } from "@/context/AuthContext";
 import { getProjectTimeline, type TimelineStage } from "@/lib/api";
 import { hideWriter } from "@/lib/flags";
+import { LIGHT_LABEL } from "@/lib/grade";
+
+const lightColor: Record<"绿" | "橙" | "红", string> = {
+  绿: "#16a34a",
+  橙: "#ea580c",
+  红: "#dc2626",
+};
 
 type StageStatus = TimelineStage["status"];
 
@@ -114,9 +121,21 @@ export default function ProjectDetailPage() {
             <div className="flex shrink-0 items-center gap-4">
               <ProgressRing value={project.progress} size={64} stroke={6} label={`${project.progress}%`} color="primary" />
               <div>
-                <div className="text-[11px] text-foreground-500">AI 预测得分</div>
-                <div className="font-heading text-gradient mt-0.5 text-2xl font-bold tracking-wide">
-                  {project.score > 0 ? project.score : "—"}
+                <div className="text-[11px] text-foreground-500">AI 预审风险灯</div>
+                <div className="mt-0.5 flex items-center gap-1.5">
+                  {project.light ? (
+                    <>
+                      <span className="relative flex h-2.5 w-2.5">
+                        <span className="absolute inline-flex h-full w-full rounded-full opacity-50 animate-ping" style={{ backgroundColor: lightColor[project.light] }} />
+                        <span className="relative inline-flex h-2.5 w-2.5 rounded-full" style={{ backgroundColor: lightColor[project.light] }} />
+                      </span>
+                      <span className="font-heading text-2xl font-bold tracking-wide" style={{ color: lightColor[project.light] }}>
+                        {LIGHT_LABEL[project.light]}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="font-heading text-gradient text-2xl font-bold tracking-wide">—</span>
+                  )}
                 </div>
                 <div className="text-[11px] text-foreground-500">撰写进度 {project.progress}%</div>
               </div>

@@ -14,6 +14,7 @@ import re
 from datetime import datetime
 
 from .clause_cover import CAPS, cap_overflow_finding, check_clause
+from .excerpt_guard import hit_sentence
 
 VALIDITY_KEYWORDS = ["投标有效期"]
 VALIDITY_NUMBER_PATTERN = re.compile(r"(\d{1,3})\s*(日历天|天)")
@@ -27,9 +28,9 @@ DATE_VALID_UNTIL_PATTERN = re.compile(
 )
 
 PRICE_KEYWORDS = ["投标报价", "总报价", "投标总价"]
-PRICE_WAN_PATTERN = re.compile(r"(?:投标报价|总报价|投标总价)\D{0,12}(-?\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*万元")
+PRICE_WAN_PATTERN = re.compile(r"(?:投标报价|总报价|投标总价)\D{0,12}(-?\d+(?:,\d{3})*(?:\.\d+)?)\s*万元")
 NEGATIVE_PRICE_PATTERN = re.compile(r"(?:投标报价|总报价|投标总价)\D{0,12}-\s*\d")
-BASE_PRICE_PATTERN = re.compile(r"(?:评标基准价|基准价|拦标价)\D{0,12}(\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*万元")
+BASE_PRICE_PATTERN = re.compile(r"(?:评标基准价|基准价|拦标价)\D{0,12}(\d+(?:,\d{3})*(?:\.\d+)?)\s*万元")
 PROVISIONAL_AMOUNT_PATTERN = re.compile(r"暂列金额\D{0,10}(\d+(?:\.\d+)?)\s*万")
 LOW_PRICE_EXPLANATION_KEYWORDS = ("说明", "分析", "承诺", "让利", "薄利")
 

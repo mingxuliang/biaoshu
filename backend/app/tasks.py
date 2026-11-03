@@ -24,6 +24,8 @@ from .engines.tender_package import (
 )
 from .engines.extract_quality import merge_stats, parse_fail_reason
 from .engines.drawing_intel import analyze_drawings, merge_drawing_fills
+from .engines.drawing_rules import extract_drawing_rules, merge_drawing_into_leaves
+from .engines.tech_rules import extract_tech_rules
 from .engines.knowledge_retrieval import list_knowledge_headings, retrieve_by_doc_and_headings, retrieve_for_chapter
 from .engines.orchestrator import run_prereview
 from .engines.product_extract import run_extract_for_source_doc
@@ -157,6 +159,42 @@ def run_tender_parse_task(checklist_id: str) -> None:
             "tenderCorpusChars": len(full_text or ""),
         }
         fail = parse_fail_reason(extract_stats, filled=filled, llm_error=result.get("error"))
+        try:
+            tech_pack = extract_tech_rules(result.get("dimensions") or [], full_text or "")
+        except Exception:
+            logger.exception("tech leaf extract failed for checklist %s", checklist_id)
+            tech_pack = {"rules": [], "note": "技术标叶子规则未抽出"}
+        extract_stats = {
+            **extract_stats,
+            "techRuleCount": len(tech_pack.get("rules") or []),
+            "techRuleNote": tech_pack.get("note") or "",
+        }
+        drawing_pack = {"rules": [], "note": ""}
+        if drawing_refs:
+            try:
+                with storage.as_local_map(drawing_refs) as local_paths:
+                    files = [
+                        {"path": local_paths[doc_id], "filename": drawing_names.get(doc_id) or "未命名"}
+                        for doc_id in local_paths
+                    ]
+                    drawing_pack = extract_drawing_rules(
+                        files,
+                        tech_pack.get("rules") or [],
+                        result.get("dimensions") or [],
+                        db=db,
+                    )
+                    tech_pack["rules"] = merge_drawing_into_leaves(
+                        tech_pack.get("rules") or [],
+                        drawing_pack.get("rules") or [],
+                    )
+            except Exception:
+                logger.exception("drawing rule extract failed for checklist %s", checklist_id)
+                drawing_pack = {"rules": [], "note": "图纸评审规则未抽出"}
+        extract_stats = {
+            **extract_stats,
+            "drawingRuleCount": len(drawing_pack.get("rules") or []),
+            "drawingRuleNote": drawing_pack.get("note") or "",
+        }
 
         checklist.checklist_json = {
             "dimensions": result["dimensions"],
@@ -169,6 +207,8 @@ def run_tender_parse_task(checklist_id: str) -> None:
             "extractStats": extract_stats,
             "tenderCorpus": (full_text or "")[:200_000],
             "omittedCount": omitted,
+            "techRules": tech_pack.get("rules") or [],
+            "drawingRules": drawing_pack.get("rules") or [],
         }
         checklist.engine_params_json = result["vetoParams"]
         if fail:
@@ -829,6 +869,8 @@ def run_chapter_generate_task(job_id: str) -> None:
             pack_images,
             node.get("part"),
             node.get("requirement") or "",
+            outline,
+            job.chapter_id,
         )
         kind = e_writer.chapter_kind(
             str(node.get("title") or ""),

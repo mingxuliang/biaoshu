@@ -11,18 +11,19 @@ import type {
   ProductStatus,
 } from "@/mocks/products";
 
+export type Grade = "A" | "B" | "C" | "D";
+
 export interface DimensionScore {
   name: string;
-  weight: number;
-  score: number;
+  weight: number; // 仅作展示用的相对重要度标注，不参与算分
+  grade: Grade;
 }
 
-// 技术评分模块逐项打分明细，与规则页「技术评分」tab 卡片一一对应（含工程量逻辑匹配）。
+// 技术评分模块逐项定性核验，与规则页「技术评分」tab 卡片一一对应（含工程量逻辑匹配）。
 export interface TechModuleScore {
   key: string;
   module: string;
-  maxScore: number;
-  score: number;
+  grade: Grade;
   status: string;
   summary: string;
 }
@@ -85,11 +86,62 @@ export interface CustomRuleReview {
   reason: string;
 }
 
+export interface StandardClauseHit {
+  code: string;
+  clauseNo: string;
+  specialty: string;
+  excerpt: string;
+}
+
+export interface StandardCheck {
+  item: string;
+  bid: string;
+  result: string;
+}
+
+export interface StandardPoint {
+  id: string;
+  source: string;
+  name: string;
+  detail: string;
+  verdict: string;
+  excerpt: string;
+  reason: string;
+  booklet?: string;
+  mustWrite?: string;
+  parameters?: string;
+  standards?: string[];
+  chapter?: string;
+  axis?: string;
+  drawingNo?: string;
+  clauses: StandardClauseHit[];
+  knowledge?: StandardClauseHit[];
+  score?: number | null;
+  maxScore?: number | null;
+  grade?: string;
+  weight?: string;
+  weightedScore?: number | null;
+  problems?: string;
+  suggestion?: string;
+  strategy?: string;
+  scoreRule?: string;
+  checks?: StandardCheck[];
+  excerpts?: string[];
+  strengths?: string;
+  revisions?: string;
+  noncompliance?: string;
+}
+
+export interface StandardReview {
+  specialty: string;
+  note: string;
+  points: StandardPoint[];
+}
+
 export type BidScope = "business" | "tech" | "full";
 
 export interface ReviewReport {
   round: number;
-  overall: number;
   waste: number;
   risk: number;
   suggest: number;
@@ -100,6 +152,7 @@ export interface ReviewReport {
   techModules: TechModuleScore[];
   tenderRules?: TenderRuleReport | null;
   customRules?: CustomRuleReview[] | null;
+  standardReview?: StandardReview | null;
   issues: PreReviewIssue[];
 }
 
@@ -111,7 +164,9 @@ export interface ReviewReportPair {
 
 export interface TrendPoint {
   round: number;
-  score: number;
+  waste: number;
+  risk: number;
+  suggest: number;
   issues: number;
   scope?: BidScope | string;
 }
@@ -411,6 +466,40 @@ export async function getLatestChecklist(projectId: string): Promise<Checklist> 
   return request<Checklist>(`/api/projects/${projectId}/checklist/latest`);
 }
 
+export interface TenderLeafRule {
+  factor: string;
+  score: string;
+  grades: string;
+  mustWrite: string;
+  parameters: string;
+  standards: string[];
+  chapter: string;
+  axis: string;
+}
+
+export interface DrawingReviewRule {
+  drawingNo: string;
+  title: string;
+  parameters: string;
+  notes: string;
+  standards: string[];
+  chapter: string;
+  axis: string;
+}
+
+export interface ProjectStandardRules {
+  projectId: string;
+  version: number | null;
+  locked: boolean;
+  note: string;
+  tenderRules: TenderLeafRule[];
+  drawingRules: DrawingReviewRule[];
+}
+
+export async function getProjectStandardRules(projectId: string): Promise<ProjectStandardRules> {
+  return request<ProjectStandardRules>(`/api/projects/${projectId}/standard-rules`);
+}
+
 export async function lockChecklist(projectId: string, checklistId: string): Promise<Checklist> {
   return request<Checklist>(`/api/projects/${projectId}/checklist/${checklistId}/lock`, { method: "POST" });
 }
@@ -476,7 +565,7 @@ export interface ProjectDto {
   budget: string;
   deadline: string;
   progress: number;
-  score: number;
+  light?: "绿" | "橙" | "红" | null; // 最新一轮预审的风险灯，代替原来的数字得分
   status: "撰写中" | "评标中" | "已提交" | "已中标" | "未中标";
   createdAt: string;
   tenderDoc?: TenderUploadMeta;
@@ -495,7 +584,6 @@ export interface CreateProjectPayload {
 
 export type UpdateProjectPayload = Partial<CreateProjectPayload> & {
   progress?: number;
-  score?: number;
   status?: ProjectDto["status"];
 };
 
@@ -764,11 +852,37 @@ export async function generateWriterImage(
   projectId: string,
   prompt: string,
   mode: WriterImageMode,
+  style?: string,
 ): Promise<WriterImageItem> {
   return request<WriterImageItem>(`/api/projects/${projectId}/writer-images/generate`, {
     method: "POST",
     headers: authHeaders(token),
-    body: JSON.stringify({ prompt, mode }),
+    body: JSON.stringify({ prompt, mode, style: mode === "normal" ? style : undefined }),
+  });
+}
+
+export type WriterDiagramKind =
+  | "function"
+  | "technical"
+  | "deployment"
+  | "organization"
+  | "construction"
+  | "schedule"
+  | "quality"
+  | "safety"
+  | "inspection";
+
+export async function generateWriterDiagram(
+  token: string,
+  projectId: string,
+  draftId: string,
+  chapterId: string,
+  kind: WriterDiagramKind,
+): Promise<WriterImageItem & { notice?: string }> {
+  return request<WriterImageItem & { notice?: string }>(`/api/projects/${projectId}/writer-images/diagram`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({ draftId, chapterId, kind }),
   });
 }
 
@@ -1948,6 +2062,7 @@ export interface WriterLlmModel {
   speed: string;
   vision: boolean;
   ready: boolean;
+  task?: "chat" | "image";
 }
 
 export interface LlmProvider {

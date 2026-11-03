@@ -4,6 +4,7 @@ import { useAuth } from "@/context/AuthContext";
 import KnowledgePicker from "./KnowledgePicker";
 import {
   ApiError,
+  generateWriterDiagram,
   generateWriterImage,
   listProductFeatures,
   listWriterImages,
@@ -12,9 +13,11 @@ import {
   uploadWriterImage,
   type KnowledgeRef,
   type ProductItem,
+  type WriterDiagramKind,
   type WriterImageItem,
   type WriterImageMode,
 } from "@/lib/api";
+import { defaultImage, type ImageConfig } from "@/mocks/writerSteps";
 
 interface ImagePanelProps {
   projectId: string;
@@ -23,6 +26,8 @@ interface ImagePanelProps {
   chapterNum?: string;
   chapterTitle?: string;
   chapterIdea?: string;
+  chapterContent?: string;
+  imageSettings?: ImageConfig;
   knowledgeRefs: Record<string, KnowledgeRef[]>;
   onKnowledgeRefsChange: (next: Record<string, KnowledgeRef[]>) => void;
   onInsertImage: (item: WriterImageItem) => void;
@@ -31,8 +36,19 @@ interface ImagePanelProps {
 type ImageTab = "ai" | "gallery";
 type RightTab = "image" | "reference";
 
-const flowTypes = ["施工组织", "进度计划", "质量管理", "安全应急", "报验审批", "组织架构"];
-const archTypes = ["系统分层图", "网络拓扑图", "部署架构图", "微服务架构"];
+const flowKinds: { kind: WriterDiagramKind; label: string }[] = [
+  { kind: "construction", label: "施工组织" },
+  { kind: "schedule", label: "进度计划" },
+  { kind: "quality", label: "质量管理" },
+  { kind: "safety", label: "安全应急" },
+  { kind: "inspection", label: "报验审批" },
+];
+const archKinds: { kind: WriterDiagramKind; label: string }[] = [
+  { kind: "function", label: "功能架构" },
+  { kind: "technical", label: "技术架构" },
+  { kind: "deployment", label: "部署拓扑" },
+  { kind: "organization", label: "人员组织" },
+];
 
 const watermarkColor: Record<WriterImageMode, string> = {
   flow: "bg-accent-500/80",
@@ -67,6 +83,8 @@ export default function ImagePanel({
   chapterNum,
   chapterTitle,
   chapterIdea,
+  chapterContent,
+  imageSettings,
   knowledgeRefs,
   onKnowledgeRefsChange,
   onInsertImage,
@@ -74,10 +92,11 @@ export default function ImagePanel({
   const { token } = useAuth();
   const [rightTab, setRightTab] = useState<RightTab>("image");
   const [imageTab, setImageTab] = useState<ImageTab>("ai");
-  const [aiPrompt, setAiPrompt] = useState("施工组织流程图");
-  const [aiMode, setAiMode] = useState<WriterImageMode>("flow");
-  const [flowType, setFlowType] = useState(flowTypes[0]);
-  const [archType, setArchType] = useState(archTypes[0]);
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [aiMode, setAiMode] = useState<WriterImageMode>("arch");
+  const [flowKind, setFlowKind] = useState<WriterDiagramKind>("construction");
+  const [diagramKind, setDiagramKind] = useState<WriterDiagramKind>("function");
+  const [notice, setNotice] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [optimizing, setOptimizing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -89,6 +108,9 @@ export default function ImagePanel({
   const [libFeatures, setLibFeatures] = useState<Record<string, ProductItem[]>>({});
   const [expandedFeat, setExpandedFeat] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const pictureSettings = imageSettings ?? defaultImage;
+  const allowPhoto = pictureSettings.normal !== "本机上传";
+  const allowDiagram = pictureSettings.arch !== "本机上传";
   const chapterRefs = knowledgeRefs[chapterId] || [];
   const productRefs = chapterRefs.filter((r) => sourceOf(r) === "product");
   const otherRefs = chapterRefs.filter((r) => sourceOf(r) !== "product");
@@ -96,6 +118,11 @@ export default function ImagePanel({
   useEffect(() => {
     setExpandedFeat(null);
   }, [chapterId]);
+
+  useEffect(() => {
+    if (aiMode === "normal" && !allowPhoto && allowDiagram) setAiMode("arch");
+    if ((aiMode === "arch" || aiMode === "flow") && !allowDiagram && allowPhoto) setAiMode("normal");
+  }, [aiMode, allowPhoto, allowDiagram]);
 
   useEffect(() => {
     if (!token || imageTab !== "gallery") return;
@@ -176,22 +203,35 @@ export default function ImagePanel({
   const handleModeChange = (mode: WriterImageMode) => {
     setAiMode(mode);
     setError(null);
-    setAiPrompt(mode === "flow" ? "施工组织流程图" : mode === "arch" ? "系统分层架构" : "");
+    setNotice(null);
   };
 
   const handleGenerate = async () => {
     if (!token || generating) return;
-    const prompt = aiPrompt.trim() || (aiMode === "flow" ? flowType : aiMode === "arch" ? archType : "");
-    if (!prompt) {
-      setError("请填写生图描述");
-      return;
-    }
     setGenerating(true);
     setError(null);
+    setNotice(null);
     try {
-      const item = await generateWriterImage(token, projectId, prompt, aiMode);
+      if (aiMode === "normal") {
+        const prompt = aiPrompt.trim();
+        if (!prompt) {
+          setError("请填写生图描述");
+          return;
+        }
+        const item = await generateWriterImage(token, projectId, prompt, "normal", pictureSettings.aiStyle);
+        setGenerated((prev) => [item, ...prev]);
+        setSelectedId(item.id);
+        return;
+      }
+      if (!chapterId) {
+        setError("请先选择章节");
+        return;
+      }
+      const kind = aiMode === "arch" ? diagramKind : flowKind;
+      const item = await generateWriterDiagram(token, projectId, draftId, chapterId, kind);
       setGenerated((prev) => [item, ...prev]);
       setSelectedId(item.id);
+      if (item.notice) setNotice(item.notice);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "生图失败，请稍后重试");
     } finally {
@@ -280,15 +320,20 @@ export default function ImagePanel({
           </div>
 
           <div className="flex-1 overflow-y-auto px-3 py-3">
-            {imageTab === "ai" && (
+            {imageTab === "ai" && !allowPhoto && !allowDiagram && (
+              <p className="mb-3 text-[11px] leading-relaxed text-foreground-500">
+                标书设置已选择本机上传。装饰配图和结构图都请在下方上传，不再调用生图。
+              </p>
+            )}
+            {imageTab === "ai" && (allowPhoto || allowDiagram) && (
               <div className="mb-3 space-y-2">
                 <div className="flex items-center gap-1 rounded-md bg-background-200 p-1">
                   {(
                     [
-                      { key: "normal", label: "配图", icon: "ri-image-edit-line", active: "bg-primary-500" },
-                      { key: "flow", label: "流程图", icon: "ri-flow-chart", active: "bg-accent-500" },
-                      { key: "arch", label: "架构图", icon: "ri-git-branch-line", active: "bg-secondary-500" },
-                    ] as { key: WriterImageMode; label: string; icon: string; active: string }[]
+                      allowPhoto ? { key: "normal" as const, label: "配图", icon: "ri-image-edit-line", active: "bg-primary-500" } : null,
+                      allowDiagram ? { key: "flow" as const, label: "流程图", icon: "ri-flow-chart", active: "bg-accent-500" } : null,
+                      allowDiagram ? { key: "arch" as const, label: "架构图", icon: "ri-git-branch-line", active: "bg-secondary-500" } : null,
+                    ].filter((item) => item !== null)
                   ).map((m) => (
                     <button
                       key={m.key}
@@ -304,37 +349,40 @@ export default function ImagePanel({
                   ))}
                 </div>
 
-                <input
-                  type="text"
-                  value={aiPrompt}
-                  onChange={(e) => setAiPrompt(e.target.value)}
-                  placeholder={
-                    aiMode === "flow"
-                      ? "输入流程描述，如：施工组织流程…"
-                      : aiMode === "arch"
-                        ? "输入架构描述，如：系统分层架构…"
-                        : "输入生图描述…"
-                  }
-                  className="h-8 w-full rounded-md border border-background-300 bg-background-50 px-2.5 text-xs text-foreground-900 outline-none transition-all focus:border-primary-400"
-                />
+                {aiMode === "normal" && (
+                  <input
+                    type="text"
+                    value={aiPrompt}
+                    onChange={(e) => setAiPrompt(e.target.value)}
+                    placeholder="输入生图描述，如：项目现场、设备…"
+                    className="h-8 w-full rounded-md border border-background-300 bg-background-50 px-2.5 text-xs text-foreground-900 outline-none transition-all focus:border-primary-400"
+                  />
+                )}
+                {aiMode === "normal" && (
+                  <p className="text-[11px] text-foreground-500">画面风格沿用标书设置：{pictureSettings.aiStyle}</p>
+                )}
+                {aiMode !== "normal" && (
+                  <p className="text-[11px] leading-relaxed text-foreground-500">
+                    {chapterContent?.trim()
+                      ? "按当前章节正文抽出结构后绘制，中文标签由字体写出。"
+                      : "本章还没有正文时，会改用编写思路，并提示先生成正文。"}
+                  </p>
+                )}
 
                 {aiMode === "flow" && (
                   <div className="flex flex-wrap items-center gap-1.5">
-                    {flowTypes.map((t) => (
+                    {flowKinds.map((item) => (
                       <button
-                        key={t}
+                        key={item.kind}
                         type="button"
-                        onClick={() => {
-                          setFlowType(t);
-                          setAiPrompt(`${t}流程图`);
-                        }}
+                        onClick={() => setFlowKind(item.kind)}
                         className={`cursor-pointer rounded-full border px-2 py-0.5 text-[11px] transition-colors ${
-                          flowType === t
+                          flowKind === item.kind
                             ? "border-accent-300 bg-accent-50 text-accent-700"
                             : "border-background-300 bg-background-50 text-foreground-600 hover:border-accent-300 hover:text-accent-700"
                         }`}
                       >
-                        {t}
+                        {item.label}
                       </button>
                     ))}
                   </div>
@@ -342,39 +390,38 @@ export default function ImagePanel({
 
                 {aiMode === "arch" && (
                   <div className="flex flex-wrap items-center gap-1.5">
-                    {archTypes.map((t) => (
+                    {archKinds.map((item) => (
                       <button
-                        key={t}
+                        key={item.kind}
                         type="button"
-                        onClick={() => {
-                          setArchType(t);
-                          setAiPrompt(t);
-                        }}
+                        onClick={() => setDiagramKind(item.kind)}
                         className={`cursor-pointer rounded-full border px-2 py-0.5 text-[11px] transition-colors ${
-                          archType === t
+                          diagramKind === item.kind
                             ? "border-secondary-300 bg-secondary-50 text-secondary-700"
                             : "border-background-300 bg-background-50 text-foreground-600 hover:border-secondary-300 hover:text-secondary-700"
                         }`}
                       >
-                        {t}
+                        {item.label}
                       </button>
                     ))}
                   </div>
                 )}
 
-                <button
-                  type="button"
-                  onClick={handleOptimize}
-                  disabled={optimizing || !aiPrompt.trim()}
-                  className="flex cursor-pointer items-center gap-0.5 text-[11px] text-primary-600 hover:text-primary-700 disabled:opacity-50"
-                >
-                  <i className={optimizing ? "ri-loader-4-line animate-spin" : "ri-lightbulb-line"}></i>
-                  {optimizing ? "优化中…" : "提示词优化"}
-                </button>
+                {aiMode === "normal" && (
+                  <button
+                    type="button"
+                    onClick={handleOptimize}
+                    disabled={optimizing || !aiPrompt.trim()}
+                    className="flex cursor-pointer items-center gap-0.5 text-[11px] text-primary-600 hover:text-primary-700 disabled:opacity-50"
+                  >
+                    <i className={optimizing ? "ri-loader-4-line animate-spin" : "ri-lightbulb-line"}></i>
+                    {optimizing ? "优化中…" : "提示词优化"}
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={handleGenerate}
-                  disabled={generating}
+                  disabled={generating || (aiMode !== "normal" && !chapterId)}
                   className="flex h-8 w-full cursor-pointer items-center justify-center gap-1 rounded-md bg-gradient-to-r from-primary-500 to-primary-600 text-xs font-medium text-background-50 transition-all hover:from-primary-600 hover:to-primary-700 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {generating ? (
@@ -385,13 +432,18 @@ export default function ImagePanel({
                   ) : (
                     <>
                       <i className="ri-magic-line"></i>
-                      {aiMode === "flow" ? `生成${flowType}流程图` : aiMode === "arch" ? "开始生成架构图" : "开始生图"}
+                      {aiMode === "flow"
+                        ? `按正文生成${flowKinds.find((item) => item.kind === flowKind)?.label || ""}流程图`
+                        : aiMode === "arch"
+                          ? `按正文生成${archKinds.find((item) => item.kind === diagramKind)?.label || "架构图"}`
+                          : "开始生图"}
                     </>
                   )}
                 </button>
               </div>
             )}
 
+            {notice && <p className="mb-2 text-[11px] leading-relaxed text-primary-700">{notice}</p>}
             {error && <p className="mb-2 text-[11px] leading-relaxed text-accent-600">{error}</p>}
 
             {imageTab === "gallery" && galleryLoading && (

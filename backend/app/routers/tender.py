@@ -25,11 +25,15 @@ from ..engines.tender_package import (
 )
 from ..models import EvaluationChecklist, Project, ProjectCustomRule, TenderDocument, User
 from ..permissions import PERM_PROJECT_EDIT, PERM_REVIEW, PERM_WRITER, require_any_perm, require_project
+from ..engines import rules_config
 from ..schemas import (
     ChecklistOut,
     CreateTenderParseJobIn,
     CustomRuleIn,
     CustomRuleOut,
+    DrawingReviewRuleOut,
+    ProjectStandardRulesOut,
+    TenderLeafRuleOut,
     TenderLocateOut,
     TenderParseJobOut,
     TenderSheetPreviewOut,
@@ -420,6 +424,64 @@ def get_tender_parse_job_status(
     require_project(db, current_user, checklist.project_id)
     return TenderParseJobOut(
         job_id=checklist.id, status=checklist.status, version=checklist.version, error=checklist.error
+    )
+
+
+def _as_text_list(value) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value or "").strip()
+    return [text] if text else []
+
+
+@router.get("/projects/{project_id}/standard-rules", response_model=ProjectStandardRulesOut)
+def get_project_standard_rules(
+    project_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+) -> ProjectStandardRulesOut:
+    """预审使用的规范对标规则：锁定解析优先，否则用最新一轮已完成的解析。"""
+    require_project(db, current_user, project_id)
+    checklist = rules_config.load_project_checklist(db, project_id)
+    tender = [
+        TenderLeafRuleOut(
+            factor=str(row.get("factor") or row.get("name") or ""),
+            score=str(row.get("score") or ""),
+            grades=str(row.get("grades") or ""),
+            mustWrite=str(row.get("mustWrite") or row.get("detail") or ""),
+            parameters=str(row.get("parameters") or ""),
+            standards=_as_text_list(row.get("standards")),
+            chapter=str(row.get("chapter") or ""),
+            axis=str(row.get("axis") or ""),
+        )
+        for row in checklist.tech_rules
+        if isinstance(row, dict) and str(row.get("factor") or row.get("name") or "").strip()
+    ]
+    drawing = [
+        DrawingReviewRuleOut(
+            drawingNo=str(row.get("drawingNo") or ""),
+            title=str(row.get("title") or row.get("name") or ""),
+            parameters=str(row.get("parameters") or ""),
+            notes=str(row.get("notes") or row.get("mustWrite") or ""),
+            standards=_as_text_list(row.get("standards")),
+            chapter=str(row.get("chapter") or ""),
+            axis=str(row.get("axis") or ""),
+        )
+        for row in checklist.drawing_rules
+        if isinstance(row, dict) and str(row.get("title") or row.get("name") or "").strip()
+    ]
+    if checklist.version is None:
+        note = "该项目还没有完成招标解析，解析并锁定后这里才会出现规范对标规则。"
+    elif not tender and not drawing:
+        note = "这一版解析没有抽出招标书规则或图纸规则。请重新解析招标书后再看。"
+    else:
+        state = "已锁定" if checklist.locked else "最新完成、尚未锁定"
+        note = f"来自{state}的解析 v{checklist.version}。预审规范对标使用的就是这批规则。"
+    return ProjectStandardRulesOut(
+        projectId=project_id,
+        version=checklist.version,
+        locked=checklist.locked,
+        note=note,
+        tenderRules=tender,
+        drawingRules=drawing,
     )
 
 

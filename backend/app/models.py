@@ -58,7 +58,7 @@ class Project(Base):
     budget = Column(String, default="待定")
     deadline = Column(String, default="")
     progress = Column(Integer, default=0)
-    score = Column(Float, default=0)
+    score = Column(Float, default=0)  # 去分数化后不再使用，项目列表改用最新预审风险灯（见 ProjectOut.light）
     status = Column(String, default="撰写中")
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -146,17 +146,18 @@ class ReviewRun(Base):
     status = Column(String, default="queued")  # queued | running | done | failed
     scope = Column(String, default="full")  # business | tech | full
 
-    overall = Column(Float, default=0)
+    overall = Column(Float, default=0)  # 去分数化后不再写入有意义的值，保留列避免迁移，仅历史轮次数据有效
     waste = Column(Integer, default=0)
     risk = Column(Integer, default=0)
     suggest = Column(Integer, default=0)
-    light = Column(String, default="橙")
+    light = Column(String, default="橙")  # 总评风险灯：按废标/降档/扣分计数直出，唯一的总评指标
 
-    levels_json = Column(JSON, default=list)
-    dimensions_json = Column(JSON, default=list)
-    tech_modules_json = Column(JSON, default=list)  # 技术评分模块逐项打分明细，供预审报告展示
+    levels_json = Column(JSON, default=list)  # L1-L5 每层 {key,name,desc,grade,issues,status}
+    dimensions_json = Column(JSON, default=list)  # 五维评审 [{name,weight,grade}]
+    tech_modules_json = Column(JSON, default=list)  # 技术评分模块逐项等级明细（A/B/C/D），供预审报告展示
     tender_rules_json = Column(JSON, default=dict)  # 招标书自带商务/技术评分规则的模拟评标报告
     custom_rules_json = Column(JSON, default=list)  # 解析页自定义规则逐条对照结果
+    standard_review_json = Column(JSON, default=dict)  # 规范对标：查核点、命中条文、结论
 
     error_message = Column(Text, nullable=True)
     started_at = Column(DateTime, default=datetime.utcnow)
@@ -322,6 +323,22 @@ class KnowledgeSlice(Base):
         foreign_keys="KnowledgeSlice.parent_id",
         single_parent=True,
     )
+
+
+class StandardClause(Base):
+    """规范按条入库，只给预审检索。不进编写用的章节切片。"""
+
+    __tablename__ = "standard_clauses"
+
+    id = Column(String, primary_key=True, default=lambda: gen_id("std"))
+    document_id = Column(String, ForeignKey("knowledge_documents.id"), nullable=True, index=True)
+    code = Column(String, default="", index=True)  # JGJ120-2012
+    clause_no = Column(String, default="", index=True)  # 4.1.3
+    specialty = Column(String, default="通用", index=True)  # 房建 | 市政 | 公路 | 水利 | 通用
+    kind = Column(String, default="通用")  # 设计 | 施工 | 验收 | 通用
+    text = Column(Text, nullable=False, default="")
+    source_file = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class KnowledgeSliceImage(Base):
@@ -707,6 +724,7 @@ class LlmModel(Base):
     ctx = Column(String, default="")
     speed = Column(String, default="")
     sort_order = Column(Integer, default=0)
+    task = Column(String, default="chat")  # chat 文本 | image 生图
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     provider = relationship("LlmProvider", back_populates="models")

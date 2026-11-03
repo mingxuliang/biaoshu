@@ -16,6 +16,7 @@ from .models import (
     ProjectMember,
     ReviewFinding,
     ReviewRun,
+    StandardClause,
     TenderDocument,
     WriterDraft,
     WriterImage,
@@ -80,6 +81,7 @@ def delete_project_cascade(db: Session, project_id: str) -> None:
             {KnowledgeSlice.parent_id: None}, synchronize_session=False
         )
         db.query(KnowledgeSlice).filter(KnowledgeSlice.document_id.in_(kdoc_ids)).delete(synchronize_session=False)
+        db.query(StandardClause).filter(StandardClause.document_id.in_(kdoc_ids)).delete(synchronize_session=False)
         db.query(KnowledgeDocument).filter(KnowledgeDocument.id.in_(kdoc_ids)).delete(synchronize_session=False)
 
     db.query(ProjectMember).filter(ProjectMember.project_id == project_id).delete(synchronize_session=False)

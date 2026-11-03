@@ -3,13 +3,12 @@ import {
   ResponsiveContainer,
   ComposedChart,
   Bar,
-  Line,
+  Cell,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip,
   Legend,
-  ReferenceLine,
 } from "recharts";
 import type { Project } from "@/mocks/projects";
 
@@ -18,18 +17,21 @@ function cssColor(name: string) {
 }
 
 const riskMeta: Record<string, { icon: string; cls: string }> = {
-  未出分: { icon: "ri-flag-2-line", cls: "bg-accent-50 text-accent-600" },
+  未预审: { icon: "ri-flag-2-line", cls: "bg-accent-50 text-accent-600" },
   进度偏低: { icon: "ri-speed-line", cls: "bg-secondary-100 text-secondary-700" },
   未中标: { icon: "ri-error-warning-line", cls: "bg-accent-50 text-accent-600" },
   待提交: { icon: "ri-time-line", cls: "bg-primary-50 text-primary-600" },
 };
 
+const lightColor: Record<"绿" | "橙" | "红", string> = {
+  绿: "#16a34a",
+  橙: "#ea580c",
+  红: "#dc2626",
+};
+
 export default function MonitorPanel({ projects }: { projects: Project[] }) {
   const colors = useMemo<Record<string, string>>(
     () => ({
-      primary: cssColor("--primary-500"),
-      accent: cssColor("--accent-500"),
-      secondary400: cssColor("--secondary-400"),
       bg300: cssColor("--background-300"),
       fg500: cssColor("--foreground-500"),
       fg700: cssColor("--foreground-700"),
@@ -42,16 +44,16 @@ export default function MonitorPanel({ projects }: { projects: Project[] }) {
       projects.map((p) => ({
         name: p.name.length > 8 ? `${p.name.slice(0, 8)}…` : p.name,
         进度: p.progress,
-        预测得分: p.score > 0 ? p.score : null,
+        light: p.light ?? null,
       })),
     [projects],
   );
 
   const risks = useMemo(() => {
     const items: { id: string; label: string; desc: string; key: string }[] = [];
-    const notScored = projects.filter((p) => p.score === 0 && p.status === "撰写中");
-    notScored.forEach((p) =>
-      items.push({ id: `s-${p.id}`, label: p.name, desc: "尚未生成 AI 预测得分", key: "未出分" }),
+    const notReviewed = projects.filter((p) => !p.light && p.status === "撰写中");
+    notReviewed.forEach((p) =>
+      items.push({ id: `s-${p.id}`, label: p.name, desc: "尚未运行 AI 预审", key: "未预审" }),
     );
     const slow = projects.filter((p) => p.progress < 40 && p.status === "撰写中");
     slow.forEach((p) =>
@@ -82,14 +84,14 @@ export default function MonitorPanel({ projects }: { projects: Project[] }) {
         <div className="mb-1 flex items-center justify-between">
           <h3 className="flex items-center gap-1.5 text-sm font-semibold text-foreground-900">
             <i className="ri-line-chart-line text-primary-500 text-sm"></i>
-            整体进程与 AI 评审评分
+            整体进程与 AI 预审风险灯
           </h3>
           <span className="rounded-full border border-background-300 bg-background-50 px-2.5 py-1 text-[11px] text-foreground-500">
-            柱状=撰写进度 · 折线=预测得分
+            柱状=撰写进度 · 颜色=风险灯
           </span>
         </div>
         <p className="mb-3 text-xs text-foreground-500">
-          横向对比各项目撰写进度与 AI 预测得分，虚线为 85 分中标参考线
+          横向对比各项目撰写进度，柱色按最新一轮 AI 预审风险灯着色（绿/橙/红）
         </p>
         <div className="h-64 w-full">
           <ResponsiveContainer width="100%" height="100%">
@@ -97,21 +99,13 @@ export default function MonitorPanel({ projects }: { projects: Project[] }) {
               <CartesianGrid strokeDasharray="3 3" stroke={colors.bg300} vertical={false} />
               <XAxis dataKey="name" tick={{ fontSize: 11, fill: colors.fg500 }} axisLine={false} tickLine={false} interval={0} angle={-12} height={40} textAnchor="end" />
               <YAxis yAxisId="left" tick={{ fontSize: 11, fill: colors.fg500 }} axisLine={false} tickLine={false} domain={[0, 100]} />
-              <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11, fill: colors.fg500 }} axisLine={false} tickLine={false} domain={[0, 100]} hide />
               <Tooltip contentStyle={chartTipStyle} labelStyle={{ color: colors.fg700 }} cursor={{ fill: "oklch(var(--background-50))" }} />
               <Legend wrapperStyle={{ fontSize: 11, color: colors.fg700 }} />
-              <Bar yAxisId="left" dataKey="进度" fill={colors.primary} radius={[4, 4, 0, 0]} barSize={20} name="撰写进度" />
-              <Line
-                yAxisId="right"
-                dataKey="预测得分"
-                stroke={colors.accent}
-                strokeWidth={2}
-                dot={{ r: 3, fill: colors.accent, strokeWidth: 0 }}
-                activeDot={{ r: 5 }}
-                connectNulls
-                name="预测得分"
-              />
-              <ReferenceLine yAxisId="right" y={85} stroke={colors.secondary400} strokeDasharray="6 4" />
+              <Bar yAxisId="left" dataKey="进度" radius={[4, 4, 0, 0]} barSize={20} name="撰写进度">
+                {chartData.map((d, i) => (
+                  <Cell key={i} fill={d.light ? lightColor[d.light] : colors.bg300} />
+                ))}
+              </Bar>
             </ComposedChart>
           </ResponsiveContainer>
         </div>

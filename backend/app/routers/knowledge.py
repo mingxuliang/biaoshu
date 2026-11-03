@@ -11,8 +11,9 @@ from ..db import get_db
 from .. import storage
 from ..engines import rules_config
 from ..engines.knowledge_extract import chunk_document, detect_review_flag, extract_full_text_any
+from ..engines.standard_ingest import clauses_from_path, replace_document_clauses
 from ..engines.knowledge_retrieval import suggest_docs
-from ..models import KnowledgeDocument, KnowledgeSlice, KnowledgeSliceImage, User
+from ..models import KnowledgeDocument, KnowledgeSlice, KnowledgeSliceImage, StandardClause, User
 from ..permissions import PERM_WRITER, require_perm, require_project
 from ..schemas import (
     KnowledgeChapterDetailOut,
@@ -214,8 +215,14 @@ async def upload_knowledge_document(
     try:
         with open(tmp_path, "wb") as f:
             f.write(content)
-        slices = chunk_document(tmp_path, ext)
-        full_text = extract_full_text_any(tmp_path, ext)
+        if type == "规范条文":
+            standard_clauses, standard_note = clauses_from_path(tmp_path, filename)
+            slices = []
+            full_text = ""
+        else:
+            standard_clauses, standard_note = [], ""
+            slices = chunk_document(tmp_path, ext)
+            full_text = extract_full_text_any(tmp_path, ext)
     except Exception as exc:
         raise HTTPException(400, "文档已损坏或无法解析，请重新上传") from exc
     finally:
@@ -244,16 +251,23 @@ async def upload_knowledge_document(
         storage_path=storage_path,
         size_bytes=len(content),
         slice_count=0,
-        review_flag=detect_review_flag(
-            full_text,
-            filler_words=filler_words,
-            threshold=thresholds.get("filler_density_safe"),
+        review_flag=(
+            standard_note
+            if type == "规范条文"
+            else detect_review_flag(
+                full_text,
+                filler_words=filler_words,
+                threshold=thresholds.get("filler_density_safe"),
+            )
         ),
     )
     db.add(doc)
     db.flush()
 
-    saved = _persist_slices(db, doc, slices)
+    if type == "规范条文":
+        saved = replace_document_clauses(db, doc, standard_clauses)
+    else:
+        saved = _persist_slices(db, doc, slices)
     doc.slice_count = saved
 
     target = f"知识库 / {doc_title}"
@@ -265,7 +279,11 @@ async def upload_knowledge_document(
         user_name=current_user.name,
         target=target,
         version="—",
-        detail=f"上传知识文档至{scope}，切出 {saved} 个章节（含配图）",
+        detail=(
+            f"上传规范至{scope}，入库 {saved} 条"
+            if type == "规范条文"
+            else f"上传知识文档至{scope}，切出 {saved} 个章节（含配图）"
+        ),
     )
     db.commit()
     db.refresh(doc)
@@ -289,12 +307,21 @@ def rechunk_knowledge_document(
         raise HTTPException(400, "仅支持 .doc / .docx / .pdf 格式")
     try:
         with storage.as_local(doc.storage_path, suffix=ext) as path:
-            slices = chunk_document(path, ext)
+            if doc.type == "规范条文":
+                standard_clauses, standard_note = clauses_from_path(path, doc.filename or "")
+                slices = []
+            else:
+                standard_clauses, standard_note = [], ""
+                slices = chunk_document(path, ext)
     except Exception as exc:
         raise HTTPException(400, "文档无法按目录重新切片，请检查原文件") from exc
 
     old_refs = _clear_slices(db, doc)
-    saved = _persist_slices(db, doc, slices)
+    if doc.type == "规范条文":
+        saved = replace_document_clauses(db, doc, standard_clauses)
+        doc.review_flag = standard_note or None
+    else:
+        saved = _persist_slices(db, doc, slices)
     doc.slice_count = saved
     write_audit(
         db,
@@ -302,7 +329,11 @@ def rechunk_knowledge_document(
         user_name=current_user.name,
         target=f"知识库 / {doc.title}",
         version="—",
-        detail=f"按目录重新切片，切出 {saved} 个章节",
+        detail=(
+            f"按条重新入库，共 {saved} 条"
+            if doc.type == "规范条文"
+            else f"按目录重新切片，切出 {saved} 个章节"
+        ),
     )
     db.commit()
     for ref in old_refs:
@@ -453,6 +484,7 @@ def delete_knowledge_document(
 
     image_refs = _collect_image_refs(doc)
     storage_path = doc.storage_path
+    db.query(StandardClause).filter(StandardClause.document_id == doc.id).delete(synchronize_session=False)
     db.delete(doc)
     db.commit()
     for ref in image_refs:

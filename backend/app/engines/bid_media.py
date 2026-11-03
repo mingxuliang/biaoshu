@@ -264,6 +264,11 @@ def _extract_docx_pack(path: str) -> dict:
                 paragraphs.append(_para_base(idx, row_text, from_table=True))
                 idx += 1
         push_images(child, from_table=True)
+    from .docx_extract import textbox_texts
+
+    for text in textbox_texts(document):
+        paragraphs.append(_para_base(idx, text, from_table=False))
+        idx += 1
     return {"paragraphs": paragraphs, "images": images}
 
 

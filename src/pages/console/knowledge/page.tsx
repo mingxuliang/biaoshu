@@ -164,7 +164,7 @@ export default function KnowledgePage() {
     <div>
       <PageHeader
         title="文档知识库"
-        description="沉淀企业可复用的技术方案、历史标书片段、规范条文与图表。入库后按章节切片并保留配图，写法同产品功能库，供撰写时按节引用。"
+        description="沉淀企业可复用的技术方案、历史标书与图表。历史材料按章节切片供撰写引用；类型选「规范条文」时按条入库，只给预审检索。"
         actions={
           canUpload ? (
           <button

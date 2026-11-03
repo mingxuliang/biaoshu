@@ -12,6 +12,7 @@ from ..auth import get_current_user
 from ..db import get_db
 from ..engines import e_writer
 from ..engines.ark_image import ArkImageError, generate_and_save
+from ..engines.writer_diagram import DiagramError, create_diagram_png
 from ..engines.tender_form import extract_forms_from_storage, needs_form_recopy
 from ..engines.tender_style import extract_tender_typography_from_storage
 from ..engines.writer_export import chapters_to_docx
@@ -29,6 +30,8 @@ from ..models import (
 from ..permissions import PERM_WRITER, require_perm, require_project
 from ..schemas import (
     GenerateWriterImageIn,
+    WriterDiagramIn,
+    WriterDiagramOut,
     OptimizeImagePromptIn,
     OptimizeImagePromptOut,
     OutlineNodeOut,
@@ -423,7 +426,7 @@ def generate_writer_image(
     if not prompt:
         raise HTTPException(400, "请填写生图描述")
     try:
-        storage_path, filename = generate_and_save(project_id, prompt, payload.mode)
+        storage_path, filename = generate_and_save(project_id, prompt, payload.mode, payload.style)
     except ArkImageError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -439,6 +442,57 @@ def generate_writer_image(
     db.commit()
     db.refresh(img)
     return _image_to_out(img)
+
+
+@router.post("/projects/{project_id}/writer-images/diagram", response_model=WriterDiagramOut)
+def generate_writer_diagram(
+    project_id: str,
+    payload: WriterDiagramIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> WriterDiagramOut:
+    require_project(db, current_user, project_id, PERM_WRITER)
+    draft = _require_writer_draft(db, current_user, payload.draftId)
+    if draft.project_id != project_id:
+        raise HTTPException(404, "撰写草稿不存在")
+    node = next((item for item in (draft.outline_json or []) if item.get("id") == payload.chapterId), None)
+    if not isinstance(node, dict):
+        raise HTTPException(404, "章节不存在")
+    content = str((draft.chapter_contents_json or {}).get(payload.chapterId) or "")
+    try:
+        png, mode, prompt, notice = create_diagram_png(
+            draft.model_id,
+            payload.kind,
+            str(node.get("title") or ""),
+            content,
+            str(node.get("idea") or ""),
+        )
+    except DiagramError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    key = storage.put_bytes(f"writer-images/{project_id}", png, ".png", "image/png")
+    img = WriterImage(
+        project_id=project_id,
+        source="generated",
+        mode=mode if mode in ("normal", "flow", "arch") else "arch",
+        prompt=prompt,
+        filename=f"{prompt}.png",
+        storage_path=key,
+    )
+    db.add(img)
+    db.commit()
+    db.refresh(img)
+    base = _image_to_out(img)
+    return WriterDiagramOut(
+        id=base.id,
+        projectId=base.projectId,
+        source=base.source,
+        mode=base.mode,
+        prompt=base.prompt,
+        filename=base.filename,
+        url=base.url,
+        createdAt=base.createdAt,
+        notice=notice,
+    )
 
 
 @router.post("/projects/{project_id}/writer-images/upload", response_model=WriterImageOut)

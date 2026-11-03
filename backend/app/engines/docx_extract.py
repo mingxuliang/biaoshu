@@ -99,6 +99,30 @@ def _para_dict(p, idx: int, from_table: bool = False) -> dict | None:
     }
 
 
+def textbox_texts(document) -> list[str]:
+    """遍历文档里所有文本框/形状/SmartArt，按出现顺序抽出文字段落。
+
+    python-docx 的 `Paragraph.text` 只拼接段落自身的 run，文本框内容挂在
+    `w:txbxContent` 里、是嵌套在 drawing 元素下的独立段落，不会被
+    `document.element.body.iterchildren()` 或 `paragraph.text` 带出来。
+    投标书封面、施工组织流程图、安全管理体系图常把关键说明文字放在文本框里，
+    不补上会导致引擎判断时看不到这段文字，误判成「未响应」。
+    """
+    from docx.text.paragraph import Paragraph
+
+    out: list[str] = []
+    seen: set[int] = set()
+    for txbx in document.element.body.iter(qn("w:txbxContent")):
+        if id(txbx) in seen:
+            continue
+        seen.add(id(txbx))
+        for p_el in txbx.iter(qn("w:p")):
+            text = Paragraph(p_el, document).text.strip()
+            if text:
+                out.append(text)
+    return out
+
+
 def _table_row_texts(table) -> list[str]:
     """抽出表格文字：长单元格单独成段（便于 L3 excerpt 命中），短格仍按行拼接。"""
     rows: list[str] = []
@@ -161,6 +185,21 @@ def extract_paragraphs(path: str) -> list[dict]:
                 }
             )
             idx += 1
+    for text in textbox_texts(document):
+        result.append(
+            {
+                "index": idx,
+                "text": text,
+                "style": "",
+                "outline_level": None,
+                "align": "",
+                "font": "宋体",
+                "fontSizePt": 12.0,
+                "bold": False,
+                "fromTable": False,
+            }
+        )
+        idx += 1
     return result
 
 
@@ -251,6 +290,7 @@ def extract_document_plain_text(path: str) -> str:
                         cells.append(cell_text)
                 if cells:
                     chunks.append(" | ".join(cells))
+    chunks.extend(textbox_texts(document))
     return "\n".join(chunks)
 
 

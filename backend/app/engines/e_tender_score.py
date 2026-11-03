@@ -212,10 +212,7 @@ def _blobs_from_tree(tree: list | None) -> list[dict]:
                         continue
                     if content.startswith("招标文件未明确列出") or content.strip() in ("未明确", "无"):
                         continue
-                    if label in ("分档/赋分规则", "分档/赋分规则（A/B/C 或分值区间）"):
-                        continue
-                    if _should_skip(label, content):
-                        continue
+                    grading = label in ("分档/赋分规则", "分档/赋分规则（A/B/C 或分值区间）") or _should_skip(label, content)
                     out.append(
                         {
                             "dimension": dim_label,
@@ -223,6 +220,7 @@ def _blobs_from_tree(tree: list | None) -> list[dict]:
                             "label": label,
                             "content": content,
                             "sourceItemId": item.get("id") or "",
+                            "coverOnly": grading,
                         }
                     )
     return out
@@ -234,7 +232,7 @@ def _blobs_from_score_rules(score_rules: list | None) -> list[dict]:
         if not isinstance(item, dict):
             continue
         label, content = split_label_content(item.get("detail") or "")
-        if not content or is_grading_rule(label or item.get("sectionPath") or "", content):
+        if not content:
             continue
         if content.startswith("分值构成") or content.startswith("招标文件未明确列出"):
             continue
@@ -246,66 +244,107 @@ def _blobs_from_score_rules(score_rules: list | None) -> list[dict]:
                 "content": content,
                 "weight": item.get("weight") or 0,
                 "sourceItemId": item.get("sourceItemId") or "",
+                "coverOnly": is_grading_rule(label or item.get("sectionPath") or "", content),
             }
         )
     return out
 
 
-_NON_SCORING_SOURCE_IDS = {"contract-tech"}  # 专用合同条款：中标后履约条款，不是投标时的评分点
+def _blob_key(blob: dict) -> tuple[str, str, str]:
+    return (
+        str(blob.get("sourceItemId") or ""),
+        str(blob.get("label") or "")[:20],
+        str(blob.get("content") or "")[:48],
+    )
+
+
+def _merge_blobs(tree: list | None, score_rules: list | None) -> list[dict]:
+    """解析树优先，scoreRules 里多出来的字段（合同条款等）仍要保留，不能只认树。"""
+    from_tree = _blobs_from_tree(tree)
+    from_rules = _blobs_from_score_rules(score_rules)
+    if not from_tree:
+        return from_rules
+    seen = {_blob_key(b) for b in from_tree}
+    extra = [b for b in from_rules if _blob_key(b) not in seen]
+    return from_tree + extra
+
+
+_COVER_SOURCE_IDS = {"contract-tech"}  # 合同条款进预审，但不拆百分比、不赋分
+
+
+def _append_item(items: list[dict], seq: int, **kwargs) -> int:
+    seq += 1
+    items.append({"id": f"tr-{seq}", **kwargs})
+    return seq
 
 
 def expand_score_items(score_rules: list | None, tree: list | None = None) -> list[dict]:
-    """展开「这一份」招标书的评分点。优先解析树原文，没有再退回派生 scoreRules。"""
-    blobs = _blobs_from_tree(tree) or _blobs_from_score_rules(score_rules)
+    """展开招标解析字段：有分值的评分点赋分；合同条款/无分值字段做响应对照，不丢条。"""
+    blobs = _merge_blobs(tree, score_rules)
     items: list[dict] = []
     seq = 0
     for blob in blobs:
-        if (blob.get("sourceItemId") or "") in _NON_SCORING_SOURCE_IDS:
-            # 「专用合同条款」是履约阶段的合同管理条款（付款进度、质保金比例、违约金…），
-            # 不是投标人在技术方案里要响应的评分点；不跳过的话，付款条款里散落的多处百分比
-            # 会被下面的 _split_factors 误拆成好几条名字截断、语无伦次的「评分项」。
+        sid = str(blob.get("sourceItemId") or "")
+        group = _group_of(blob["dimension"], f"{blob.get('label') or ''}{blob['content'][:20]}", sid)
+        name = blob.get("label") or blob.get("dimension") or "评分点"
+        if blob.get("coverOnly") or sid in _COVER_SOURCE_IDS:
+            seq = _append_item(
+                items,
+                seq,
+                group=group,
+                name=name,
+                rule=blob["content"],
+                maxScore=0.0,
+                formula=False,
+                coverOnly=True,
+                sourceItemId=sid,
+            )
             continue
-        group = _group_of(blob["dimension"], f"{blob.get('label') or ''}{blob['content'][:20]}", blob.get("sourceItemId") or "")
         factors = _split_factors(blob["content"])
         if factors:
-            for name, score in factors:
-                seq += 1
-                items.append(
-                    {
-                        "id": f"tr-{seq}",
-                        "group": group,
-                        "name": name,
-                        "rule": _rule_for_factor(blob["content"], name),
-                        "maxScore": score,
-                        "formula": _is_formula(group, name + blob["content"]),
-                        "sourceItemId": blob.get("sourceItemId") or "",
-                    }
+            for factor_name, score in factors:
+                seq = _append_item(
+                    items,
+                    seq,
+                    group=group,
+                    name=factor_name,
+                    rule=_rule_for_factor(blob["content"], factor_name),
+                    maxScore=score,
+                    formula=_is_formula(group, factor_name + blob["content"]),
+                    sourceItemId=sid,
                 )
             continue
-        seq += 1
         weight = float(blob.get("weight") or 0)
         if weight <= 0:
-            # 只在条目开头附近找分值/权重标注（如「XX方案（7分）」「权重10%」）；不去整段
-            # 正文里搜孤立数字——像「专用合同条款」里的「违约金上限：合同价款的4%」这类跟
-            # 分值无关的数字，不能被当成本条的评分权重，否则会把履约条款误标成评分项。
+            # 只在条目开头附近找分值/权重标注（如「XX方案（7分）」）；不去整段
+            # 正文里搜孤立数字，避免把违约金比例误当评分权重。
             head = blob["content"][:60]
             found = re.search(r"(\d+(?:\.\d+)?)\s*分", head)
             if not found:
                 found = re.search(r"(\d+(?:\.\d+)?)\s*%", head)
             weight = float(found.group(1)) if found else 0
         if weight <= 0:
+            seq = _append_item(
+                items,
+                seq,
+                group=group,
+                name=name,
+                rule=blob["content"],
+                maxScore=0.0,
+                formula=False,
+                coverOnly=True,
+                sourceItemId=sid,
+            )
             continue
-        name = blob.get("label") or blob.get("dimension") or "评分点"
-        items.append(
-            {
-                "id": f"tr-{seq}",
-                "group": group,
-                "name": name,
-                "rule": blob["content"],
-                "maxScore": weight,
-                "formula": _is_formula(group, blob["content"]),
-                "sourceItemId": blob.get("sourceItemId") or "",
-            }
+        seq = _append_item(
+            items,
+            seq,
+            group=group,
+            name=name,
+            rule=blob["content"],
+            maxScore=weight,
+            formula=_is_formula(group, blob["content"]),
+            sourceItemId=sid,
         )
     return items
 
@@ -358,8 +397,15 @@ _JUDGE_TIMEOUT = 180
 _DIGEST = 36000
 
 
+_MAX_WINDOW_HITS = 3  # 同一评分点最多合并几处命中，避免无关章节稀释判断
+
+
 def _windows(name: str, rule: str, bid: str, paragraphs: list[dict] | None = None) -> str:
     """句级检索与本评分点相关的段落；找不到则空，禁止退回文首。
+
+    投标书常把同一主题分散写在多个章节（总述 + 专项方案），只取「第一处」命中会漏掉
+    信息更全的那一处，把「窗口里没有」误判成「投标书里没有」。这里改成收集全部命中
+    位置，去重合并最多 _MAX_WINDOW_HITS 处，仍受 _WINDOW 总字数上限约束，不等于全文。
 
     检索窗若只命中短标题、附近无表无图，按未定位（空窗），不把目录当证据。
     """
@@ -371,24 +417,44 @@ def _windows(name: str, rule: str, bid: str, paragraphs: list[dict] | None = Non
         return ""
     raw = [p for p in (paragraphs or []) if isinstance(p, dict) and (p.get("text") or "").strip()]
     if raw:
+        chunks: list[str] = []
+        covered: set[int] = set()
         for i, p in enumerate(raw):
             para = (p.get("text") or "").strip()
-            if sent in para or any(k in para for k in keys if len(k) >= 4):
-                nearby = raw[max(0, i - 1) : i + 3]
-                if _heading_only_evidence(p, nearby):
-                    continue
-                chunk = "\n".join((x.get("text") or "").strip() for x in nearby)
-                return chunk[:_WINDOW]
-        return ""
-    paras = [p.strip() for p in re.split(r"\n+", bid) if p.strip()]
-    for i, para in enumerate(paras):
-        if sent in para or any(k in para for k in keys if len(k) >= 4):
-            nearby = paras[max(0, i - 1) : i + 3]
-            if _plain_heading_only(para, nearby):
+            if not (sent in para or any(k in para for k in keys if len(k) >= 4)):
                 continue
-            chunk = "\n".join(nearby)
-            return chunk[:_WINDOW]
-    return ""
+            lo, hi = max(0, i - 1), min(len(raw), i + 3)
+            if any(j in covered for j in range(lo, hi)):
+                continue
+            nearby = raw[lo:hi]
+            if _heading_only_evidence(p, nearby):
+                continue
+            covered.update(range(lo, hi))
+            chunks.append("\n".join((x.get("text") or "").strip() for x in nearby))
+            if len(chunks) >= _MAX_WINDOW_HITS:
+                break
+        if not chunks:
+            return ""
+        return "\n\n---\n\n".join(chunks)[:_WINDOW]
+    paras = [p.strip() for p in re.split(r"\n+", bid) if p.strip()]
+    chunks = []
+    covered = set()
+    for i, para in enumerate(paras):
+        if not (sent in para or any(k in para for k in keys if len(k) >= 4)):
+            continue
+        lo, hi = max(0, i - 1), min(len(paras), i + 3)
+        if any(j in covered for j in range(lo, hi)):
+            continue
+        nearby = paras[lo:hi]
+        if _plain_heading_only(para, nearby):
+            continue
+        covered.update(range(lo, hi))
+        chunks.append("\n".join(nearby))
+        if len(chunks) >= _MAX_WINDOW_HITS:
+            break
+    if not chunks:
+        return ""
+    return "\n\n---\n\n".join(chunks)[:_WINDOW]
 
 
 def _heading_only_evidence(hit: dict, nearby: list[dict]) -> bool:
@@ -461,6 +527,8 @@ def _judge_batch(
         "必须且只能使用用户给出的「本项目招标评分规则」和档次公式，"
         "禁止套用其他招标项目、禁止使用青天/通用技术模块标准。\n"
         "你已经获得投标文件目录（仅作定位，不得当证据），以及各评分点检索到的对应段落。\n"
+        "evidenceFromBid 可能包含用「---」分隔的多处检索片段，来自投标书里不同章节，"
+        "不是连续原文；要综合这几处片段合起来判断是否已响应，不要因为片段之间不连续而否定。\n"
         "要求：\n"
         "1. 只能依据 evidenceFromBid 中的投标原文判断；该栏标明未定位则必须 0 分、档次为未响应；\n"
         "2. 禁止使用目录或招标规则原文冒充投标书依据，禁止引用未给出的文首承诺；\n"
@@ -538,6 +606,29 @@ def _unanswered_entry(raw: dict, strategies: list[dict]) -> dict:
     }
 
 
+def _cover_entry(raw: dict, answered: bool, excerpt: str, reason: str, strategies: list[dict]) -> dict:
+    status = "已响应" if answered else "未响应"
+    return {
+        "id": raw["id"],
+        "group": raw["group"],
+        "name": raw["name"],
+        "rule": raw["rule"],
+        "maxScore": 0.0,
+        "score": 0.0,
+        "status": status,
+        "grade": status,
+        "evidence": excerpt,
+        "reason": reason or ("投标书已覆盖本条解析字段。" if answered else "对照本项招标要求，投标书中未见相应的响应内容。"),
+        "suggestion": (
+            f"本条为招标解析字段对照，不参与模拟赋分。"
+            if answered
+            else f"请在本册投标文件中写入可核验的「{raw['name']}」响应内容后再送审。"
+        ),
+        "strategies": strategies,
+        "sourceItemId": raw.get("sourceItemId") or "",
+    }
+
+
 def _failed_entry(raw: dict, strategies: list[dict], err: str) -> dict:
     return {
         "id": raw["id"],
@@ -606,13 +697,20 @@ def run(
     digest = _digest(headings)
 
     judged_map: dict[str, dict] = {}
-    to_judge = [it for it in raw_items if not it["formula"]]
+    to_judge = [it for it in raw_items if not it["formula"] and not it.get("coverOnly")]
+    to_cover = [it for it in raw_items if it.get("coverOnly")]
     located: list[dict] = []
     pending_scan: list[dict] = []
     for it in to_judge:
         it["window"] = _windows(it["name"], it["rule"], bid, paragraphs)
         if it["window"]:
             located.append(it)
+        else:
+            pending_scan.append(it)
+    for it in to_cover:
+        it["window"] = _windows(it["name"], it["rule"], bid, paragraphs)
+        if it["window"]:
+            judged_map[it["id"]] = {"_cover": True, "answered": True, "excerpt": it["window"]}
         else:
             pending_scan.append(it)
 
@@ -629,6 +727,12 @@ def run(
         for it in pending_scan:
             row = scanned.get(it["id"]) or {}
             excerpt = str(row.get("excerpt") or "").strip()
+            if it.get("coverOnly"):
+                if row.get("answered"):
+                    judged_map[it["id"]] = {"_cover": True, "answered": True, "excerpt": excerpt}
+                else:
+                    judged_map[it["id"]] = {"_unanswered": True}
+                continue
             if row.get("answered") and excerpt:
                 it["window"] = excerpt[:_WINDOW]
                 located.append(it)
@@ -661,6 +765,13 @@ def run(
         strategies = _pick_strategies(raw["name"], raw["rule"], strategy_keys)
         if raw["formula"]:
             entry = _formula_entry(raw, strategies)
+        elif raw.get("coverOnly"):
+            judged = judged_map.get(raw["id"]) or {}
+            if judged.get("_unanswered"):
+                entry = _cover_entry(raw, False, "", "", strategies)
+            else:
+                excerpt = str(judged.get("excerpt") or raw.get("window") or "")
+                entry = _cover_entry(raw, True, excerpt, str(judged.get("reason") or ""), strategies)
         else:
             judged = judged_map.get(raw["id"]) or {}
             if judged.get("_unanswered"):
@@ -684,7 +795,11 @@ def run(
         group_out.append(
             {
                 "key": key,
-                "label": key if key.endswith(("规则", "标准", "评审")) else f"{key}评分规则",
+                "label": (
+                    key
+                    if key.endswith(("规则", "标准", "评审", "条款")) or "合同" in key
+                    else f"{key}评分规则"
+                ),
                 "maxScore": round(g_max, 1),
                 "score": round(g_score, 1),
                 "items": items,

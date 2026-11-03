@@ -54,7 +54,7 @@ export interface PageConfig {
 export const defaultPage: PageConfig = {
   total: 200,
   cover: 6,
-  body: 140,
+  body: 164,
   appendix: 30,
 };
 

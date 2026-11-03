@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..models import BidDocument, ReviewFinding, ReviewRun
 from .. import storage
-from . import e1_veto, e2_business, e3_semantic, e3_tech_modules, e4_duplicate_filler, e5_layout, e_business_vision, e_custom_rules, e_parse_match, e_tender_score, rules_config
+from . import e1_veto, e2_business, e3_semantic, e3_tech_modules, e4_duplicate_filler, e5_layout, e_business_vision, e_custom_rules, e_parse_match, e_tender_score, rules_config, standard_review
 from .bid_kind import (
     KIND_COMBINED,
     SCOPE_BUSINESS,
@@ -26,7 +26,7 @@ from .bid_media import extract_review_pack, filter_pack_for_paragraphs
 from .docx_extract import extract_full_text, extract_paragraphs
 from .excerpt_guard import snap_bid_excerpt, split_bid_and_tender
 from .review_context import load_review_context
-from .rules_data import DIMENSION_LABELS, SEVERITY_PENALTY
+from .rules_data import DIMENSION_LABELS, grade_from_findings
 
 logger = logging.getLogger(__name__)
 
@@ -38,23 +38,11 @@ LEVEL_META = {
     "L5": {"name": "版式终审", "desc": "标题层级、目录页码、图表编号、空白页"},
 }
 
-# L3 由 E3 五维加权得出，覆盖率最高体现"核心技术评审"权重；其余四层各占一定比例。
-OVERALL_WEIGHTS = {"L1": 0.15, "L2": 0.15, "L3": 0.45, "L4": 0.15, "L5": 0.10}
-BUSINESS_WEIGHTS = {"L1": 0.40, "L2": 0.60}
-TECH_WEIGHTS = {"L3": 0.55, "L4": 0.25, "L5": 0.20}
-
 SCOPE_LEVELS = {
     SCOPE_BUSINESS: ("L1", "L2"),
     SCOPE_TECH: ("L3", "L4", "L5"),
     SCOPE_FULL: ("L1", "L2", "L3", "L4", "L5"),
 }
-
-
-def _score_from_findings(findings: list[dict]) -> float:
-    score = 100.0
-    for f in findings:
-        score -= SEVERITY_PENALTY.get(f["severity"], 0)
-    return max(0.0, round(score, 1))
 
 
 _WS = re.compile(r"\s+")
@@ -185,8 +173,12 @@ def _finding_row(run_id: str, f: dict, *blobs: str) -> ReviewFinding:
     )
 
 
-def _status(score: float, issue_count: int, has_waste: bool) -> str:
-    if has_waste or score < 80 or issue_count >= 3:
+def _status_from_grade(grade: str) -> str:
+    """等级直接映射结论：D（有废标级问题）→未达标；C（有降档级问题）→风险；否则→通过。
+    不再用分数阈值或问题数量门槛来判定，纯按严重度。"""
+    if grade == "D":
+        return "未达标"
+    if grade == "C":
         return "风险"
     return "通过"
 
@@ -297,15 +289,20 @@ def run_prereview(db: Session, run_id: str) -> None:
         parse_findings = e_parse_match.run(
             parse_text,
             scoped_score_rules,
-            checklist.qualification if scope in (SCOPE_BUSINESS, SCOPE_FULL) else [],
+            checklist.qualification,
             format_requirements_for_scope(checklist.format_requirements, scope),
-            must_respond if scope in (SCOPE_BUSINESS, SCOPE_FULL) else [],
+            must_respond,
             tech_keys,
             veto_keys,
             strategy_keys,
             headings=[(p.get("text") or "") for p in parse_paras],
             paragraphs=parse_paras,
+            include_veto=scope == SCOPE_TECH,
         )
+        if scope == SCOPE_TECH:
+            for finding in parse_findings:
+                if finding.get("level") in ("L1", "L2"):
+                    finding["level"] = "L3"
         custom_pack = e_custom_rules.run(parse_text, parse_paras, custom_rules, scope=scope)
         if isinstance(custom_pack, dict):
             custom_findings = custom_pack.get("findings") or []
@@ -352,7 +349,25 @@ def run_prereview(db: Session, run_id: str) -> None:
             extra_note = "模拟评标分仅供自查，不是评标委员会得分。"
             if extra_note not in note:
                 tender_rules["note"] = (note + " " + extra_note).strip()
-        return paras, text, e1, e2, e4, e5, e3, e3_issues, tech_modules, tender_rules, custom_items
+        if scope in (SCOPE_TECH, SCOPE_FULL, SCOPE_BUSINESS):
+            try:
+                standard_pack = standard_review.review(
+                    db,
+                    score_rules=scoped_score_rules,
+                    dimensions=checklist.dimensions,
+                    bid_text=text,
+                    paragraphs=paras,
+                    scope=scope,
+                    tech_rules=checklist.tech_rules,
+                    drawing_rules=checklist.drawing_rules,
+                )
+            except Exception:
+                logger.exception("standard review failed")
+                standard_pack = {"specialty": "通用", "note": "规范对标未完成", "points": [], "findings": []}
+        else:
+            standard_pack = {"specialty": "通用", "note": "", "points": [], "findings": []}
+        e3_issues = e3_issues + (standard_pack.get("findings") or [])
+        return paras, text, e1, e2, e4, e5, e3, e3_issues, tech_modules, tender_rules, custom_items, standard_pack
 
     if doc and doc.storage_path and storage.exists(doc.storage_path):
         with storage.as_local(doc.storage_path) as path:
@@ -368,6 +383,7 @@ def run_prereview(db: Session, run_id: str) -> None:
                 tech_modules,
                 tender_rules,
                 custom_items,
+                standard_pack,
             ) = _run_with_path(path)
     else:
         (
@@ -382,6 +398,7 @@ def run_prereview(db: Session, run_id: str) -> None:
             tech_modules,
             tender_rules,
             custom_items,
+            standard_pack,
         ) = _run_with_path(None)
 
     all_findings = _admit_findings(
@@ -395,66 +412,60 @@ def run_prereview(db: Session, run_id: str) -> None:
     e5_findings = [f for f in all_findings if f.get("level") == "L5"]
     e3_issues = [f for f in all_findings if f.get("level") == "L3"]
 
-    level_scores: dict[str, float] = {
-        "L1": _score_from_findings(e1_findings),
-        "L2": _score_from_findings(e2_findings),
-        "L4": _score_from_findings(e4_findings),
-        "L5": _score_from_findings(e5_findings),
+    # 去分数化：每层直接按该层 Finding 的严重度推 A/B/C/D 等级，不再用分数扣减/加权。
+    level_grades: dict[str, str] = {
+        "L1": grade_from_findings(e1_findings),
+        "L2": grade_from_findings(e2_findings),
+        "L4": grade_from_findings(e4_findings),
+        "L5": grade_from_findings(e5_findings),
+        "L3": grade_from_findings(e3_issues) if scope in (SCOPE_TECH, SCOPE_FULL) else "A",
     }
 
     dims = e3_result.get("dimensions") or {}
-    dim_score = round(sum(dims[k]["score"] * weights[k] / 100 for k in weights if k in dims), 1) if dims else 0.0
-    l3_penalty = sum(SEVERITY_PENALTY.get(f["severity"], 0) for f in e3_issues)
-    level_scores["L3"] = max(0.0, round(dim_score - l3_penalty, 1)) if scope in (SCOPE_TECH, SCOPE_FULL) else 0.0
-
     level_keys = SCOPE_LEVELS.get(scope) or SCOPE_LEVELS[SCOPE_FULL]
-    score_weights = (
-        BUSINESS_WEIGHTS if scope == SCOPE_BUSINESS else TECH_WEIGHTS if scope == SCOPE_TECH else OVERALL_WEIGHTS
-    )
     levels_out = []
     for key in level_keys:
         meta = LEVEL_META[key]
         level_findings = [f for f in all_findings if f["level"] == key]
-        has_waste = any(
-            f["severity"] == "废标" and f.get("issueClass") == "auto_veto" for f in level_findings
-        )
+        grade = level_grades[key]
         levels_out.append(
             {
                 "key": key,
                 "name": meta["name"],
                 "desc": meta["desc"],
-                "score": level_scores[key],
-                "full": 100,
+                "grade": grade,
                 "issues": len(level_findings),
-                "status": _status(level_scores[key], len(level_findings), has_waste),
+                "status": _status_from_grade(grade),
             }
         )
 
+    # 五维评审的等级是单独一份展示（完整性/针对性/合规性/可落地性/规范性各自的 A-D），
+    # 不再折算成分数参与 L3 层级卡片或总评的计算。
     dimensions_out = []
     if scope in (SCOPE_TECH, SCOPE_FULL):
         dimensions_out = [
-            {"name": DIMENSION_LABELS[k], "weight": weights[k], "score": round(dims[k]["score"], 1)}
+            {"name": DIMENSION_LABELS[k], "weight": weights[k], "grade": dims[k]["grade"]}
             for k in weights
             if k in dims
         ]
     if scope == SCOPE_BUSINESS:
         tech_modules = []
 
-    overall = round(sum(level_scores[k] * w for k, w in score_weights.items()), 1)
+    # 总评风险灯改成纯计数规则（不再靠总分数字阈值判定，与 bid_kind.project_booklet_payload
+    # 拆分商务/技术分册时用的判定口径统一）：存在废标→红；存在降档或扣分→橙；否则→绿。
     auto_waste = [f for f in all_findings if f["severity"] == "废标" and f.get("issueClass") == "auto_veto"]
     waste = len(auto_waste)
     risk = sum(1 for f in all_findings if f["severity"] in ("降档", "扣分"))
     suggest = sum(1 for f in all_findings if f["severity"] == "建议")
 
-    if waste > 0 or overall < 70:
+    if waste > 0:
         light = "红"
-    elif overall < 90:
+    elif risk > 0:
         light = "橙"
     else:
         light = "绿"
 
     run.status = "done"
-    run.overall = overall
     run.waste = waste
     run.risk = risk
     run.suggest = suggest
@@ -464,6 +475,11 @@ def run_prereview(db: Session, run_id: str) -> None:
     run.tech_modules_json = tech_modules
     run.tender_rules_json = tender_rules
     run.custom_rules_json = custom_items
+    run.standard_review_json = {
+        "specialty": standard_pack.get("specialty") or "通用",
+        "note": standard_pack.get("note") or "",
+        "points": standard_pack.get("points") or [],
+    }
     run.finished_at = datetime.utcnow()
 
     para_blob = "\n".join(str(p.get("text") or "") for p in paragraphs)

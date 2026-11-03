@@ -6,6 +6,7 @@ import {
   type StyleConfig, type PageConfig, type LayoutConfig, type ImageConfig,
 } from "@/mocks/writerSteps";
 import { KNOWLEDGE_SCOPES, KNOWLEDGE_TYPES, listKnowledgeDocuments, listProductLibraries, listWriterModels, type KnowledgeDoc, type ProductLibrary, type WriterLlmModel } from "@/lib/api";
+import { charsPerPage } from "@/lib/pageBudget";
 
 export interface WriterSettingsPayload {
   style: StyleConfig;
@@ -38,7 +39,11 @@ export default function BidSettings({
   onNext,
 }: BidSettingsProps) {
   const [style, setStyle] = useState<StyleConfig>(initialSettings?.style ?? defaultStyle);
-  const [page, setPage] = useState<PageConfig>(initialSettings?.page ?? defaultPage);
+  const [page, setPage] = useState<PageConfig>(() => {
+    const source = initialSettings?.page ?? defaultPage;
+    if (source.cover + source.body + source.appendix === source.total) return source;
+    return { ...source, body: Math.max(0, source.total - source.cover - source.appendix) };
+  });
   const [layout, setLayout] = useState<LayoutConfig>({
     ...defaultLayout,
     ...(initialSettings?.layout ?? {}),
@@ -71,7 +76,13 @@ export default function BidSettings({
       });
     listWriterModels()
       .then((rows) => {
-        if (!cancelled) setModels(rows);
+        if (cancelled) return;
+        const connected = rows.filter((row) => row.ready && row.providerKind !== "local");
+        setModels(connected);
+        if (connected.length > 0 && !connected.some((row) => row.id === modelId)) {
+          const next = connected.find((row) => row.isDefault) || connected[0];
+          onModelChange(next.id);
+        }
       })
       .catch(() => {
         /* 模型列表失败时仍可用草稿已选模型 */
@@ -294,7 +305,7 @@ export default function BidSettings({
             <span className="flex h-5 w-5 items-center justify-center rounded bg-primary-500 text-[10px] font-bold text-background-50">3</span>
             <h4 className="text-sm font-semibold text-foreground-900">预设标书页数</h4>
             <span className="text-[11px] text-foreground-500">
-              生成全文约 {page.total} 页，{(page.total * 0.08).toFixed(1)} 万字，系统可能会根据项目内容对页数进行调整。
+              正文 {Math.max(0, page.total - page.cover - page.appendix)} 页按当前字号和行距分给技术章，约每页 {charsPerPage(layout)} 字。封面和附件不占 AI 正文篇幅。
             </span>
             <button
               type="button"
@@ -328,7 +339,11 @@ export default function BidSettings({
               value={page.total}
               onChange={(e) => {
                 const total = Number(e.target.value);
-                setPage({ ...page, total });
+                setPage({
+                  ...page,
+                  total,
+                  body: Math.max(0, total - page.cover - page.appendix),
+                });
               }}
               className="relative z-10 w-full cursor-pointer appearance-none bg-transparent py-1
                 [&::-webkit-slider-runnable-track]:h-2 [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-background-200
@@ -380,7 +395,20 @@ export default function BidSettings({
                         type="number"
                         min={0}
                         value={page[item.key]}
-                        onChange={(e) => setPage({ ...page, [item.key]: Math.max(0, Number(e.target.value) || 0) })}
+                        onChange={(e) => {
+                          const value = Math.max(0, Number(e.target.value) || 0);
+                          if (item.key === "body") {
+                            setPage({ ...page, body: value, total: page.cover + value + page.appendix });
+                            return;
+                          }
+                          const cover = item.key === "cover" ? value : page.cover;
+                          const appendix = item.key === "appendix" ? value : page.appendix;
+                          setPage({
+                            ...page,
+                            [item.key]: value,
+                            body: Math.max(0, page.total - cover - appendix),
+                          });
+                        }}
                         className={`${inputCls} cursor-text`}
                       />
                       <span className="whitespace-nowrap text-[11px] text-foreground-500">页</span>
@@ -391,10 +419,7 @@ export default function BidSettings({
               <div className="mt-3 flex items-center justify-between rounded-md bg-secondary-50 px-3 py-2 text-[11px] text-secondary-800">
                 <span>
                   <i className="ri-calculator-line mr-1"></i>
-                  板块合计 <span className="font-label font-semibold">{page.cover + page.body + page.appendix}</span> 页
-                  {page.cover + page.body + page.appendix !== page.total && (
-                    <span className="ml-1 text-accent-700">（与滑块总页数不一致）</span>
-                  )}
+                  板块合计 <span className="font-label font-semibold">{page.cover + page.body + page.appendix}</span> 页，与总页数对齐
                 </span>
                 <button
                   type="button"

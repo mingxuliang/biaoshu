@@ -9,9 +9,9 @@ tech_keys 为 None 表示不做开关过滤（全部启用）；管理员在规�
 只使用投标文件正文关键词、附图占位与项目名称，不联网核验规范条文真实性。
 声称有「网络图/横道图/动态曲线」但附近没有抽出的原图，按未附图扣分。
 
-run() 除了返回给 L3 合并用的 Finding 列表，还会返回一份模块打分明细
-（module_score()），直接对应 rules_data.TECH_SCORE_MODULES 里配置的满分权重，
-供 AI 预审报告逐模块展示"模块名 N 分，缺项说明"，不再只把结果揉进笼统的 issue 列表。
+run() 除了返回给 L3 合并用的 Finding 列表，还会返回一份模块等级明细
+（module_score()），按该模块自身有没有问题、问题严重度多高直接推 A/B/C/D 等级，
+供 AI 预审报告逐模块展示"模块名 等级，缺项说明"，不再折算成满分/得分的数字。
 """
 
 from __future__ import annotations
@@ -27,8 +27,6 @@ QUANT_PATTERN = re.compile(r"\d+(?:\.\d+)?\s*(?:%|dB|吨|db)")
 HOUR_RESPONSE_PATTERN = re.compile(r"\d+\s*小时")
 SENTENCE_SPLIT = re.compile(r"[。！？；\n]")
 
-# finding.severity → 该模块满分的扣减比例；无 finding 时视为满分达标。
-_SEVERITY_DEDUCT_RATIO = {"废标": 1.0, "降档": 0.6, "扣分": 0.4, "建议": 0.15}
 _MODULE_META = {m["key"]: m for m in rules_data.TECH_SCORE_MODULES}
 
 
@@ -367,23 +365,19 @@ _ORDER = [
 
 def _module_entry(key: str, finding: dict | None) -> dict:
     meta = _MODULE_META.get(key, {})
-    max_score = meta.get("score", 0)
     if finding is None:
         return {
             "key": key,
             "module": meta.get("module", key),
-            "maxScore": max_score,
-            "score": max_score,
+            "grade": "A",
             "status": "达标",
             "summary": "正文核验通过，未检出缺项",
         }
-    ratio = _SEVERITY_DEDUCT_RATIO.get(finding["severity"], 0.15)
-    score = max(0.0, round(max_score - max_score * ratio, 1))
+    grade = rules_data.grade_from_findings([finding])
     return {
         "key": key,
         "module": meta.get("module", key),
-        "maxScore": max_score,
-        "score": score,
+        "grade": grade,
         "status": finding["severity"],
         "summary": finding["suggestion"],
     }

@@ -88,8 +88,10 @@ def run(
     strategy_keys: set[str] | None = None,
     headings: list[str] | None = None,
     paragraphs: list[dict] | None = None,
+    include_veto: bool = False,
 ) -> list[dict]:
     del headings
+    del strategy_keys
     bid = substance_blob(full_text or "", paragraphs)
     findings: list[dict] = []
 
@@ -99,7 +101,7 @@ def run(
             if not isinstance(item, dict):
                 continue
             kind = str(item.get("type") or "")
-            if any(h in kind for h in ("星号", "废标")):
+            if any(h in kind for h in ("星号", "废标")) and not include_veto:
                 continue
             clause = str(item.get("clause") or item.get("text") or "").strip()
             if not clause:
@@ -200,27 +202,13 @@ def run(
             )
         )
 
-    if _enabled("checklist_map", strategy_keys):
+    # 招标解析抽出的评分点、合同条款、无分值技术要求都要对照，不因策略开关或有无分值丢掉。
+    if score_rules:
         from .e_tender_score import is_grading_rule, split_label_content
 
         entries = []
         for item in score_rules or []:
             if not isinstance(item, dict):
-                continue
-            if str(item.get("sourceItemId") or "") == "contract-tech":
-                # 专用合同条款：中标后履约条款（付款进度、违约金、验收标准…），不是投标时
-                # 要写进技术方案的评分点，即便解析时误标了权重也不当应答项处理。
-                continue
-            try:
-                weight = float(item.get("weight") or 0)
-            except (TypeError, ValueError):
-                weight = 0.0
-            if weight <= 0:
-                # 没有分值的条目不是真正的评分点：可能是评标办法/合同履约条款等参考性文字
-                # （如「专用合同条款」的违约金/验收期限、"本段未出现XX公式"占位说明），也可能
-                # 是格式要求误落进这一类。e_tender_score 的模拟打分本就只认 weight>0 的条目，
-                # 这里对齐同一口径，避免「是否应答」和「打分证据」判两套标准、也避免把履约
-                # 条款误判成投标人必须响应的评分点。
                 continue
             blob = _item_text(item, "dimension", "detail")
             if not blob:
@@ -240,15 +228,17 @@ def run(
 
         def _score_finding(item: dict, result) -> dict:
             dim = item.get("dimension") or "评分点"
-            slot = booklet_of_source(str(item.get("sourceItemId") or ""), str(dim))
+            source_id = str(item.get("sourceItemId") or "")
+            slot = booklet_of_source(source_id, str(dim))
             level = "L2" if slot in ("business", "price") else "L3"
+            is_contract = source_id == "contract-tech"
             return _finding(
                 level,
                 "扣分",
-                f"评分细则 / {dim}",
+                f"{'专用合同条款' if is_contract else '评分细则'} / {dim}",
                 result.excerpt,
-                "招标解析约定：评分点须在投标书中响应",
-                result.reason or f"评分点「{dim}」未确认对应内容，请按本册规则补写",
+                "招标解析约定：专用合同条款须响应" if is_contract else "招标解析约定：评分点须在投标书中响应",
+                result.reason or f"{'合同条款' if is_contract else '评分点'}「{dim}」未确认对应内容，请按本册规则补写",
                 blob if (blob := _item_text(item, "dimension", "detail")) else dim,
                 unanswered_confirmed=result.unanswered_confirmed,
             )

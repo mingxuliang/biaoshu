@@ -16,10 +16,6 @@ BOOKLET_LEVELS = {
     SCOPE_BUSINESS: ("L1", "L2"),
     SCOPE_TECH: ("L3", "L4", "L5"),
 }
-BOOKLET_WEIGHTS = {
-    SCOPE_BUSINESS: {"L1": 0.40, "L2": 0.60},
-    SCOPE_TECH: {"L3": 0.55, "L4": 0.25, "L5": 0.20},
-}
 
 _BUSINESS_HINTS = ("商务标", "商务部分", "商务文件", "商务", "资格文件", "资格审查", "业绩证明", "投标函", "资信")
 _TECH_HINTS = ("技术标", "技术文件", "技术部分", "施组", "施工组织", "技术方案", "施工方案")
@@ -167,7 +163,9 @@ def format_requirements_for_scope(items: list | None, scope: str) -> list:
     for item in rows:
         blob = f"{item.get('title') or ''}{item.get('desc') or ''}{item.get('source') or ''}"
         slot = booklet_of_format(str(item.get("sourceItemId") or ""), blob)
-        if scope == SCOPE_TECH and slot == "tech":
+        if not slot:
+            kept.append(item)
+        elif scope == SCOPE_TECH and slot == "tech":
             kept.append(item)
         elif scope == SCOPE_BUSINESS and slot in ("business", "price"):
             kept.append(item)
@@ -204,7 +202,9 @@ def score_rules_for_scope(score_rules: list | None, scope: str) -> list:
     kept = []
     for item in rules:
         slot = booklet_of_source(str(item.get("sourceItemId") or ""), str(item.get("dimension") or ""))
-        if scope == SCOPE_BUSINESS and slot in ("business", "price"):
+        if not slot:
+            kept.append(item)
+        elif scope == SCOPE_BUSINESS and slot in ("business", "price"):
             kept.append(item)
         elif scope == SCOPE_TECH and slot == "tech":
             kept.append(item)
@@ -276,11 +276,44 @@ def filter_tender_rules(report: dict | None, scope: str) -> dict:
     return data
 
 
-def booklet_overall(levels: list, scope: str) -> float:
-    weights = BOOKLET_WEIGHTS.get(scope) or {}
+def booklet_grade(levels: list, scope: str) -> str:
+    """一本分册（商务/技术）里各层级取最差等级，作为分册的总体质量结论；不再加权算分。"""
+    from .rules_data import worst_grade
+
     keys = BOOKLET_LEVELS.get(scope) or ()
-    score_by_key = {str(lv.get("key")): float(lv.get("score") or 0) for lv in (levels or []) if isinstance(lv, dict)}
-    return round(sum(score_by_key.get(k, 0.0) * weights.get(k, 0.0) for k in keys), 1)
+    grade_by_key = {str(lv.get("key")): str(lv.get("grade") or "A") for lv in (levels or []) if isinstance(lv, dict)}
+    return worst_grade([grade_by_key.get(k, "A") for k in keys])
+
+
+def filter_standard_review(raw, scope: str):
+    """技术标视图去掉商务标规则，商务标视图只留商务标规则。"""
+    if not isinstance(raw, dict) or scope not in (SCOPE_BUSINESS, SCOPE_TECH):
+        return raw
+    want = "商务标" if scope == SCOPE_BUSINESS else "技术标"
+    points = []
+    for item in raw.get("points") or []:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source") or "")
+        if source in {"招标书", "评分"}:
+            booklet = str(item.get("booklet") or "")
+            if booklet not in {"技术标", "商务标"}:
+                blob = f"{item.get('name') or ''}{item.get('detail') or ''}"
+                booklet = (
+                    "商务标"
+                    if any(word in blob for word in ("报价", "价格", "商务", "资信", "业绩", "信用", "资格", "投标函"))
+                    else "技术标"
+                )
+            if booklet != want:
+                continue
+            points.append(item)
+        elif scope == SCOPE_BUSINESS:
+            continue
+        else:
+            points.append(item)
+    out = dict(raw)
+    out["points"] = points
+    return out
 
 
 def project_booklet_payload(payload: dict, scope: str) -> dict:
@@ -311,7 +344,7 @@ def project_booklet_payload(payload: dict, scope: str) -> dict:
     out = dict(payload)
     out["scope"] = scope
     out["levels"] = levels
-    out["overall"] = booklet_overall(levels, scope)
+    out["grade"] = booklet_grade(levels, scope)
     out["issues"] = issues
     out["waste"] = waste
     out["risk"] = risk
@@ -320,6 +353,7 @@ def project_booklet_payload(payload: dict, scope: str) -> dict:
     if scope == SCOPE_BUSINESS:
         out["dimensions"] = []
         out["techModules"] = []
+    out["standardReview"] = filter_standard_review(payload.get("standardReview"), scope)
     tender = payload.get("tenderRules")
     if tender is None:
         tender = payload.get("tender_rules")
