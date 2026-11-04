@@ -10,8 +10,10 @@ from app.engines.writer_diagram import (
     chapter_diagram_source,
     find_cjk_font,
     fitz,
+    layout_diagram,
     normalize_diagram,
     render_diagram_png,
+    route_between,
 )
 
 
@@ -63,6 +65,86 @@ class WriterDiagramTest(unittest.TestCase):
         )
         self.assertEqual(spec["layout"], "layers")
         self.assertEqual([node["label"] for node in spec["nodes"]], ["业务应用", "数据中台"])
+
+    def test_child_hangs_under_its_zone(self) -> None:
+        spec = normalize_diagram(
+            {
+                "title": "三段部署",
+                "nodes": [
+                    {"id": "in", "label": "内网", "layer": 0},
+                    {"id": "out", "label": "外网", "layer": 0},
+                    {"id": "a", "label": "门户", "layer": 1, "parent": "in"},
+                    {"id": "b", "label": "微服务", "layer": 1, "parent": "in"},
+                    {"id": "c", "label": "移动端", "layer": 1, "parent": "out"},
+                ],
+                "edges": [{"from": "in", "to": "out"}],
+            },
+            "deployment",
+        )
+        self.assertEqual(next(node for node in spec["nodes"] if node["id"] == "a")["parent"], "in")
+        self.assertEqual(spec["edges"], [{"from": "in", "to": "out", "label": ""}])
+        rects = layout_diagram(spec)
+
+        def center_x(node_id: str) -> float:
+            rect = rects[node_id]
+            return (rect[0] + rect[2]) / 2
+
+        self.assertLess(rects["in"][3], rects["a"][1])
+        self.assertLess(abs(center_x("in") - (center_x("a") + center_x("b")) / 2), 1)
+        self.assertLess(center_x("a"), center_x("c"))
+        self.assertLess(rects["in"][2], rects["out"][0])
+
+    def test_cross_layer_edge_becomes_parent(self) -> None:
+        spec = normalize_diagram(
+            {
+                "nodes": [
+                    {"id": "zone", "label": "内网", "layer": 0},
+                    {"id": "svc", "label": "门户", "layer": 1},
+                ],
+                "edges": [{"from": "zone", "to": "svc"}],
+            },
+            "technical",
+        )
+        self.assertEqual(next(node for node in spec["nodes"] if node["id"] == "svc")["parent"], "zone")
+        self.assertEqual(spec["edges"], [])
+
+    def test_same_layer_parent_is_dropped(self) -> None:
+        spec = normalize_diagram(
+            {
+                "nodes": [
+                    {"id": "a", "label": "甲", "layer": 0, "parent": "b"},
+                    {"id": "b", "label": "乙", "layer": 0},
+                ],
+            },
+            "deployment",
+        )
+        self.assertEqual(next(node for node in spec["nodes"] if node["id"] == "a")["parent"], "")
+
+    def test_linked_zones_sit_in_link_order(self) -> None:
+        spec = normalize_diagram(
+            {
+                "nodes": [
+                    {"id": "in", "label": "内网", "layer": 0},
+                    {"id": "out", "label": "外网", "layer": 0},
+                    {"id": "edge", "label": "边界", "layer": 0},
+                ],
+                "edges": [{"from": "in", "to": "edge"}, {"from": "edge", "to": "out"}],
+            },
+            "deployment",
+        )
+        rects = layout_diagram(spec)
+        self.assertLess(rects["in"][2], rects["edge"][0])
+        self.assertLess(rects["edge"][2], rects["out"][0])
+
+    def test_route_touches_box_borders(self) -> None:
+        side = route_between((0, 10, 100, 80), (180, 10, 280, 80))
+        self.assertEqual(side[0], (100, 45))
+        self.assertEqual(side[-1], (180, 45))
+        down = route_between((40, 0, 140, 70), (40, 140, 140, 210))
+        self.assertEqual(down[0], (90, 70))
+        self.assertEqual(down[-1], (90, 140))
+        around = route_between((0, 10, 100, 80), (300, 10, 400, 80), [(140, 10, 260, 80)])
+        self.assertLess(around[1][1], 10)
 
     def test_style_applies_only_to_decorative_photos(self) -> None:
         photo = build_prompt("项目现场", "normal", "简约扁平风")

@@ -79,6 +79,8 @@ def _checklist_to_out(checklist: EvaluationChecklist, db: Session) -> ChecklistO
         error=checklist.error,
         extractStats=data.get("extractStats") or {},
         omittedCount=data.get("omittedCount") or {},
+        techBidResponseRequirements=data.get("techBidResponseRequirements") or "",
+        businessBidResponse=data.get("businessBidResponse") or "",
     )
 
 

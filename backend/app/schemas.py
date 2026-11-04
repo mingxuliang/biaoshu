@@ -371,6 +371,8 @@ class ChecklistOut(BaseModel):
     error: Optional[str] = None
     extractStats: dict = {}
     omittedCount: dict = {}
+    techBidResponseRequirements: str = ""
+    businessBidResponse: str = ""
 
 
 # 以下模型对应项目 / 认证真正落库（P0），字段严格对齐前端 src/context/AuthContext.tsx 的
@@ -618,6 +620,7 @@ class KnowledgeRefIn(BaseModel):
 class WriterDraftOut(BaseModel):
     id: str
     projectId: str
+    docKind: Literal["tech", "business"] = "tech"
     modelId: str
     selectedKnowledge: list[str] = []
     selectedProductLibraryId: Optional[str] = None
@@ -642,10 +645,15 @@ class UpdateWriterDraftIn(BaseModel):
 
 class WriterJobOut(BaseModel):
     jobId: str
-    kind: Literal["outline", "chapter", "product-match"]
+    kind: Literal["outline", "chapter", "product-match", "chat", "batch"]
     chapterId: Optional[str] = None
     status: Literal["queued", "running", "done", "failed"]
     error: Optional[str] = None
+    result: Optional[dict] = None
+
+
+class GenerateAllChaptersIn(BaseModel):
+    overwrite: bool = False
 
 
 class SaveChapterContentIn(BaseModel):
@@ -703,16 +711,36 @@ class WriterChatMessageIn(BaseModel):
     content: str
 
 
+class WriterChatMessageOut(BaseModel):
+    id: str
+    role: Literal["user", "assistant"]
+    content: str
+    edits: list[dict] = []
+    trace: list[dict] = []
+    files: list[dict] = []
+
+
+class WriterChatFileOut(BaseModel):
+    id: str
+    filename: str
+    kind: str = "file"
+    url: str = ""
+
+
 class WriterChatIn(BaseModel):
-    message: str
+    message: str = ""
     history: list[WriterChatMessageIn] = []
     chapterTitle: Optional[str] = None
     chapterExcerpt: Optional[str] = None
+    chapterId: Optional[str] = None
+    fileIds: list[str] = []
 
 
 class WriterChatOut(BaseModel):
-    reply: str
+    jobId: str
+    reply: str = ""
     hasChecklist: bool = False
+    edits: list[dict] = []
 
 
 # 以下模型对应「审核后修改闭环」真实后端接入：把预审 Finding 锚定到投标书真实段落，

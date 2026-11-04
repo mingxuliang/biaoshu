@@ -16,7 +16,9 @@ export function charsPerPage(layout?: Partial<LayoutConfig> | null): number {
   const spacing = layout?.lineSpacing || "";
   const fixed = /固定值\s*(\d+(?:\.\d+)?)\s*磅/.exec(spacing);
   let linePt = bodyPt * 1.5;
-  if (fixed) {
+  if (layout?.lineSpacingExactPt) {
+    linePt = Math.max(Number(layout.lineSpacingExactPt), bodyPt);
+  } else if (fixed && layout?.lineSpacingMul == null) {
     linePt = Math.max(Number(fixed[1]), bodyPt);
   } else {
     const mul =

@@ -43,6 +43,8 @@ from .models import (
     ReviewRun,
     TenderDocument,
     WriterDraft,
+    WriterChatMessage,
+    WriterChatFile,
     WriterImage,
     WriterJob,
     gen_id,
@@ -209,7 +211,25 @@ def run_tender_parse_task(checklist_id: str) -> None:
             "omittedCount": omitted,
             "techRules": tech_pack.get("rules") or [],
             "drawingRules": drawing_pack.get("rules") or [],
+            "techBidResponseRequirements": "",
+            "businessBidResponse": "",
         }
+        try:
+            from .engines.bid_requirements import extract_bid_requirements
+
+            bid_reqs = extract_bid_requirements(full_text or "")
+            checklist.checklist_json["techBidResponseRequirements"] = bid_reqs.get("techBidResponseRequirements") or ""
+            checklist.checklist_json["businessBidResponse"] = bid_reqs.get("businessBidResponse") or ""
+            extract_stats = {
+                **extract_stats,
+                "bidRequirementNote": bid_reqs.get("note") or "",
+            }
+            checklist.checklist_json["extractStats"] = extract_stats
+        except Exception:
+            logger.exception("bid requirement extract failed for checklist %s", checklist_id)
+            extract_stats = {**extract_stats, "bidRequirementNote": "应答需求未抽出"}
+            checklist.checklist_json["extractStats"] = extract_stats
+        flag_modified(checklist, "checklist_json")
         checklist.engine_params_json = result["vetoParams"]
         if fail:
             checklist.error = fail
@@ -585,6 +605,23 @@ def _qualifications_for_chapter(db, draft: WriterDraft, chapter_id: str, query: 
 
 
 def _latest_checklist_data(db, project_id: str) -> tuple[list[dict], list[dict]]:
+    data = _latest_checklist_json(db, project_id)
+    return data.get("scoreRules", []), data.get("mustRespond", [])
+
+
+def _latest_response_fields(db, project_id: str) -> tuple[str, str, list]:
+    data = _latest_checklist_json(db, project_id)
+    formats = data.get("formatRequirements") or []
+    if not isinstance(formats, list):
+        formats = []
+    return (
+        str(data.get("techBidResponseRequirements") or ""),
+        str(data.get("businessBidResponse") or ""),
+        formats,
+    )
+
+
+def _latest_checklist_json(db, project_id: str) -> dict:
     checklist = (
         db.query(EvaluationChecklist)
         .filter(EvaluationChecklist.project_id == project_id)
@@ -592,7 +629,7 @@ def _latest_checklist_data(db, project_id: str) -> tuple[list[dict], list[dict]]
         .first()
     )
     data = (checklist.checklist_json or {}) if checklist else {}
-    return data.get("scoreRules", []), data.get("mustRespond", [])
+    return data if isinstance(data, dict) else {}
 
 
 def _project_tender_path(db, project_id: str) -> str | None:
@@ -655,22 +692,47 @@ def run_outline_generate_task(job_id: str) -> None:
             raise RuntimeError("撰写草稿不存在")
 
         score_rules, must_respond = _latest_checklist_data(db, draft.project_id)
+        # 目录生成不再依赖招标解析模块预抽出的「技术标应答需求」「商务标应答」摘要，
+        # 这两段只给对话/正文生成等其它场景用；目录改成智能体自己通读原文。
+        _tech_unused, _business_unused, format_requirements = _latest_response_fields(db, draft.project_id)
+        del _tech_unused, _business_unused
         project = db.get(Project, draft.project_id)
         project_name = project.name if project else ""
         knowledge_headings = list_knowledge_headings(db, draft.selected_knowledge_json or [], limit=50)
         tender_path = _project_tender_path(db, draft.project_id)
+        if not tender_path:
+            raise RuntimeError("请先上传招标文件，目录生成需要通读招标书原文")
         tender_toc = {"compose": [], "tech": []}
         tender_text = ""
-        if tender_path:
-            with storage.as_local(tender_path) as local_tender:
-                tender_toc = extract_stipulated_toc(local_tender)
-                try:
-                    tender_text = extract_document_plain_text(local_tender)
-                except Exception:  # noqa: BLE001 —— 表格抽取失败时退回纯段落，仍把正文交给模型
-                    tender_text = extract_full_text(local_tender)
+        with storage.as_local(tender_path) as local_tender:
+            tender_toc = extract_stipulated_toc(local_tender)
+            try:
+                tender_text = extract_document_plain_text(local_tender)
+            except Exception:  # noqa: BLE001 —— 表格抽取失败时退回纯段落，仍把正文交给模型
+                tender_text = extract_full_text(local_tender)
 
+        if not job.user_id:
+            raise RuntimeError("目录生成缺少用户隔离信息")
+        doc_kind = draft.doc_kind or "tech"
+        current_settings = dict(draft.settings_json or {}) if isinstance(draft.settings_json, dict) else {}
         outline = e_writer.generate_outline(
-            project_name, score_rules, must_respond, knowledge_headings, tender_toc, tender_text, draft.model_id
+            project_name,
+            score_rules,
+            must_respond,
+            knowledge_headings,
+            tender_toc,
+            tender_text,
+            draft.model_id,
+            harness={
+                "user_id": job.user_id,
+                "project_id": draft.project_id,
+                "draft_id": draft.id,
+                "job_id": job.id,
+            },
+            format_requirements=format_requirements,
+            doc_kind=doc_kind,
+            page=current_settings.get("page") if isinstance(current_settings.get("page"), dict) else None,
+            layout=current_settings.get("layout") if isinstance(current_settings.get("layout"), dict) else None,
         )
 
         if tender_path:
@@ -734,177 +796,414 @@ def run_chapter_generate_task(job_id: str) -> None:
 
         job.status = "running"
         db.commit()
+        if not job.user_id:
+            raise RuntimeError("章节生成缺少用户隔离信息")
+        _generate_one_chapter(db, job.draft_id, job.chapter_id, job.user_id, job.id)
 
-        draft = db.get(WriterDraft, job.draft_id)
-        if not draft:
-            raise RuntimeError("撰写草稿不存在")
-
-        outline = [dict(n) for n in (draft.outline_json or [])]
-        node = next((n for n in outline if n.get("id") == job.chapter_id), None)
-        if not node:
-            raise RuntimeError("章节不存在，可能已被删除")
-
-        kind = e_writer.chapter_kind(
-            str(node.get("title") or ""),
-            node.get("part"),
-            str(node.get("idea") or ""),
-            str(node.get("requirement") or ""),
-        )
-        if kind in ("form", "business"):
-            title = str(node.get("title") or "")
-            originals = _extract_business_originals(
-                _project_tender_path(db, draft.project_id), [node], draft.model_id
-            )
-            original = originals.get(title) or ""
-            content = (
-                e_writer.original_form_markdown(title, str(node.get("idea") or ""), original)
-                if kind == "form"
-                else e_writer.business_skip_markdown(title, original)
-            )
-            contents = dict(draft.chapter_contents_json or {})
-            contents[job.chapter_id] = content
-            draft.chapter_contents_json = contents
-            flag_modified(draft, "chapter_contents_json")
-            for n in outline:
-                if n.get("id") == job.chapter_id:
-                    n["status"] = "用原文"
-                    n["words"] = len(content.replace(" ", "").replace("\n", ""))
-                    n["part"] = kind
-            draft.outline_json = outline
-            flag_modified(draft, "outline_json")
-            db.commit()
-            job.status = "done"
-            job.finished_at = datetime.utcnow()
-            db.commit()
-            return
-
-        score_rules, must_respond = _latest_checklist_data(db, draft.project_id)
-        dimension_detail = None
-        if node.get("dimension"):
-            dimension_detail = next((r for r in score_rules if r.get("dimension") == node["dimension"]), None)
-
-        project = db.get(Project, draft.project_id)
-        project_name = project.name if project else ""
-
-        query = f"{node.get('title', '')} {node.get('idea', '')}".strip()
-        knowledge_snippets = _knowledge_snippets_for_chapter(db, draft, job.chapter_id, query)
-        library_name, product_rows = _product_features_for_chapter(db, draft, job.chapter_id, query)
-        qual_rows = _qualifications_for_chapter(db, draft, job.chapter_id, query)
-        product_payload = None
-        if product_rows or draft.selected_product_library_id:
-            picked: set[str] = set()
-            for ref in _refs_of(_chapter_refs(draft, job.chapter_id), "product"):
-                picked.update(x for x in (ref.get("chapters") or []) if x)
-            product_payload = []
-            emitted: set[str] = set()
-
-            def _feat_images(feat: ProductFeature) -> list[dict]:
-                return [
-                    {"caption": img.caption or feat.name}
-                    for img in (feat.images or [])
-                    if img.storage_path
-                ]
-
-            def _add_feat(name: str, module: str, feat: ProductFeature) -> None:
-                if feat.id in emitted:
-                    return
-                emitted.add(feat.id)
-                product_payload.append(
-                    {
-                        "name": name,
-                        "module": module,
-                        "params": feat.params or "",
-                        "intro": feat.intro or "",
-                        "bidCopy": feat.bid_copy or "",
-                        "images": _feat_images(feat),
-                    }
-                )
-
-            for feat in product_rows:
-                parent_picked = (not picked) or feat.id in picked
-                if parent_picked:
-                    _add_feat(feat.name, feat.module, feat)
-                for child in feat.children or []:
-                    if parent_picked or child.id in picked:
-                        _add_feat(f"{feat.name} / {child.name}", feat.name, child)
-                if feat.parent_id and feat.id in picked:
-                    _add_feat(feat.name, feat.module, feat)
-
-        qual_payload = [
-            {
-                "name": item.name,
-                "kind": item.kind,
-                "number": item.number,
-                "owner": item.owner,
-                "validUntil": item.valid_until,
-                "detail": item.detail or "",
-                "ocrText": item.ocr_text or "",
-                "images": [
-                    {"caption": img.caption or item.name}
-                    for img in (item.images or [])
-                    if img.storage_path
-                ]
-                or ([{"caption": item.name}] if item.storage_path else []),
-            }
-            for item in qual_rows
-        ] or None
-
-        pack_images = _knowledge_images_from_snippets(knowledge_snippets)
-        pack_images.extend(_images_from_product_features(product_rows))
-        pack_images.extend(_images_from_qualifications(qual_rows))
-        _fill_vision(pack_images)
-
-        content = e_writer.generate_chapter_content(
-            project_name,
-            node.get("title", ""),
-            node.get("idea", ""),
-            dimension_detail,
-            must_respond,
-            knowledge_snippets,
-            draft.settings_json or {},
-            draft.model_id,
-            product_payload,
-            library_name,
-            qual_payload,
-            pack_images,
-            node.get("part"),
-            node.get("requirement") or "",
-            outline,
-            job.chapter_id,
-        )
-        kind = e_writer.chapter_kind(
-            str(node.get("title") or ""),
-            node.get("part"),
-            str(node.get("idea") or ""),
-            str(node.get("requirement") or ""),
-        )
-        if pack_images and kind == "tech":
-            content = attach_knowledge_images_for_chapter(
-                db, draft, job.chapter_id, node.get("title", ""), content, pack_images
-            )
-        is_form = kind in ("form", "business") or node.get("status") == "用原文"
-
-        contents = dict(draft.chapter_contents_json or {})
-        contents[job.chapter_id] = content
-        draft.chapter_contents_json = contents
-        flag_modified(draft, "chapter_contents_json")
-
-        for n in outline:
-            if n.get("id") == job.chapter_id:
-                n["status"] = "用原文" if is_form else "已完成"
-                n["words"] = len(content.replace(" ", "").replace("\n", ""))
-                if not is_form:
-                    n["aiRounds"] = (n.get("aiRounds") or 0) + 1
-        draft.outline_json = outline
-        flag_modified(draft, "outline_json")
-
-        db.commit()
-
+        job = db.get(WriterJob, job_id)
         job.status = "done"
         job.finished_at = datetime.utcnow()
         db.commit()
     except Exception as exc:  # noqa: BLE001 —— 生成失败也要把任务状态置为 failed，而不是让 worker 静默丢失
         logger.exception("chapter generate job %s failed", job_id)
+        db.rollback()
+        job = db.get(WriterJob, job_id)
+        if job:
+            job.status = "failed"
+            job.error = str(exc)
+            job.finished_at = datetime.utcnow()
+            db.commit()
+    finally:
+        db.close()
+
+
+def _generate_one_chapter(
+    db, draft_id: str, chapter_id: str, user_id: str, work_id: str, enable_figures: bool = True
+) -> str:
+    """生成并写回一章。单章任务和批量任务共用；写回时锁草稿行，并发章节互不覆盖。
+    返回 tech / form / business，失败直接抛出。"""
+    from .engines.writer_harness import DraftBinding
+
+    draft = db.get(WriterDraft, draft_id)
+    if not draft:
+        raise RuntimeError("撰写草稿不存在")
+
+    binding = DraftBinding(user_id, draft_id, chapter_id)
+    outline = [dict(n) for n in (draft.outline_json or [])]
+    node = next((n for n in outline if n.get("id") == chapter_id), None)
+    if not node:
+        raise RuntimeError("章节不存在，可能已被删除")
+
+    kind = e_writer.chapter_kind(
+        str(node.get("title") or ""),
+        node.get("part"),
+        str(node.get("idea") or ""),
+        str(node.get("requirement") or ""),
+    )
+    if kind in ("form", "business"):
+        title = str(node.get("title") or "")
+        originals = _extract_business_originals(
+            _project_tender_path(db, draft.project_id), [node], draft.model_id
+        )
+        original = originals.get(title) or ""
+        content = (
+            e_writer.original_form_markdown(title, str(node.get("idea") or ""), original)
+            if kind == "form"
+            else e_writer.business_skip_markdown(title, original)
+        )
+        binding.persist_chapter(chapter_id, content, status="用原文", ai_round=False, part=kind)
+        return kind
+
+    score_rules, must_respond = _latest_checklist_data(db, draft.project_id)
+    dimension_detail = None
+    if node.get("dimension"):
+        dimension_detail = next((r for r in score_rules if r.get("dimension") == node["dimension"]), None)
+
+    project = db.get(Project, draft.project_id)
+    project_name = project.name if project else ""
+
+    query = f"{node.get('title', '')} {node.get('idea', '')}".strip()
+    knowledge_snippets = _knowledge_snippets_for_chapter(db, draft, chapter_id, query)
+    library_name, product_rows = _product_features_for_chapter(db, draft, chapter_id, query)
+    qual_rows = _qualifications_for_chapter(db, draft, chapter_id, query)
+    product_payload = None
+    if product_rows or draft.selected_product_library_id:
+        picked: set[str] = set()
+        for ref in _refs_of(_chapter_refs(draft, chapter_id), "product"):
+            picked.update(x for x in (ref.get("chapters") or []) if x)
+        product_payload = []
+        emitted: set[str] = set()
+
+        def _feat_images(feat: ProductFeature) -> list[dict]:
+            return [
+                {"caption": img.caption or feat.name}
+                for img in (feat.images or [])
+                if img.storage_path
+            ]
+
+        def _add_feat(name: str, module: str, feat: ProductFeature) -> None:
+            if feat.id in emitted:
+                return
+            emitted.add(feat.id)
+            product_payload.append(
+                {
+                    "name": name,
+                    "module": module,
+                    "params": feat.params or "",
+                    "intro": feat.intro or "",
+                    "bidCopy": feat.bid_copy or "",
+                    "images": _feat_images(feat),
+                }
+            )
+
+        for feat in product_rows:
+            parent_picked = (not picked) or feat.id in picked
+            if parent_picked:
+                _add_feat(feat.name, feat.module, feat)
+            for child in feat.children or []:
+                if parent_picked or child.id in picked:
+                    _add_feat(f"{feat.name} / {child.name}", feat.name, child)
+            if feat.parent_id and feat.id in picked:
+                _add_feat(feat.name, feat.module, feat)
+
+    qual_payload = [
+        {
+            "name": item.name,
+            "kind": item.kind,
+            "number": item.number,
+            "owner": item.owner,
+            "validUntil": item.valid_until,
+            "detail": item.detail or "",
+            "ocrText": item.ocr_text or "",
+            "images": [
+                {"caption": img.caption or item.name}
+                for img in (item.images or [])
+                if img.storage_path
+            ]
+            or ([{"caption": item.name}] if item.storage_path else []),
+        }
+        for item in qual_rows
+    ] or None
+
+    pack_images = _knowledge_images_from_snippets(knowledge_snippets)
+    pack_images.extend(_images_from_product_features(product_rows))
+    pack_images.extend(_images_from_qualifications(qual_rows))
+    _fill_vision(pack_images)
+
+    if not user_id:
+        raise RuntimeError("章节生成缺少用户隔离信息")
+    content = e_writer.generate_chapter_content(
+        project_name,
+        node.get("title", ""),
+        node.get("idea", ""),
+        dimension_detail,
+        must_respond,
+        knowledge_snippets,
+        draft.settings_json or {},
+        draft.model_id,
+        product_payload,
+        library_name,
+        qual_payload,
+        pack_images,
+        node.get("part"),
+        node.get("requirement") or "",
+        outline,
+        chapter_id,
+        user_id=user_id,
+        project_id=draft.project_id,
+        draft_id=draft.id,
+        job_id=work_id,
+        enable_figures=enable_figures,
+    )
+    kind = e_writer.chapter_kind(
+        str(node.get("title") or ""),
+        node.get("part"),
+        str(node.get("idea") or ""),
+        str(node.get("requirement") or ""),
+    )
+    if pack_images and kind == "tech":
+        content = attach_knowledge_images_for_chapter(
+            db, draft, chapter_id, node.get("title", ""), content, pack_images
+        )
+    is_form = kind in ("form", "business") or node.get("status") == "用原文"
+
+    binding.persist_chapter(
+        chapter_id, content, status="用原文" if is_form else "已完成", ai_round=not is_form
+    )
+    return "form" if is_form else "tech"
+
+
+def _batch_leaf_nodes(outline: list[dict]) -> list[dict]:
+    nodes = [n for n in (outline or []) if isinstance(n, dict) and n.get("id")]
+    parents = {str(n.get("parentId")) for n in nodes if n.get("parentId")}
+    return [n for n in nodes if str(n["id"]) not in parents]
+
+
+@celery_app.task(name="run_batch_generate_task")
+def run_batch_generate_task(job_id: str) -> None:
+    """按目录一次生成全部叶子章：默认只补空章节，并发写，单章失败不拖垮整批。"""
+    import os
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .engines.writer_harness import DraftBinding
+
+    db = SessionLocal()
+    try:
+        job = db.get(WriterJob, job_id)
+        if not job or job.kind != "batch":
+            return
+        if not job.user_id:
+            raise RuntimeError("批量生成缺少用户隔离信息")
+        user_id = job.user_id
+        draft_id = job.draft_id
+        job.status = "running"
+        db.commit()
+
+        draft = db.get(WriterDraft, draft_id)
+        if not draft:
+            raise RuntimeError("撰写草稿不存在")
+        overwrite = bool((job.result_json or {}).get("overwrite")) if isinstance(job.result_json, dict) else False
+        contents = dict(draft.chapter_contents_json or {})
+        leaves = _batch_leaf_nodes(draft.outline_json or [])
+        todo: list[dict] = []
+        items: list[dict] = []
+        for node in leaves:
+            filled = bool(str(contents.get(node["id"]) or "").strip())
+            row = {"id": node["id"], "title": str(node.get("title") or ""), "status": "queued"}
+            if filled and not overwrite:
+                row["status"] = "skipped"
+            else:
+                todo.append(node)
+            items.append(row)
+        if not leaves:
+            raise RuntimeError("目录里没有可生成的章节")
+
+        lock = threading.Lock()
+        state = {"overwrite": overwrite, "total": len(todo), "done": 0, "skipped": len(leaves) - len(todo), "items": items}
+
+        def publish() -> None:
+            session = SessionLocal()
+            try:
+                row = session.get(WriterJob, job_id)
+                if row is None:
+                    return
+                row.result_json = {
+                    **state,
+                    "items": [dict(item) for item in items],
+                    "failed": [dict(item) for item in items if item["status"] == "failed"],
+                }
+                flag_modified(row, "result_json")
+                session.commit()
+            finally:
+                session.close()
+
+        def mark(node_id: str, status: str, error: str = "") -> None:
+            with lock:
+                for item in items:
+                    if item["id"] == node_id:
+                        item["status"] = status
+                        if error:
+                            item["error"] = error[:300]
+                if status in ("done", "failed"):
+                    state["done"] += 1
+                publish()
+
+        publish()
+
+        def work(index: int, node: dict) -> None:
+            node_id = str(node["id"])
+            previous = "已完成" if str(contents.get(node_id) or "").strip() else "待生成"
+            binding = DraftBinding(user_id, draft_id, node_id)
+            mark(node_id, "running")
+            try:
+                binding.set_chapter_status(node_id, "生成中")
+                session = SessionLocal()
+                try:
+                    _generate_one_chapter(session, draft_id, node_id, user_id, f"{job_id}-{index}")
+                finally:
+                    session.close()
+                mark(node_id, "done")
+            except Exception as exc:  # noqa: BLE001 —— 单章失败只记录，不中断整批
+                logger.exception("batch chapter %s failed", node_id)
+                try:
+                    binding.set_chapter_status(node_id, previous)
+                except Exception:  # noqa: BLE001
+                    logger.exception("restore chapter status failed")
+                mark(node_id, "failed", str(exc))
+
+        workers = max(1, min(int(os.environ.get("WRITER_BATCH_CONCURRENCY", "3") or 3), 6))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for index, node in enumerate(todo):
+                pool.submit(work, index, node)
+
+        failed = [item for item in items if item["status"] == "failed"]
+        db.expire_all()  # 进度是别的会话写的，这里要读最新
+        job = db.get(WriterJob, job_id)
+        if todo and len(failed) == len(todo):
+            job.status = "failed"
+            job.error = f"全部 {len(failed)} 章生成失败：" + (failed[0].get("error") or "")
+        else:
+            job.status = "done"
+        job.finished_at = datetime.utcnow()
+        db.commit()
+        publish_after = dict(job.result_json or {})
+        publish_after["finished"] = True
+        job.result_json = publish_after
+        flag_modified(job, "result_json")
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("batch generate job %s failed", job_id)
+        db.rollback()
+        job = db.get(WriterJob, job_id)
+        if job:
+            job.status = "failed"
+            job.error = str(exc)
+            job.finished_at = datetime.utcnow()
+            db.commit()
+    finally:
+        db.close()
+
+
+@celery_app.task(name="run_writer_chat_task")
+def run_writer_chat_task(job_id: str) -> None:
+    from .engines.writer_harness import HarnessError, run_chat
+
+    db = SessionLocal()
+    try:
+        job = db.get(WriterJob, job_id)
+        if not job or job.kind != "chat":
+            return
+        job.status = "running"
+        db.commit()
+
+        draft = db.get(WriterDraft, job.draft_id)
+        if not draft:
+            raise RuntimeError("撰写草稿不存在")
+        if not job.user_id:
+            raise RuntimeError("对话缺少用户隔离信息")
+        payload = job.result_json if isinstance(job.result_json, dict) else {}
+        message = db.get(WriterChatMessage, str(payload.get("messageId") or ""))
+        if message is None or message.user_id != job.user_id or message.draft_id != draft.id:
+            raise RuntimeError("对话消息不存在")
+        history_rows = (
+            db.query(WriterChatMessage)
+            .filter(
+                WriterChatMessage.user_id == job.user_id,
+                WriterChatMessage.draft_id == draft.id,
+                WriterChatMessage.id != message.id,
+            )
+            .order_by(WriterChatMessage.created_at.asc())
+            .all()
+        )
+        history = [{"role": row.role, "content": row.content or ""} for row in history_rows[-12:]]
+        file_ids = [item for item in (payload.get("fileIds") or []) if item]
+        attached = []
+        if file_ids:
+            attached = (
+                db.query(WriterChatFile)
+                .filter(
+                    WriterChatFile.id.in_(file_ids),
+                    WriterChatFile.user_id == job.user_id,
+                    WriterChatFile.draft_id == draft.id,
+                )
+                .all()
+            )
+        def publish_trace(steps: list[dict], reply: str = "") -> None:
+            session = SessionLocal()
+            try:
+                row = session.get(WriterJob, job_id)
+                if row is None or row.status in ("done", "failed"):
+                    return
+                current = dict(row.result_json or {})
+                current["engine"] = "AgentScope"
+                current["trace"] = steps
+                if reply:
+                    current["reply"] = reply
+                row.result_json = current
+                flag_modified(row, "result_json")
+                session.commit()
+            finally:
+                session.close()
+
+        result = run_chat(
+            user_id=job.user_id,
+            project_id=draft.project_id,
+            draft_id=draft.id,
+            job_id=job.id,
+            model_id=draft.model_id,
+            chapter_id=job.chapter_id,
+            history=history,
+            message=message.content or "",
+            uploads=[{"filename": item.filename, "storagePath": item.storage_path} for item in attached],
+            on_trace=publish_trace,
+        )
+        edits = result.get("edits") or []
+        reply = str(result.get("reply") or "")
+        trace = result.get("trace") or []
+        db.add(
+            WriterChatMessage(
+                user_id=job.user_id,
+                draft_id=draft.id,
+                role="assistant",
+                content=reply,
+                edits_json=edits,
+                trace_json=trace,
+            )
+        )
+        job.result_json = {
+            "reply": reply,
+            "edits": edits,
+            "hasChecklist": False,
+            "engine": "AgentScope",
+            "trace": trace,
+        }
+        flag_modified(job, "result_json")
+        job.status = "done"
+        job.finished_at = datetime.utcnow()
+        db.commit()
+    except (HarnessError, Exception) as exc:  # noqa: BLE001 —— 对话失败要写回任务状态
+        logger.exception("writer chat job %s failed", job_id)
         job = db.get(WriterJob, job_id)
         if job:
             job.status = "failed"

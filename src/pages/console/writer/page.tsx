@@ -10,7 +10,7 @@ import BidSettings, { type WriterSettingsPayload } from "./components/BidSetting
 import BidInterpret from "./components/BidInterpret";
 import OutlineStep from "./components/OutlineStep";
 import ContentStep from "./components/ContentStep";
-import { getOrCreateWriterDraft, updateWriterDraft, type OutlineNode, type WriterDraft } from "@/lib/api";
+import { getOrCreateWriterDraft, updateWriterDraft, type OutlineNode, type WriterDocKind, type WriterDraft } from "@/lib/api";
 import { compactOutlineTitles, isOriginalFormTitle } from "@/lib/outlineNum";
 import type { InterpretSource } from "@/mocks/writerSteps";
 
@@ -25,6 +25,7 @@ export default function WriterPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedId = searchParams.get("project") || "";
   const currentProject = projects.find((p) => p.id === selectedId);
+  const docKind: WriterDocKind = searchParams.get("doc") === "business" ? "business" : "tech";
 
   const [draft, setDraft] = useState<WriterDraft | null>(null);
   const [draftLoading, setDraftLoading] = useState(false);
@@ -53,9 +54,12 @@ export default function WriterPage() {
       return;
     }
     let cancelled = false;
+    setDraft(null);
+    setOutline([]);
+    setChapterContents({});
     setDraftLoading(true);
     setDraftError(null);
-    getOrCreateWriterDraft(currentProject.id)
+    getOrCreateWriterDraft(currentProject.id, docKind)
       .then((d) => {
         if (cancelled) return;
         setDraft(d);
@@ -101,9 +105,14 @@ export default function WriterPage() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentProject?.id]);
+  }, [currentProject?.id, docKind]);
 
-  const selectProject = (id: string) => setSearchParams({ project: id });
+  const selectProject = (id: string) => setSearchParams({ project: id, doc: docKind });
+
+  const selectDocKind = (kind: WriterDocKind) => {
+    if (kind === docKind) return;
+    setSearchParams({ project: selectedId, doc: kind });
+  };
 
   const goBackToList = () => setSearchParams({}, { replace: true });
 
@@ -279,6 +288,26 @@ export default function WriterPage() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <div className="flex h-7 shrink-0 items-center rounded-md border border-background-300 bg-background-50 p-0.5 text-xs">
+              <button
+                type="button"
+                onClick={() => selectDocKind("tech")}
+                className={`h-6 cursor-pointer rounded px-2.5 font-medium transition-colors ${
+                  docKind === "tech" ? "bg-primary-500 text-background-50" : "text-foreground-600 hover:bg-background-200"
+                }`}
+              >
+                技术标
+              </button>
+              <button
+                type="button"
+                onClick={() => selectDocKind("business")}
+                className={`h-6 cursor-pointer rounded px-2.5 font-medium transition-colors ${
+                  docKind === "business" ? "bg-primary-500 text-background-50" : "text-foreground-600 hover:bg-background-200"
+                }`}
+              >
+                商务标
+              </button>
+            </div>
             <select
               value={currentProject.id}
               onChange={(e) => selectProject(e.target.value)}
@@ -358,6 +387,7 @@ export default function WriterPage() {
             onNext={handleOutlineNext}
             onBack={goBack}
             selectedProductLibraryId={selectedProductLibraryId}
+            docKind={docKind}
           />
         )}
         {step === 4 && (
@@ -377,6 +407,7 @@ export default function WriterPage() {
             page={settingsPayload.page}
             imageSettings={settingsPayload.image}
             onBack={goBack}
+            docKind={docKind}
           />
         )}
       </div>

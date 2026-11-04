@@ -7,6 +7,7 @@ import {
 } from "@/mocks/writerSteps";
 import { KNOWLEDGE_SCOPES, KNOWLEDGE_TYPES, listKnowledgeDocuments, listProductLibraries, listWriterModels, type KnowledgeDoc, type ProductLibrary, type WriterLlmModel } from "@/lib/api";
 import { charsPerPage } from "@/lib/pageBudget";
+import LayoutAdvanced from "./LayoutAdvanced";
 
 export interface WriterSettingsPayload {
   style: StyleConfig;
@@ -548,8 +549,13 @@ export default function BidSettings({
                 value={layout.lineSpacing}
                 onChange={(e) => {
                   const lineSpacing = e.target.value;
-                  const mul = lineSpacing.startsWith("2") ? 2 : lineSpacing.includes("1.5") ? 1.5 : layout.lineSpacingMul;
-                  setLayout({ ...layout, lineSpacing, lineSpacingMul: mul });
+                  const fixed = /固定值\s*(\d+(?:\.\d+)?)/.exec(lineSpacing);
+                  if (fixed) {
+                    setLayout({ ...layout, lineSpacing, lineSpacingMul: null, lineSpacingExactPt: Number(fixed[1]) });
+                    return;
+                  }
+                  const mul = lineSpacing.startsWith("2") ? 2 : 1.5;
+                  setLayout({ ...layout, lineSpacing, lineSpacingMul: mul, lineSpacingExactPt: null });
                 }}
                 className={`${inputCls} cursor-pointer`}
               >
@@ -559,6 +565,7 @@ export default function BidSettings({
               </select>
             </div>
           </div>
+          <LayoutAdvanced layout={layout} onChange={setLayout} inputCls={inputCls} />
           {layout.fromTender ? (
             <p className="mt-2 rounded-md bg-secondary-50 px-3 py-2 text-[11px] leading-relaxed text-secondary-800">
               已按本项目招标书识别：{layout.bodyFont || "宋体"}{" "}

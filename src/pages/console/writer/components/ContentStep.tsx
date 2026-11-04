@@ -7,7 +7,9 @@ import FloatingChat from "./FloatingChat";
 import {
   ApiError,
   createChapterGenerateJob,
+  createGenerateAllJob,
   exportWriterDraftDocx,
+  type GenerateAllProgress,
   getOrCreateWriterDraft,
   pollWriterJobUntilDone,
   saveChapterContent,
@@ -15,7 +17,7 @@ import {
   type OutlineNode,
   type WriterImageItem,
 } from "@/lib/api";
-import { isOriginalFormTitle, isSkipAiWrite } from "@/lib/outlineNum";
+import { compactOutlineTitles, isOriginalFormTitle, isSkipAiWrite } from "@/lib/outlineNum";
 import type { ImageConfig, LayoutConfig, PageConfig } from "@/mocks/writerSteps";
 import { chapterCharTargets } from "@/lib/pageBudget";
 
@@ -39,6 +41,7 @@ interface ContentStepProps {
   page?: PageConfig | null;
   imageSettings?: ImageConfig | null;
   onBack: () => void;
+  docKind?: "tech" | "business";
 }
 
 export default function ContentStep({
@@ -55,12 +58,20 @@ export default function ContentStep({
   page,
   imageSettings,
   onBack,
+  docKind = "tech",
 }: ContentStepProps) {
+  const docKindLabel = docKind === "business" ? "商务标" : "技术标";
   const [activeId, setActiveId] = useState<string>(outline[0]?.id ?? "");
   const [generatingId, setGeneratingId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [toast, setToast] = useState<ToastState>({ message: "", type: "success", visible: false });
+  const [batch, setBatch] = useState<GenerateAllProgress | null>(null);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [overwriteAll, setOverwriteAll] = useState(false);
+  const [showFailed, setShowFailed] = useState(false);
   const generatingRef = useRef(false);
+  const chapterContentsRef = useRef(chapterContents);
+  chapterContentsRef.current = chapterContents;
   const editorRef = useRef<EditorPanelHandle>(null);
 
   useEffect(() => {
@@ -81,8 +92,68 @@ export default function ContentStep({
   const chapterTarget = activeNode ? chapterCharTargets(outline, page, layout)[activeNode.id] : undefined;
   const chapterWritten = (chapterContents[activeId] || "").replace(/\s/g, "").length;
 
-  const startGenerate = async (chapterId: string) => {
+  const startGenerateAll = async () => {
     if (generatingRef.current) return;
+    if (!window.confirm(overwriteAll ? "将按目录重写全部章节，已有正文会被覆盖，确定继续？" : "将按目录补全还没有正文的章节，已有正文不动，确定开始？")) {
+      return;
+    }
+    generatingRef.current = true;
+    setBatchRunning(true);
+    setBatch({ total: 0, done: 0, items: [] });
+    let lastDone = -1;
+    const syncDraft = async (doneIds: string[]) => {
+      try {
+        const refreshed = await getOrCreateWriterDraft(projectId, docKind);
+        onOutlineChange(refreshed.outline);
+        const merged = { ...chapterContentsRef.current };
+        for (const id of doneIds) merged[id] = refreshed.chapterContents[id] ?? merged[id];
+        onChapterContentsChange(merged);
+      } catch {
+        /* 下一次进度更新会再刷新 */
+      }
+    };
+    try {
+      const job = await createGenerateAllJob(draftId, overwriteAll);
+      const finished = await pollWriterJobUntilDone(job.jobId, {
+        intervalMs: 2000,
+        timeoutMs: 6 * 60 * 60 * 1000,
+        onUpdate: (current) => {
+          const result = current.result;
+          if (!result) return;
+          setBatch(result);
+          const done = result.done ?? 0;
+          if (done !== lastDone) {
+            lastDone = done;
+            void syncDraft((result.items ?? []).filter((item) => item.status === "done").map((item) => item.id));
+          }
+        },
+      });
+      const result = finished.result;
+      if (result) setBatch(result);
+      const doneIds = (result?.items ?? []).filter((item) => item.status === "done").map((item) => item.id);
+      await syncDraft(doneIds);
+      const failed = result?.failed?.length ?? 0;
+      if (finished.status === "failed") {
+        showToast(finished.error || "全文生成失败，请稍后重试", "error");
+      } else if (failed > 0) {
+        setShowFailed(true);
+        showToast(`全文生成完成，${failed} 章失败，可单独重试`, "info");
+      } else {
+        showToast("全文生成完成");
+      }
+    } catch (err) {
+      showToast(err instanceof ApiError ? err.message : "全文生成任务失败，请检查网络后重试", "error");
+    } finally {
+      generatingRef.current = false;
+      setBatchRunning(false);
+    }
+  };
+
+  const startGenerate = async (chapterId: string) => {
+    if (generatingRef.current) {
+      if (batchRunning) showToast("全文生成进行中，请等它结束后再单独生成", "info");
+      return;
+    }
     const node = outline.find((c) => c.id === chapterId);
     if (!node) return;
     if (isSkipAiWrite(node)) {
@@ -102,13 +173,13 @@ export default function ContentStep({
 
     try {
       const job = await createChapterGenerateJob(draftId, chapterId);
-      const result = await pollWriterJobUntilDone(job.jobId, { intervalMs: 1500, timeoutMs: 3 * 60 * 1000 });
+      const result = await pollWriterJobUntilDone(job.jobId, { intervalMs: 1500, timeoutMs: 8 * 60 * 1000 });
       if (result.status === "failed") {
         showToast(result.error || "本章生成失败，请重试", "error");
         onOutlineChange(outline.map((c) => (c.id === chapterId ? { ...c, status: "待生成" } : c)));
         return;
       }
-      const refreshed = await getOrCreateWriterDraft(projectId);
+      const refreshed = await getOrCreateWriterDraft(projectId, docKind);
       onOutlineChange(refreshed.outline);
       onChapterContentsChange(refreshed.chapterContents);
       showToast(`「${node.title}」内容已由 AI 生成完成`);
@@ -175,7 +246,7 @@ export default function ContentStep({
           <i className="ri-edit-2-line text-base"></i>
         </span>
         <div>
-          <div className="font-heading text-sm font-semibold tracking-wide text-foreground-900">第四步 · 正文生成</div>
+          <div className="font-heading text-sm font-semibold tracking-wide text-foreground-900">第四步 · {docKindLabel}正文生成</div>
           <div className="text-xs text-foreground-500">按目录逐章 AI 撰写；承诺/授权/报价/偏差表等固定格式件带入招标书原文</div>
         </div>
         <div className="ml-auto flex items-center gap-2">
@@ -186,6 +257,24 @@ export default function ContentStep({
           >
             <i className="ri-arrow-left-s-line text-sm"></i>
             上一步
+          </button>
+          <label className="flex cursor-pointer items-center gap-1 text-xs text-foreground-600" title="勾选后已有正文的章节也会被覆盖重写">
+            <input
+              type="checkbox"
+              checked={overwriteAll}
+              disabled={batchRunning}
+              onChange={(e) => setOverwriteAll(e.target.checked)}
+            />
+            全部重写
+          </label>
+          <button
+            type="button"
+            onClick={startGenerateAll}
+            disabled={batchRunning || outline.length === 0}
+            className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-3 text-xs font-medium text-background-50 transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <i className={`${batchRunning ? "ri-loader-4-line animate-spin" : "ri-magic-line"} text-sm`}></i>
+            {batchRunning ? "全文生成中" : "生成全部章节"}
           </button>
           <div className="hidden items-center gap-4 text-xs text-foreground-500 md:flex">
             <span>
@@ -203,6 +292,72 @@ export default function ContentStep({
           </div>
         </div>
       </div>
+
+      {batch ? (
+        <div className="shrink-0 border-b border-background-300 bg-background-50 px-4 py-2 text-xs text-foreground-600">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="font-medium text-foreground-800">
+              全文生成 {batch.done ?? 0}/{batch.total ?? 0} 章
+            </span>
+            {batch.skipped ? <span className="text-foreground-500">跳过已有正文 {batch.skipped} 章</span> : null}
+            {(batch.items ?? []).find((item) => item.status === "running") ? (
+              <span className="truncate text-primary-600">
+                正在写：
+                {(batch.items ?? [])
+                  .filter((item) => item.status === "running")
+                  .map((item) => item.title)
+                  .join("、")}
+              </span>
+            ) : null}
+            {(batch.failed?.length ?? 0) > 0 ? (
+              <button
+                type="button"
+                onClick={() => setShowFailed((value) => !value)}
+                className="cursor-pointer text-red-600 hover:underline"
+              >
+                {batch.failed?.length} 章失败{showFailed ? "（收起）" : "（查看）"}
+              </button>
+            ) : null}
+            {!batchRunning ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setBatch(null);
+                  setShowFailed(false);
+                }}
+                className="ml-auto cursor-pointer text-foreground-400 hover:text-foreground-700"
+              >
+                关闭
+              </button>
+            ) : null}
+          </div>
+          <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-background-200">
+            <div
+              className="h-full rounded-full bg-primary-500 transition-all"
+              style={{ width: `${batch.total ? Math.min(100, Math.round(((batch.done ?? 0) / batch.total) * 100)) : 0}%` }}
+            />
+          </div>
+          {showFailed && (batch.failed?.length ?? 0) > 0 ? (
+            <ul className="mt-1.5 space-y-0.5 text-[11px] text-red-600">
+              {batch.failed?.map((item) => (
+                <li key={item.id} className="flex items-center gap-2">
+                  <span className="truncate">
+                    「{item.title}」{item.error ? `：${item.error}` : ""}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={batchRunning}
+                    onClick={() => void startGenerate(item.id)}
+                    className="shrink-0 cursor-pointer text-primary-600 hover:underline disabled:opacity-50"
+                  >
+                    重试
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* 三栏撰写工作区 */}
       <div className="flex min-h-0 flex-1 gap-3 p-3">
@@ -247,11 +402,17 @@ export default function ContentStep({
       <FloatingChat
         projectName={projectName}
         draftId={draftId}
-        chapterTitle={activeNode?.title}
-        chapterExcerpt={(chapterContents[activeId] || "").slice(0, 1200)}
+        chapterId={activeId}
+        onApplied={async () => {
+          try {
+            const refreshed = await getOrCreateWriterDraft(projectId, docKind);
+            onOutlineChange(refreshed.outline);
+            onChapterContentsChange(refreshed.chapterContents);
+          } catch {
+            /* 对话已经写回，刷新失败时下次进入正文仍会读到新内容 */
+          }
+        }}
       />
-
-      <Toast message={toast.message} type={toast.type} visible={toast.visible} />
     </div>
   );
 }

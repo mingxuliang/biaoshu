@@ -1,15 +1,18 @@
+import json
 import logging
 import os
+import time
 import urllib.parse
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from ..audit import actor_from_request, project_label, write_audit
 from ..auth import get_current_user
-from ..db import get_db
+from ..db import SessionLocal, get_db
 from ..engines import e_writer
 from ..engines.ark_image import ArkImageError, generate_and_save
 from ..engines.writer_diagram import DiagramError, create_diagram_png
@@ -23,12 +26,18 @@ from ..models import (
     Project,
     TenderDocument,
     User,
+    WriterChatFile,
+    WriterChatMessage,
     WriterDraft,
     WriterImage,
     WriterJob,
 )
 from ..permissions import PERM_WRITER, require_perm, require_project
+from ..writer_tracks import DOC_KINDS as _DOC_KINDS
+from ..writer_tracks import branch_legacy_draft as _branch_legacy_draft
+from ..writer_tracks import mirror_shared_fields as _mirror_shared_fields
 from ..schemas import (
+    GenerateAllChaptersIn,
     GenerateWriterImageIn,
     WriterDiagramIn,
     WriterDiagramOut,
@@ -38,13 +47,21 @@ from ..schemas import (
     SaveChapterContentIn,
     TenderParagraphOut,
     UpdateWriterDraftIn,
+    WriterChatFileOut,
     WriterChatIn,
     WriterChatOut,
+    WriterChatMessageOut,
     WriterDraftOut,
     WriterImageOut,
     WriterJobOut,
 )
-from ..tasks import run_chapter_generate_task, run_outline_generate_task, run_product_match_task
+from ..tasks import (
+    run_batch_generate_task,
+    run_chapter_generate_task,
+    run_outline_generate_task,
+    run_product_match_task,
+    run_writer_chat_task,
+)
 
 router = APIRouter(prefix="/api", tags=["writer"])
 logger = logging.getLogger(__name__)
@@ -54,6 +71,7 @@ def _draft_to_out(draft: WriterDraft) -> WriterDraftOut:
     return WriterDraftOut(
         id=draft.id,
         projectId=draft.project_id,
+        docKind=draft.doc_kind or "tech",
         modelId=draft.model_id,
         selectedKnowledge=draft.selected_knowledge_json or [],
         selectedProductLibraryId=draft.selected_product_library_id,
@@ -67,7 +85,29 @@ def _draft_to_out(draft: WriterDraft) -> WriterDraftOut:
 
 
 def _job_to_out(job: WriterJob) -> WriterJobOut:
-    return WriterJobOut(jobId=job.id, kind=job.kind, chapterId=job.chapter_id, status=job.status, error=job.error)
+    raw = job.result_json if isinstance(job.result_json, dict) else None
+    result = None
+    if job.kind == "chat":
+        reply = str((raw or {}).get("reply") or "")
+        trace = (raw or {}).get("trace") or []
+        if reply or trace:
+            result = {
+                "reply": reply,
+                "edits": (raw or {}).get("edits") or [],
+                "hasChecklist": bool((raw or {}).get("hasChecklist")),
+                "engine": (raw or {}).get("engine") or "AgentScope",
+                "trace": trace,
+            }
+    elif raw:
+        result = raw
+    return WriterJobOut(
+        jobId=job.id,
+        kind=job.kind,
+        chapterId=job.chapter_id,
+        status=job.status,
+        error=job.error,
+        result=result,
+    )
 
 
 def _require_writer_draft(db: Session, user: User, draft_id: str) -> WriterDraft:
@@ -165,17 +205,30 @@ def _ensure_tender_layout(db: Session, draft: WriterDraft) -> None:
 
 @router.get("/projects/{project_id}/writer-draft", response_model=WriterDraftOut)
 def get_or_create_writer_draft(
-    project_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    project_id: str,
+    doc_kind: str = Query("tech"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> WriterDraftOut:
     require_project(db, current_user, project_id, PERM_WRITER)
-    draft = db.query(WriterDraft).filter(WriterDraft.project_id == project_id).first()
-    if not draft:
-        draft = WriterDraft(project_id=project_id)
-        db.add(draft)
-        db.commit()
-        db.refresh(draft)
-    else:
+    wanted = doc_kind if doc_kind in _DOC_KINDS else "tech"
+    draft = (
+        db.query(WriterDraft)
+        .filter(WriterDraft.project_id == project_id, WriterDraft.doc_kind == wanted)
+        .first()
+    )
+    if draft:
         _backfill_business_originals(db, draft)
+    else:
+        legacy = db.query(WriterDraft).filter(WriterDraft.project_id == project_id).order_by(WriterDraft.created_at.asc()).first()
+        if legacy is None:
+            draft = WriterDraft(project_id=project_id, doc_kind=wanted)
+            db.add(draft)
+            db.commit()
+            db.refresh(draft)
+        else:
+            draft = _branch_legacy_draft(db, legacy, wanted)
+            _backfill_business_originals(db, draft)
     _ensure_tender_layout(db, draft)
     return _draft_to_out(draft)
 
@@ -226,6 +279,7 @@ def update_writer_draft(
 
     db.commit()
     db.refresh(draft)
+    _mirror_shared_fields(db, draft, data)
     return _draft_to_out(draft)
 
 
@@ -235,7 +289,7 @@ def create_outline_job(
 ) -> WriterJobOut:
     _require_writer_draft(db, current_user, draft_id)
 
-    job = WriterJob(draft_id=draft_id, kind="outline", status="queued")
+    job = WriterJob(draft_id=draft_id, kind="outline", status="queued", user_id=current_user.id)
     db.add(job)
     db.commit()
     db.refresh(job)
@@ -256,7 +310,7 @@ def create_product_match_job(
         raise HTTPException(400, "请先在标书设置中选择产品功能库")
     if not (draft.outline_json or []):
         raise HTTPException(400, "请先生成应标目录")
-    job = WriterJob(draft_id=draft_id, kind="product-match", status="queued")
+    job = WriterJob(draft_id=draft_id, kind="product-match", status="queued", user_id=current_user.id)
     db.add(job)
     db.commit()
     db.refresh(job)
@@ -272,7 +326,53 @@ def get_writer_job_status(
     if not job:
         raise HTTPException(404, "任务不存在")
     _require_writer_draft(db, current_user, job.draft_id)
+    if job.kind == "chat" and job.user_id and job.user_id != current_user.id:
+        raise HTTPException(404, "任务不存在")
     return _job_to_out(job)
+
+
+@router.get("/writer-jobs/{job_id}/events")
+def stream_writer_job_events(
+    job_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+) -> StreamingResponse:
+    job = db.get(WriterJob, job_id)
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    _require_writer_draft(db, current_user, job.draft_id)
+    if job.kind == "chat" and job.user_id and job.user_id != current_user.id:
+        raise HTTPException(404, "任务不存在")
+
+    def events():
+        last = ""
+        deadline = time.time() + 600
+        while time.time() < deadline:
+            session = SessionLocal()
+            try:
+                row = session.get(WriterJob, job_id)
+                if row is None:
+                    yield 'data: {"status":"failed","error":"任务不存在"}\n\n'
+                    return
+                payload = _job_to_out(row).model_dump(mode="json")
+            finally:
+                session.close()
+            blob = json.dumps(payload, ensure_ascii=False)
+            if blob != last:
+                last = blob
+                yield f"data: {blob}\n\n"
+            if payload.get("status") in ("done", "failed"):
+                return
+            time.sleep(0.25)
+        yield 'data: {"status":"failed","error":"生成任务超时，请稍后重试"}\n\n'
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post(
@@ -290,13 +390,61 @@ def create_chapter_generate_job(
     if not any(n.get("id") == chapter_id for n in outline):
         raise HTTPException(404, "章节不存在，可能已被删除")
 
-    job = WriterJob(draft_id=draft_id, kind="chapter", chapter_id=chapter_id, status="queued")
+    job = WriterJob(
+        draft_id=draft_id,
+        kind="chapter",
+        chapter_id=chapter_id,
+        status="queued",
+        user_id=current_user.id,
+    )
     db.add(job)
     db.commit()
     db.refresh(job)
 
     run_chapter_generate_task.delay(job.id)
 
+    return _job_to_out(job)
+
+
+@router.get("/writer-layout-presets")
+def list_writer_layout_presets(current_user: User = Depends(get_current_user)) -> dict:
+    """Word 排版预设模板，设置页选模板时取回整套字段。"""
+    require_perm(current_user, PERM_WRITER)
+    from ..engines.writer_layout import PRESETS
+
+    return {"presets": PRESETS}
+
+
+@router.post("/writer-drafts/{draft_id}/generate-all-jobs", response_model=WriterJobOut)
+def create_generate_all_job(
+    draft_id: str,
+    payload: GenerateAllChaptersIn | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> WriterJobOut:
+    """按目录一次生成全部章节。默认只补还没有正文的章节，overwrite=true 全部重写。"""
+    draft = _require_writer_draft(db, current_user, draft_id)
+    if not (draft.outline_json or []):
+        raise HTTPException(400, "请先生成应标目录")
+    running = (
+        db.query(WriterJob)
+        .filter(WriterJob.draft_id == draft_id, WriterJob.kind == "batch", WriterJob.status.in_(["queued", "running"]))
+        .order_by(WriterJob.created_at.desc())
+        .first()
+    )
+    if running is not None and running.created_at and (datetime.utcnow() - running.created_at).total_seconds() < 7200:
+        raise HTTPException(409, "已有一个全文生成任务在进行，请等它结束")
+    job = WriterJob(
+        draft_id=draft_id,
+        kind="batch",
+        status="queued",
+        user_id=current_user.id,
+        result_json={"overwrite": bool(payload.overwrite) if payload else False},
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    run_batch_generate_task.delay(job.id)
     return _job_to_out(job)
 
 
@@ -569,6 +717,136 @@ def optimize_writer_image_prompt(
     return OptimizeImagePromptOut(prompt=e_writer.optimize_image_prompt(payload.prompt, payload.mode))
 
 
+@router.get("/writer-drafts/{draft_id}/chat-messages", response_model=list[WriterChatMessageOut])
+def list_writer_chat_messages(
+    draft_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[WriterChatMessageOut]:
+    _require_writer_draft(db, current_user, draft_id)
+    rows = (
+        db.query(WriterChatMessage)
+        .filter(WriterChatMessage.draft_id == draft_id, WriterChatMessage.user_id == current_user.id)
+        .order_by(WriterChatMessage.created_at.asc())
+        .limit(50)
+        .all()
+    )
+    return [
+        WriterChatMessageOut(
+            id=row.id,
+            role=row.role if row.role in ("user", "assistant") else "assistant",
+            content=row.content or "",
+            edits=row.edits_json or [],
+            trace=row.trace_json or [],
+            files=row.files_json or [],
+        )
+        for row in rows
+    ]
+
+
+@router.delete("/writer-drafts/{draft_id}/chat-messages")
+def clear_writer_chat_messages(
+    draft_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    _require_writer_draft(db, current_user, draft_id)
+    (
+        db.query(WriterChatMessage)
+        .filter(WriterChatMessage.draft_id == draft_id, WriterChatMessage.user_id == current_user.id)
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return {"ok": True}
+
+
+CHAT_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+CHAT_FILE_EXTS = {".docx", ".pdf", ".txt", ".md"} | CHAT_IMAGE_EXTS
+CHAT_FILE_MAX_BYTES = 20 * 1024 * 1024
+CHAT_FILE_MAX_COUNT = 3
+CHAT_FILE_DEFAULT_MESSAGE = "请阅读附件，并说明要如何修改当前标书"
+CHAT_IMAGE_TYPES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+
+
+def _chat_file_kind(filename: str) -> str:
+    return "image" if os.path.splitext(filename or "")[1].lower() in CHAT_IMAGE_EXTS else "file"
+
+
+def _chat_file_out(draft_id: str, row: WriterChatFile) -> WriterChatFileOut:
+    return WriterChatFileOut(
+        id=row.id,
+        filename=row.filename,
+        kind=_chat_file_kind(row.filename),
+        url=f"/api/writer-drafts/{draft_id}/chat-files/{row.id}",
+    )
+
+
+def _chat_filename(raw: str, content_type: str = "") -> tuple[str, str]:
+    name = os.path.basename((raw or "").replace("\\", "/")).strip() or "附件"
+    ext = os.path.splitext(name)[1].lower()
+    if not ext:
+        ext = CHAT_IMAGE_TYPES.get((content_type or "").split(";")[0].strip().lower(), "")
+        if ext:
+            name = f"{name}{ext}"
+    if ext not in CHAT_FILE_EXTS:
+        raise HTTPException(400, "只支持 Word、PDF、TXT、Markdown 和图片（PNG/JPG/WebP/GIF）")
+    return name[:180], ext
+
+
+@router.post("/writer-drafts/{draft_id}/chat-files", response_model=WriterChatFileOut)
+def upload_writer_chat_file(
+    draft_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> WriterChatFileOut:
+    draft = _require_writer_draft(db, current_user, draft_id)
+    filename, ext = _chat_filename(file.filename or "", file.content_type or "")
+    content = file.file.read()
+    if not content:
+        raise HTTPException(400, "不能上传空文件")
+    if len(content) > CHAT_FILE_MAX_BYTES:
+        raise HTTPException(400, "附件不能超过 20MB")
+    key = storage.put_bytes(f"writer-chat/{current_user.id}/{draft.id}", content, ext)
+    row = WriterChatFile(
+        user_id=current_user.id,
+        draft_id=draft.id,
+        filename=filename,
+        storage_path=key,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return _chat_file_out(draft.id, row)
+
+
+@router.get("/writer-drafts/{draft_id}/chat-files/{file_id}")
+def get_writer_chat_file(
+    draft_id: str,
+    file_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    _require_writer_draft(db, current_user, draft_id)
+    row = db.get(WriterChatFile, file_id)
+    if row is None or row.user_id != current_user.id or row.draft_id != draft_id:
+        raise HTTPException(404, "附件不存在")
+    if not storage.exists(row.storage_path):
+        raise HTTPException(404, "附件不存在")
+    media = storage.media_type_of(row.filename)
+    inline = _chat_file_kind(row.filename) == "image"
+    try:
+        return storage.http_response(row.storage_path, filename=row.filename, media_type=media, inline=inline)
+    except FileNotFoundError:
+        raise HTTPException(404, "附件不存在")
+
+
 @router.post("/writer-drafts/{draft_id}/chat", response_model=WriterChatOut)
 def writer_chat(
     draft_id: str,
@@ -578,42 +856,46 @@ def writer_chat(
 ) -> WriterChatOut:
     draft = _require_writer_draft(db, current_user, draft_id)
     message = (payload.message or "").strip()
+    file_ids = [item for item in (payload.fileIds or []) if item]
+    if len(file_ids) > CHAT_FILE_MAX_COUNT:
+        raise HTTPException(400, "一次最多附带 3 个文件")
+    files = []
+    for file_id in file_ids:
+        attached = db.get(WriterChatFile, file_id)
+        if attached is None or attached.user_id != current_user.id or attached.draft_id != draft.id:
+            raise HTTPException(404, "附件不存在")
+        files.append(attached)
+    if not message and files:
+        message = "请查看图片，并说明要如何修改当前标书" if all(_chat_file_kind(item.filename) == "image" for item in files) else CHAT_FILE_DEFAULT_MESSAGE
     if not message:
         raise HTTPException(400, "请输入问题")
+    if payload.chapterId and not any(
+        isinstance(node, dict) and node.get("id") == payload.chapterId for node in (draft.outline_json or [])
+    ):
+        raise HTTPException(404, "章节不存在，可能已被删除")
 
-    project = db.get(Project, draft.project_id)
-    project_name = project.name if project else ""
-
-    checklist = (
-        db.query(EvaluationChecklist)
-        .filter(EvaluationChecklist.project_id == draft.project_id, EvaluationChecklist.status == "done")
-        .order_by(EvaluationChecklist.locked.desc(), EvaluationChecklist.version.desc())
-        .first()
+    row = WriterChatMessage(
+        user_id=current_user.id,
+        draft_id=draft.id,
+        role="user",
+        content=message[:4000],
+        files_json=[
+            {"id": item.id, "filename": item.filename, "kind": _chat_file_kind(item.filename), "url": f"/api/writer-drafts/{draft.id}/chat-files/{item.id}"}
+            for item in files
+        ],
     )
-    data = (checklist.checklist_json or {}) if checklist else {}
-    score_rules = data.get("scoreRules") or []
-    must_respond = data.get("mustRespond") or []
-    if not isinstance(score_rules, list):
-        score_rules = []
-    if not isinstance(must_respond, list):
-        must_respond = []
-
-    outline_titles = []
-    for node in draft.outline_json or []:
-        if isinstance(node, dict) and node.get("title"):
-            num = node.get("num") or ""
-            outline_titles.append(f"{num} {node['title']}".strip())
-
-    history = [{"role": m.role, "content": m.content} for m in payload.history]
-    reply = e_writer.chat_assist(
-        message,
-        history,
-        project_name,
-        score_rules,
-        must_respond,
-        outline_titles,
-        payload.chapterTitle or "",
-        payload.chapterExcerpt or "",
-        draft.model_id,
+    db.add(row)
+    db.flush()
+    job = WriterJob(
+        draft_id=draft.id,
+        kind="chat",
+        chapter_id=payload.chapterId,
+        status="queued",
+        user_id=current_user.id,
+        result_json={"messageId": row.id, "fileIds": [item.id for item in files]},
     )
-    return WriterChatOut(reply=reply, hasChecklist=bool(score_rules or must_respond))
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    run_writer_chat_task.delay(job.id)
+    return WriterChatOut(jobId=job.id)

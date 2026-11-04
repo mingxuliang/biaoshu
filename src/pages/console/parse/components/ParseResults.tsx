@@ -207,6 +207,24 @@ function alignedLineItems(sec: ParseSection, cols: readonly string[], field: "co
   return rows;
 }
 
+function ResponseField({ title, text, note }: { title: string; text: string; note?: string }) {
+  return (
+    <section className="space-y-3">
+      <h3 className="text-sm font-semibold text-foreground-900">{title}</h3>
+      {text ? (
+        <pre className="whitespace-pre-wrap rounded-lg border border-background-200 bg-background-50 px-3 py-3 text-[13px] leading-6 text-foreground-800">
+          {text}
+        </pre>
+      ) : (
+        <div className="rounded-lg border border-dashed border-background-300 bg-background-50 px-3 py-8 text-center text-sm text-foreground-500">
+          当前解析结果还没有这段内容。请点击「重新解析文件包」，解析完成后这里会显示{title}。
+          {note ? <div className="mt-2 text-xs text-foreground-400">{note}</div> : null}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function SectionFields({ sec, onLocate }: { sec: ParseSection; onLocate?: (target: LocateTarget) => void }) {
   if (hasCols(sec, COMPOSE_COLS)) {
     return (
@@ -427,6 +445,11 @@ const DIM_ICONS: Record<string, string> = {
   quantity: "ri-file-list-3-line",
 };
 
+const RESPONSE_TABS = [
+  { key: "business-bid-response", label: "商务标应答", field: "businessBidResponse" as const },
+  { key: "tech-bid-response", label: "技术标应答需求", field: "techBidResponseRequirements" as const },
+];
+
 export default function ParseResults({
   checklist,
   parsing,
@@ -444,7 +467,8 @@ export default function ParseResults({
   const [activeItemId, setActiveItemId] = useState("");
   const jumpedFor = useRef("");
 
-  const currentDim = dimensions.find((d) => d.key === activeKey) ?? dimensions[0];
+  const responseTab = RESPONSE_TABS.find((tab) => tab.key === activeKey);
+  const currentDim = responseTab ? undefined : dimensions.find((d) => d.key === activeKey) ?? dimensions[0];
   const currentItem = currentDim?.items.find((i) => i.id === activeItemId) ?? currentDim?.items[0];
 
   const hasChecklist = !!checklist && checklist.status === "done";
@@ -474,7 +498,7 @@ export default function ParseResults({
       <div className="shrink-0 border-b border-background-300 bg-background-50 px-3 py-2">
         <div className="flex gap-1.5 overflow-x-auto pb-1 scrollbar-thin">
           {dimensions.map((dim) => {
-            const isActive = dim.key === (currentDim?.key ?? "");
+            const isActive = dim.key === activeKey;
             return (
               <button
                 key={dim.key}
@@ -489,6 +513,24 @@ export default function ParseResults({
                 <i className={`${DIM_ICONS[dim.key] || "ri-bookmark-line"} text-sm`}></i>
                 {dim.label}
                 {dim.completed && <i className={`ri-checkbox-circle-fill text-xs ${isActive ? "text-background-50" : "text-secondary-500"}`}></i>}
+              </button>
+            );
+          })}
+          {RESPONSE_TABS.map((tab) => {
+            const isActive = activeKey === tab.key;
+            return (
+              <button
+                key={tab.key}
+                type="button"
+                onClick={() => setActiveKey(tab.key)}
+                className={`flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-medium transition-all ${
+                  isActive
+                    ? "bg-primary-500 text-background-50"
+                    : "border border-background-300 bg-background-50 text-foreground-600 hover:bg-background-200"
+                }`}
+              >
+                <i className={`${tab.key === "business-bid-response" ? "ri-briefcase-line" : "ri-file-list-3-line"} text-sm`}></i>
+                {tab.label}
               </button>
             );
           })}
@@ -516,13 +558,13 @@ export default function ParseResults({
             })}
           </div>
         )}
-      </div>
+        </div>
 
       <div className="shrink-0 flex items-center gap-2 border-b border-background-200/60 bg-background-50/60 px-4 py-2">
         <span className="flex h-5 w-5 items-center justify-center rounded bg-secondary-100 text-[10px] font-bold text-secondary-600">AI</span>
         <span className="text-[11px] text-foreground-500">
           页面展示提炼后的招标要求，便于快速扫读；招标原文另行保存。点击条目可定位左侧对应条款。锁定评标尺子时使用原文。
-        </span>
+              </span>
         {checklist && (
           <span
             className={`font-label ml-auto shrink-0 rounded px-1.5 py-0.5 text-[10px] ${
@@ -530,21 +572,27 @@ export default function ParseResults({
             }`}
           >
             {checklist.locked ? `已锁定 v${checklist.version}` : `草稿 v${checklist.version}`}
-          </span>
+              </span>
         )}
-      </div>
+            </div>
 
       <div className="min-h-0 flex-1 overflow-auto px-4 py-4">
         {parsing && (
           <div className="mb-3 flex items-center gap-2 rounded-md border border-primary-100 bg-primary-50/60 px-3 py-2 text-xs text-primary-700">
             <i className="ri-loader-4-line animate-spin"></i>
             AI 正在按固定指标逐项抽取，并提取施工图纸中的设计说明，请稍候…
-          </div>
+                </div>
         )}
         {checklist?.error && (
           <div className="mb-3 rounded-md border border-accent-200 bg-accent-50 px-3 py-2 text-xs text-accent-700">{checklist.error}</div>
         )}
-        {currentItem ? (
+        {responseTab ? (
+          <ResponseField
+            title={responseTab.label}
+            text={(checklist?.[responseTab.field] || "").trim()}
+            note={checklist?.extractStats?.bidRequirementNote}
+          />
+        ) : currentItem ? (
           <div className="space-y-4">
             <ContractTechNote itemId={currentItem.id} />
             {currentItem.sections.map((sec) => (
@@ -558,21 +606,21 @@ export default function ParseResults({
 
       <div className="shrink-0 flex items-center justify-between border-t border-background-300 bg-background-50 px-4 py-3">
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={onShare}
+        <button
+          type="button"
+          onClick={onShare}
+          className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-background-300 px-3 text-xs font-medium text-foreground-600 transition-colors hover:bg-background-200"
+        >
+          <i className="ri-share-forward-line text-sm"></i>
+          分享解读结果
+        </button>
+        <button
+          type="button"
+          onClick={onDownload}
             className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-background-300 px-3 text-xs font-medium text-foreground-600 transition-colors hover:bg-background-200"
-          >
-            <i className="ri-share-forward-line text-sm"></i>
-            分享解读结果
-          </button>
-          <button
-            type="button"
-            onClick={onDownload}
-            className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-background-300 px-3 text-xs font-medium text-foreground-600 transition-colors hover:bg-background-200"
-          >
-            <i className="ri-download-2-line text-sm"></i>
-            下载解读结果
+        >
+          <i className="ri-download-2-line text-sm"></i>
+          下载解读结果
           </button>
           <span className="hidden text-[11px] text-foreground-400 sm:inline">
             已填 {filled}/{total} 项

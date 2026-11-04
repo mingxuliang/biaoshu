@@ -93,6 +93,27 @@ def ensure_schema() -> None:
         conn.execute(
             text("ALTER TABLE review_runs ADD COLUMN IF NOT EXISTS standard_review_json JSON DEFAULT '{}'::json")
         )
+        conn.execute(text("ALTER TABLE writer_jobs ADD COLUMN IF NOT EXISTS user_id VARCHAR"))
+        conn.execute(text("ALTER TABLE writer_jobs ADD COLUMN IF NOT EXISTS result_json JSON DEFAULT '{}'::json"))
+        conn.execute(text("UPDATE writer_jobs SET result_json = '{}'::json WHERE result_json IS NULL"))
+        conn.execute(
+            text("ALTER TABLE writer_chat_messages ADD COLUMN IF NOT EXISTS trace_json JSON DEFAULT '[]'::json")
+        )
+        conn.execute(
+            text("ALTER TABLE writer_chat_messages ADD COLUMN IF NOT EXISTS files_json JSON DEFAULT '[]'::json")
+        )
+        conn.execute(text("ALTER TABLE writer_drafts ADD COLUMN IF NOT EXISTS doc_kind VARCHAR DEFAULT 'tech'"))
+        conn.execute(text("UPDATE writer_drafts SET doc_kind = 'tech' WHERE doc_kind IS NULL OR doc_kind = ''"))
+        conn.execute(text("ALTER TABLE writer_drafts DROP CONSTRAINT IF EXISTS writer_drafts_project_id_key"))
+        conn.execute(text("DROP INDEX IF EXISTS writer_drafts_project_id_key"))
+        conn.execute(text("DROP INDEX IF EXISTS ix_writer_drafts_project_id"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_writer_drafts_project_id ON writer_drafts (project_id)"))
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_writer_drafts_project_doc_kind "
+                "ON writer_drafts (project_id, doc_kind)"
+            )
+        )
 
 
 def get_db():

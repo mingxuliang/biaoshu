@@ -16,3 +16,4 @@ jieba>=0.42.1,<1.0
 pymupdf>=1.24,<2.0
 pytesseract>=0.3.13,<1.0
 minio>=7.2,<8.0
+agentscope>=2.0,<3.0

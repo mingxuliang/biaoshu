@@ -14,9 +14,13 @@ import os
 import re
 
 import docx
+from docx.enum.section import WD_ORIENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, Inches, RGBColor
+
+from .writer_layout import font_size_pt, resolve_text
 
 _INLINE_SPLIT_RE = re.compile(r"(\*\*.+?\*\*|__.+?__|\*.+?\*)")
 _FONT_WRAP_RE = re.compile(r"\{\{([^|:{}]+)[:|]([^}]+)\}\}(.*?)\{\{/\}\}", re.S)
@@ -25,6 +29,7 @@ _BULLET_RE = re.compile(r"^[-*]\s+")
 _NUMBERED_RE = re.compile(r"^\d+[）.)\]].*")
 _CN_NUMBERED_RE = re.compile(r"^（[一二三四五六七八九十]+）")
 _IMAGE_MD_RE = re.compile(r"^!\[([^\]]*)\]\((/api/writer-images/([^/]+)/file)\)$")
+_CAPTION_RE = re.compile(r"^(图|表)\s*[：:]\s*(.+)$")
 _TABLE_SEP_RE = re.compile(r"^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$")
 
 
@@ -161,7 +166,7 @@ def _fill_cell(cell, text: str) -> None:
         _add_runs_with_inline_styles(p, part)
 
 
-def _add_markdown_table(document, rows: list[list[str]]) -> None:
+def _add_markdown_table(document, rows: list[list[str]], layout: dict | None = None) -> None:
     if not rows:
         return
     parsed = [[_parse_cell(c) for c in row] for row in rows]
@@ -189,6 +194,7 @@ def _add_markdown_table(document, rows: list[list[str]]) -> None:
                 for cc in range(c, min(c + cs, cols)):
                     occupied[rr][cc] = True
             c += cs
+    _style_table(table, layout)
 
 
 def render_markdown_block(
@@ -201,13 +207,24 @@ def render_markdown_block(
         document.add_paragraph("")
         return
 
+    caption = _CAPTION_RE.match(trimmed)
+    if caption and align == WD_ALIGN_PARAGRAPH.CENTER:
+        _add_caption(document, caption.group(1), caption.group(2).strip(), layout)
+        return
+
     img_match = _IMAGE_MD_RE.match(trimmed)
     if img_match:
         image_id = img_match.group(3)
         path = (image_paths or {}).get(image_id)
         if path and os.path.exists(path):
             try:
-                document.add_picture(path, width=Inches(5.4))
+                section = document.sections[0]
+                usable = section.page_width - section.left_margin - section.right_margin
+                document.add_picture(path, width=min(Inches(5.4), usable))
+                pic = document.paragraphs[-1]
+                pic.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                pic.paragraph_format.first_line_indent = Pt(0)
+                pic.paragraph_format.keep_with_next = True
             except Exception:  # noqa: BLE001 —— 坏图不阻断整份导出
                 document.add_paragraph(f"[图片无法嵌入：{img_match.group(1) or image_id}]")
         else:
@@ -216,13 +233,13 @@ def render_markdown_block(
 
     if trimmed.startswith("### "):
         p = document.add_heading(_unwrap_inline(trimmed[4:]), level=3)
-        _restyle_heading(p, layout)
+        _restyle_heading(p, layout, 3)
         if align is not None:
             p.alignment = align
         return
     if trimmed.startswith("## "):
         p = document.add_heading(_unwrap_inline(trimmed[3:]), level=2)
-        _restyle_heading(p, layout)
+        _restyle_heading(p, layout, 2)
         if align is not None:
             p.alignment = align
         return
@@ -256,12 +273,17 @@ def _node_level(outline: list[dict], node_id: str, _depth: int = 0) -> int:
     return _node_level(outline, node["parentId"], _depth + 1)
 
 
-_FONT_PT = {"小五": 9, "五号": 10.5, "小四": 12, "四号": 14, "小三": 15, "三号": 16, "小二": 18}
 _LINE_SPACING = {
     "1.5倍行距": 1.5,
     "2倍行距": 2.0,
     "固定值28磅": 28,
     "固定值30磅": 30,
+}
+_ALIGN = {
+    "left": WD_ALIGN_PARAGRAPH.LEFT,
+    "center": WD_ALIGN_PARAGRAPH.CENTER,
+    "right": WD_ALIGN_PARAGRAPH.RIGHT,
+    "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
 }
 
 
@@ -273,52 +295,92 @@ def _unwrap_inline(text: str) -> str:
     return t.strip()
 
 
-def _set_style_font(style, name: str, size_pt: float) -> None:
+def _set_style_font(style, name: str, size_pt: float, latin: str | None = None) -> None:
+    """中文用 name，英文数字用 latin（没给就和中文一致）。"""
     font = style.font
-    font.name = name
+    font.name = latin or name
     font.size = Pt(size_pt)
     rPr = style.element.get_or_add_rPr()
     rFonts = rPr.get_or_add_rFonts()
-    rFonts.set(qn("w:ascii"), name)
-    rFonts.set(qn("w:hAnsi"), name)
+    rFonts.set(qn("w:ascii"), latin or name)
+    rFonts.set(qn("w:hAnsi"), latin or name)
     rFonts.set(qn("w:eastAsia"), name)
-    rFonts.set(qn("w:cs"), name)
+    rFonts.set(qn("w:cs"), latin or name)
 
 
 def _layout_body_pt(layout: dict | None) -> float:
     if not layout:
         return 12.0
+    for key in ("bodySizePt", "fontSize"):
+        pt = font_size_pt(layout.get(key))
+        if pt:
+            return float(pt)
+    return 12.0
+
+
+def _heading_spec(layout: dict | None, level: int) -> dict:
+    """某一级标题的最终样式：headings.hN 优先，其次旧版统一标题字段，最后正文。"""
+    data = layout or {}
+    body_pt = _layout_body_pt(data)
+    spec = {
+        "font": str(data.get("headingFont") or data.get("bodyFont") or "宋体"),
+        "sizePt": body_pt,
+        "bold": bool(data.get("headingBold", True)),
+        "align": None,
+        "spaceBefore": None,
+        "spaceAfter": None,
+        "color": None,
+    }
     try:
-        if layout.get("bodySizePt") is not None:
-            return float(layout["bodySizePt"])
+        if data.get("headingSizePt"):
+            spec["sizePt"] = float(data["headingSizePt"])
     except (TypeError, ValueError):
         pass
-    return float(_FONT_PT.get(str(layout.get("fontSize") or ""), 12))
+    custom = (data.get("headings") or {}).get(f"h{level}") if isinstance(data.get("headings"), dict) else None
+    if isinstance(custom, dict):
+        for key, value in custom.items():
+            if value is not None and value != "":
+                spec[key] = value
+    return spec
 
 
-def _restyle_heading(paragraph, layout: dict | None) -> None:
+def _rgb(hex_text: str | None) -> RGBColor:
+    if hex_text and re.match(r"^[0-9A-Fa-f]{6}$", str(hex_text)):
+        return RGBColor.from_string(str(hex_text).upper())
+    return RGBColor(0, 0, 0)
+
+
+def _restyle_heading(paragraph, layout: dict | None, level: int = 2) -> None:
     if not layout:
         return
-    hfont = str(layout.get("headingFont") or layout.get("bodyFont") or "宋体")
-    try:
-        hpt = float(layout.get("headingSizePt") or _layout_body_pt(layout))
-    except (TypeError, ValueError):
-        hpt = _layout_body_pt(layout)
-    hbold = bool(layout.get("headingBold", True))
+    spec = _heading_spec(layout, level)
     paragraph.paragraph_format.first_line_indent = Pt(0)
+    if spec.get("align") in _ALIGN:
+        paragraph.alignment = _ALIGN[spec["align"]]
     for run in paragraph.runs:
-        _set_run_font(run, hfont, f"{hpt:g}pt")
-        run.bold = hbold
-        run.font.color.rgb = RGBColor(0, 0, 0)
+        _set_run_font(run, spec["font"], f"{float(spec['sizePt']):g}pt")
+        run.bold = bool(spec["bold"])
+        run.font.color.rgb = _rgb(spec.get("color"))
+
+
+def _indent_pt(layout: dict | None) -> float:
+    if not layout:
+        return 0.0
+    try:
+        points = float(layout.get("indentPt") or 0)
+    except (TypeError, ValueError):
+        points = 0.0
+    if points < 8:
+        try:
+            chars = float(layout.get("indentChars") or 0)
+        except (TypeError, ValueError):
+            chars = 0.0
+        points = chars * _layout_body_pt(layout)
+    return points
 
 
 def _apply_body_indent(paragraph, text: str, layout: dict | None) -> None:
-    if not layout:
-        return
-    try:
-        indent_pt = float(layout.get("indentPt") or 0)
-    except (TypeError, ValueError):
-        return
+    indent_pt = _indent_pt(layout)
     if indent_pt < 8:
         return
     stripped = (text or "").lstrip()
@@ -327,10 +389,175 @@ def _apply_body_indent(paragraph, text: str, layout: dict | None) -> None:
     paragraph.paragraph_format.first_line_indent = Pt(indent_pt)
 
 
-def _apply_layout(document, layout: dict | None) -> None:
+def _add_field(paragraph, instruction: str, placeholder: str = "1", font: str | None = None, size: str | None = None):
+    """插入 Word 域（PAGE、NUMPAGES、SEQ、TOC）。打开 Word 后会按实际值刷新。"""
+    runs = []
+
+    def part(kind: str, text: str = ""):
+        run = paragraph.add_run()
+        if kind in ("begin", "separate", "end"):
+            node = OxmlElement("w:fldChar")
+            node.set(qn("w:fldCharType"), kind)
+            run._r.append(node)
+        elif kind == "instr":
+            node = OxmlElement("w:instrText")
+            node.set(qn("xml:space"), "preserve")
+            node.text = f" {text} "
+            run._r.append(node)
+        else:
+            run.text = text
+        _set_run_font(run, font, size)
+        runs.append(run)
+
+    part("begin")
+    part("instr", instruction)
+    part("separate")
+    part("text", placeholder)
+    part("end")
+    return runs
+
+
+def _shade(cell, fill: str) -> None:
+    tc_pr = cell._tc.get_or_add_tcPr()
+    for old in tc_pr.findall(qn("w:shd")):
+        tc_pr.remove(old)
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), fill)
+    tc_pr.append(shd)
+
+
+def _style_table(table, layout: dict | None) -> None:
+    """表头底色、表内字号、居中。没有排版配置时保持原样。"""
+    cfg = (layout or {}).get("table") if isinstance((layout or {}).get("table"), dict) else None
+    if not cfg:
+        return
+    table.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    size = cfg.get("fontSizePt")
+    fill = cfg.get("headerFill")
+    bold = bool(cfg.get("headerBold", True))
+    for r, row in enumerate(table.rows):
+        for cell in row.cells:
+            if r == 0 and fill:
+                _shade(cell, str(fill))
+            for p in cell.paragraphs:
+                p.paragraph_format.first_line_indent = Pt(0)
+                if r == 0:
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                for run in p.runs:
+                    if size:
+                        run.font.size = Pt(float(size))
+                    if r == 0 and bold:
+                        run.bold = True
+
+
+def _add_caption(document, kind: str, text: str, layout: dict | None) -> None:
+    """图注/表注：'图 N 说明'，N 用 SEQ 域自动编号，Word 里改顺序后可更新域。"""
+    cfg = (layout or {}).get("caption") if isinstance((layout or {}).get("caption"), dict) else {}
+    font = cfg.get("font") or None
+    size = f"{float(cfg['sizePt']):g}pt" if cfg.get("sizePt") else None
+    try:
+        p = document.add_paragraph(style="Caption")
+    except KeyError:
+        p = document.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.paragraph_format.first_line_indent = Pt(0)
+    label = p.add_run(f"{kind} ")
+    _set_run_font(label, font, size)
+    _add_field(p, f"SEQ {kind} \\* ARABIC", "1", font, size)
+    body = p.add_run(f" {text}")
+    _set_run_font(body, font, size)
+    for run in p.runs:
+        run.bold = False
+        run.italic = False
+        run.font.color.rgb = RGBColor(0, 0, 0)
+    if kind == "表":
+        p.paragraph_format.keep_with_next = True
+
+
+def _add_cover(document, layout: dict, project_name: str) -> None:
+    cover = layout.get("cover") if isinstance(layout.get("cover"), dict) else {}
+    title = resolve_text(str(cover.get("title") or "{project}"), project_name) or "投标文件"
+    spec = _heading_spec(layout, 1)
+    for _ in range(6):
+        document.add_paragraph("")
+    p = document.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = p.add_run(title)
+    _set_run_font(run, spec["font"], "26pt")
+    run.bold = True
+    if cover.get("subtitle"):
+        sub = document.add_paragraph()
+        sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        sub.paragraph_format.space_before = Pt(24)
+        run = sub.add_run(str(cover["subtitle"]))
+        _set_run_font(run, spec["font"], "20pt")
+        run.bold = True
+    for _ in range(8):
+        document.add_paragraph("")
+    for key in ("company", "date"):
+        if cover.get(key):
+            line = document.add_paragraph()
+            line.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = line.add_run(resolve_text(str(cover[key]), project_name))
+            _set_run_font(run, spec["font"], "14pt")
+    document.add_page_break()
+
+
+def _add_toc(document, layout: dict) -> None:
+    toc = layout.get("toc") if isinstance(layout.get("toc"), dict) else {}
+    levels = max(1, min(int(toc.get("levels") or 3), 3))
+    spec = _heading_spec(layout, 1)
+    title = document.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = title.add_run("目  录")
+    _set_run_font(run, spec["font"], "16pt")
+    run.bold = True
+    holder = document.add_paragraph()
+    _add_field(holder, f'TOC \\o "1-{levels}" \\h \\z \\u', "（用 Word 打开后，在此处右键选择“更新域”生成目录）")
+    document.add_page_break()
+    settings = document.settings.element
+    if settings.find(qn("w:updateFields")) is None:
+        node = OxmlElement("w:updateFields")
+        node.set(qn("w:val"), "true")
+        settings.append(node)
+
+
+def _apply_header_footer(document, layout: dict, project_name: str) -> None:
+    section = document.sections[0]
+    text = resolve_text(str(layout.get("header") or ""), project_name)
+    if text:
+        p = section.header.paragraphs[0]
+        p.text = ""
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = p.add_run(text)
+        _set_run_font(run, layout.get("bodyFont"), "9pt")
+    mode = layout.get("pageNumber")
+    if mode in ("simple", "full"):
+        p = section.footer.paragraphs[0]
+        p.text = ""
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        font = layout.get("bodyFont")
+        if mode == "full":
+            _set_run_font(p.add_run("第 "), font, "9pt")
+            _add_field(p, "PAGE", "1", font, "9pt")
+            _set_run_font(p.add_run(" 页 共 "), font, "9pt")
+            _add_field(p, "NUMPAGES", "1", font, "9pt")
+            _set_run_font(p.add_run(" 页"), font, "9pt")
+        else:
+            _add_field(p, "PAGE", "1", font, "9pt")
+
+
+def _apply_layout(document, layout: dict | None, project_name: str = "") -> None:
     if not layout:
         return
     section = document.sections[0]
+    if layout.get("orientation") == "landscape":
+        section.orientation = WD_ORIENT.LANDSCAPE
+        width, height = section.page_width, section.page_height
+        if height > width:
+            section.page_width, section.page_height = height, width
     margins = layout.get("margins") or {}
     if isinstance(margins, dict):
         if margins.get("top") is not None:
@@ -343,38 +570,81 @@ def _apply_layout(document, layout: dict | None) -> None:
             section.right_margin = Cm(float(margins["right"]))
 
     body_font = str(layout.get("bodyFont") or "宋体")
+    latin = str(layout.get("bodyLatinFont") or "") or None
     body_pt = _layout_body_pt(layout)
-    _set_style_font(document.styles["Normal"], body_font, body_pt)
+    normal = document.styles["Normal"]
+    _set_style_font(normal, body_font, body_pt, latin)
 
-    heading_font = str(layout.get("headingFont") or body_font)
-    try:
-        heading_pt = float(layout.get("headingSizePt") or body_pt)
-    except (TypeError, ValueError):
-        heading_pt = body_pt
-    heading_bold = bool(layout.get("headingBold", True))
-    for i in range(1, 4):
+    for level in range(1, 4):
         try:
-            hstyle = document.styles[f"Heading {i}"]
+            hstyle = document.styles[f"Heading {level}"]
         except KeyError:
             continue
-        _set_style_font(hstyle, heading_font, heading_pt)
-        hstyle.font.bold = heading_bold
-        hstyle.font.color.rgb = RGBColor(0, 0, 0)
+        spec = _heading_spec(layout, level)
+        _set_style_font(hstyle, spec["font"], float(spec["sizePt"]), latin)
+        hstyle.font.bold = bool(spec["bold"])
+        hstyle.font.color.rgb = _rgb(spec.get("color"))
         hstyle.paragraph_format.first_line_indent = Pt(0)
+        if spec.get("align") in _ALIGN:
+            hstyle.paragraph_format.alignment = _ALIGN[spec["align"]]
+        else:
+            hstyle.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        if spec.get("spaceBefore") is not None:
+            hstyle.paragraph_format.space_before = Pt(float(spec["spaceBefore"]))
+        if spec.get("spaceAfter") is not None:
+            hstyle.paragraph_format.space_after = Pt(float(spec["spaceAfter"]))
+        hstyle.paragraph_format.keep_with_next = True
+    try:
+        title_style = document.styles["Title"]
+        spec = _heading_spec(layout, 1)
+        _set_style_font(title_style, spec["font"], float(spec["sizePt"]) + 4, latin)
+        title_style.font.bold = True
+        title_style.font.color.rgb = _rgb(spec.get("color"))
+        title_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    except KeyError:
+        pass
+    try:
+        caption_style = document.styles["Caption"]
+        cfg = layout.get("caption") if isinstance(layout.get("caption"), dict) else {}
+        _set_style_font(
+            caption_style,
+            str(cfg.get("font") or body_font),
+            float(cfg.get("sizePt") or max(body_pt - 1.5, 8)),
+            latin,
+        )
+        caption_style.font.bold = False
+        caption_style.font.italic = False
+        caption_style.font.color.rgb = RGBColor(0, 0, 0)
+    except KeyError:
+        pass
 
-    pf = document.styles["Normal"].paragraph_format
+    pf = normal.paragraph_format
+    if layout.get("justify"):
+        pf.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    if layout.get("paragraphBefore") is not None:
+        pf.space_before = Pt(float(layout["paragraphBefore"]))
+    if layout.get("paragraphAfter") is not None:
+        pf.space_after = Pt(float(layout["paragraphAfter"]))
+
     spacing = layout.get("lineSpacing")
+    exact = layout.get("lineSpacingExactPt")
     try:
         mul = float(layout["lineSpacingMul"]) if layout.get("lineSpacingMul") is not None else None
     except (TypeError, ValueError):
         mul = None
-    multiple = mul if mul else _LINE_SPACING.get(str(spacing or ""), 1.5)
-    if spacing in ("固定值28磅", "固定值30磅") and mul is None:
+    if exact:
         pf.line_spacing_rule = WD_LINE_SPACING.EXACTLY
-        pf.line_spacing = Pt(multiple)
+        pf.line_spacing = Pt(float(exact))
     else:
-        pf.line_spacing_rule = WD_LINE_SPACING.MULTIPLE
-        pf.line_spacing = multiple
+        multiple = mul if mul else _LINE_SPACING.get(str(spacing or ""), 1.5)
+        if spacing in ("固定值28磅", "固定值30磅") and mul is None:
+            pf.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+            pf.line_spacing = Pt(multiple)
+        else:
+            pf.line_spacing_rule = WD_LINE_SPACING.MULTIPLE
+            pf.line_spacing = multiple
+
+    _apply_header_footer(document, layout, project_name)
 
 
 def chapters_to_docx(
@@ -388,9 +658,15 @@ def chapters_to_docx(
     from .e_writer import chapter_kind
 
     document = docx.Document()
-    _apply_layout(document, layout)
-    if project_name:
+    _apply_layout(document, layout, project_name)
+    cover_on = bool(layout and isinstance(layout.get("cover"), dict) and layout["cover"].get("enabled"))
+    toc_on = bool(layout and isinstance(layout.get("toc"), dict) and layout["toc"].get("enabled"))
+    if cover_on:
+        _add_cover(document, layout, project_name)
+    elif project_name:
         document.add_heading(project_name, level=0)
+    if toc_on:
+        _add_toc(document, layout)
 
     for node in outline:
         level = min(_node_level(outline, node["id"]) + 1, 3)
@@ -417,7 +693,7 @@ def chapters_to_docx(
                     if not _is_table_sep(lines[i]):
                         rows.append(_parse_table_row(lines[i]))
                     i += 1
-                _add_markdown_table(document, rows)
+                _add_markdown_table(document, rows, body_layout)
                 continue
             render_markdown_block(document, lines[i], image_paths, body_layout)
             i += 1

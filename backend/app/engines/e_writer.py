@@ -44,9 +44,7 @@ def _format_outline_num(depth: int, index: int, parent_num: str) -> str:
     return f"{index}."
 
 
-OUTLINE_INPUT_MAX = 42000
 OUTLINE_INVENTORY_MAX = 16000
-OUTLINE_TIMEOUT = 300
 
 OUTLINE_SYSTEM_PROMPT = """# 角色
 你是拥有10年以上央企/国企招投标标书编制经验的资深投标总监，精通综合评估法、经评审最低价法等主流评审规则，深谙评标专家“逐条打勾、按目录定位应答内容”的评审习惯。你擅长基于任意招标文件原文，拆解出颗粒度精准、层级清晰、100%覆盖所有需求点的投标文件多级目录，目录质量达到资深投标专员人工编制水准，无漏项、无冗余、逻辑顺、易核查，可直接用于正式投标文件排版。
@@ -278,6 +276,76 @@ def _requirement_from_idea(idea: str) -> str:
     return ""
 
 
+def _leaf_doc_kind_counts(
+    node_id: str, nodes_by_id: dict[str, dict], children_of: dict[str, list[str]]
+) -> dict[str, int]:
+    counts = {"tech": 0, "business": 0, "form": 0}
+    stack = [node_id]
+    seen: set[str] = set()
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        kids = children_of.get(current) or []
+        if not kids:
+            node = nodes_by_id.get(current) or {}
+            kind = chapter_kind(
+                str(node.get("title") or ""),
+                node.get("part"),
+                str(node.get("idea") or ""),
+                str(node.get("requirement") or ""),
+            )
+            counts[kind] = counts.get(kind, 0) + 1
+        else:
+            stack.extend(kids)
+    return counts
+
+
+def split_outline_by_doc_kind(
+    outline: list[dict] | None,
+    contents: dict[str, str] | None,
+    knowledge_refs: dict[str, list] | None,
+) -> tuple[tuple[list[dict], dict[str, str], dict[str, list]], tuple[list[dict], dict[str, str], dict[str, list]]]:
+    """旧版混合目录（技术标/商务标同树）迁移成两条独立轨道时用：按每个顶层节点的叶子多数票判断它属于哪一分册，
+    整棵子树（含已生成正文、知识引用）一起搬走。返回 (技术标 bundle, 商务标 bundle)，bundle=(outline, contents, knowledgeRefs)。
+    """
+    nodes = [n for n in (outline or []) if isinstance(n, dict) and n.get("id")]
+    nodes_by_id = {str(n["id"]): n for n in nodes}
+    children_of: dict[str, list[str]] = {}
+    top_ids: list[str] = []
+    for n in nodes:
+        node_id = str(n["id"])
+        parent = n.get("parentId")
+        if parent in (None, "", False):
+            top_ids.append(node_id)
+        else:
+            children_of.setdefault(str(parent), []).append(node_id)
+
+    business_ids: set[str] = set()
+    for top_id in top_ids:
+        counts = _leaf_doc_kind_counts(top_id, nodes_by_id, children_of)
+        biz = counts.get("business", 0) + counts.get("form", 0)
+        if biz > counts.get("tech", 0):
+            stack = [top_id]
+            while stack:
+                current = stack.pop()
+                if current in business_ids:
+                    continue
+                business_ids.add(current)
+                stack.extend(children_of.get(current, []))
+
+    all_contents = dict(contents or {})
+    all_refs = dict(knowledge_refs or {})
+    tech_outline = [n for n in nodes if str(n["id"]) not in business_ids]
+    business_outline = [n for n in nodes if str(n["id"]) in business_ids]
+    tech_contents = {k: v for k, v in all_contents.items() if k not in business_ids}
+    business_contents = {k: v for k, v in all_contents.items() if k in business_ids}
+    tech_refs = {k: v for k, v in all_refs.items() if k not in business_ids}
+    business_refs = {k: v for k, v in all_refs.items() if k in business_ids}
+    return (tech_outline, tech_contents, tech_refs), (business_outline, business_contents, business_refs)
+
+
 def _collapse_original_form_chapters(nodes: list[dict], tender_toc: dict | None = None) -> None:
     for n in nodes:
         if not isinstance(n, dict):
@@ -326,17 +394,36 @@ def generate_outline(
     tender_toc: dict | None = None,
     tender_text: str | None = None,
     model_id: str | None = None,
+    harness: dict | None = None,
+    format_requirements: list | None = None,
+    doc_kind: str = "tech",
+    page: dict | None = None,
+    layout: dict | None = None,
 ) -> list[dict]:
-    """大模型阅读招标原文编制应标目录；失败时回退为招标条款原树。"""
+    """用 AgentScope 阅读招标原文编制应标目录。harness 必填——目录生成只走 AgentScope harness 通读原文，
+    不再接受「跳过 harness 裸调模型」的用法，也不再吃招标解析模块预抽出的技术标/商务标摘要。
+    Harness 判定失败时直接抛出，不把套话目录当成功；非 Harness 的意外解析异常仍回退招标标题树兜底。"""
     del knowledge_headings  # 目录只覆盖招标需求，不用知识库目录改写结构
+    from .writer_harness import HarnessError, write_outline_markdown
+
+    if not harness:
+        raise HarnessError("目录生成必须经过 AgentScope harness，不支持裸调模型")
     try:
-        content = _call_outline_llm(
-            model_id,
-            project_name,
-            tender_text or "",
-            tender_toc,
-            score_rules,
-            must_respond,
+        content = write_outline_markdown(
+            user_id=str(harness.get("user_id") or ""),
+            project_id=str(harness.get("project_id") or ""),
+            draft_id=str(harness.get("draft_id") or ""),
+            job_id=str(harness.get("job_id") or ""),
+            model_id=model_id,
+            project_name=project_name,
+            tender_text=tender_text or "",
+            tender_toc=tender_toc,
+            score_rules=score_rules,
+            must_respond=must_respond,
+            format_requirements=format_requirements,
+            doc_kind=doc_kind,
+            page=page,
+            layout=layout,
         )
         chapters = _chapters_from_llm_output(content)
         if chapters:
@@ -346,9 +433,12 @@ def generate_outline(
             nodes = _normalize_outline({"chapters": chapters})
             if nodes:
                 return nodes
-            logger.warning("outline LLM returned no parseable directory")
-    except Exception:  # noqa: BLE001 —— 调用失败降级，不让撰写任务中断
-        logger.exception("outline LLM generate failed, falling back to tender headings")
+            logger.warning("outline harness returned no parseable directory")
+        raise HarnessError("目录结果无法解析成章节")
+    except HarnessError:
+        raise
+    except Exception:  # noqa: BLE001 —— 非 Harness 判定的意外解析异常仍回退招标标题树，避免整条流水线被卡死
+        logger.exception("outline harness generate failed, falling back to tender headings")
     return _fallback_outline(score_rules, tender_toc)
 
 
@@ -406,17 +496,64 @@ def _format_requirement_inventory(toc: dict | None) -> str:
     return text[:OUTLINE_INVENTORY_MAX]
 
 
+_DOC_KIND_LABEL = {"tech": "技术标", "business": "商务标"}
+
+# 内嵌全文的上限：短招标书直接贴进 prompt，省去分页调用；超过这个量就只给分页读原文的指引，
+# 交给 read_tender(section="original") 多轮翻页通读，避免把超长原文硬塞进单次 prompt。
+OUTLINE_INLINE_TENDER_MAX = 16000
+
+
+def _doc_kind_instruction(doc_kind: str, page: dict | None, layout: dict | None) -> str:
+    kind = (doc_kind or "tech").strip().lower()
+    if kind == "business":
+        return (
+            "本次只需要编制《商务标》分册目录：格式要求里属于商务、资格审查、资质证明、财务状况、业绩证明、"
+            "承诺书、授权委托书、报价、商务/技术偏差表等商务性质的章节才输出，必须按格式要求完整覆盖，不得漏项；"
+            "技术方案/技术响应性质的章节这次不要输出（它们会在《技术标》分册里单独编制）。"
+            "承诺类、授权委托类、报价类、偏差表类等招标已给固定格式、填写后打印签字的文件，目录只保留文件名，不要展开下级，"
+            "不需要按篇幅扩展内容，覆盖合规即可。"
+        )
+    body_pages = resolve_body_pages(page)
+    extra = ""
+    if body_pages > 0:
+        target_chars = body_pages * chars_per_page(layout)
+        extra = (
+            f"本技术标目标正文约 {body_pages} 页（约 {target_chars} 字）。设计目录颗粒度和章节数量时，"
+            "请在完整覆盖招标技术需求基础上，按本项目目标篇幅适度扩展实现深度，"
+            "例如方案落地细节、关键技术路线、风险应对与保障措施、运维/培训/交付等环节，"
+            "使最终可写正文明显超过招标应答的最低要求；但不得为凑字数生成与本项目无关的章节或内容。"
+        )
+    return (
+        "本次只需要编制《技术标》分册目录：格式要求里属于技术方案/技术响应性质的章节才展开到最小需求点，"
+        "必须按格式要求完整覆盖全部技术需求，不得漏项；"
+        "商务、资格审查、报价、承诺书、授权委托书等商务性质的章节这次不要输出（它们会在《商务标》分册里单独编制），"
+        "但仍可参考完整的响应文件格式要求，了解整份文件的组成。"
+        + (("\n" + extra) if extra else "")
+    )
+
+
 def _build_outline_user_message(
     project_name: str,
     tender_text: str,
     tender_toc: dict | None,
     score_rules: list[dict],
     must_respond: list[dict],
+    format_requirements: list | None = None,
+    *,
+    doc_kind: str = "tech",
+    total_pages: int = 0,
+    page: dict | None = None,
+    layout: dict | None = None,
 ) -> str:
+    del tender_toc
+    label = _DOC_KIND_LABEL.get((doc_kind or "tech").strip().lower(), "技术标")
     lines = [
         f"项目名称：{project_name or '（未命名项目）'}",
+        f"本次编制分册：{label}",
         "",
-        "请先通读下方本份招标文件全文，再严格按本份响应文件格式（或同等的组成/编写规定）编写投标文件目录。"
+        _doc_kind_instruction(doc_kind, page, layout),
+        "",
+        "请先通读本份招标文件全文，再严格按本份响应文件格式（或同等的组成/编写规定）编写投标文件目录。"
         "格式列出的每一章都要单独看该章编写要求：要求对照招标书哪一部分来写，就把那一部分里与本章对应的条款目录写进本章；不要只处理其中一章、让其他章空着。"
         "不同招标书的章节名和指向部分都不同，一律以本份原文为准，禁止套用预置章节。"
         "短名称原样做标题；需求说明句必须提炼成短标题，严禁把招标原文整句当目录。"
@@ -433,37 +570,29 @@ def _build_outline_user_message(
         for m in must_respond[:40]:
             lines.append(f"- [{m.get('type', '')}] {m.get('clause', '')}")
         lines.append("")
+    if format_requirements:
+        lines.append("本份招标书对响应文件/投标文件组成与格式的规定（完整文件结构，供判断分册边界，不代表这次全部要输出）：")
+        for item in format_requirements[:80]:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            desc = str(item.get("desc") or "").strip()
+            if title:
+                lines.append(f"- {title}" + (f"：{desc}" if desc else ""))
+        lines.append("")
     corpus = (tender_text or "").strip()
-    if len(corpus) > OUTLINE_INPUT_MAX:
-        corpus = corpus[:OUTLINE_INPUT_MAX]
-    lines.append("----------上传的招标文件原文（未抽取、未改写）----------")
-    lines.append(corpus if corpus else "（未能读取上传的招标文件原文。）")
+    if corpus and len(corpus) <= OUTLINE_INLINE_TENDER_MAX:
+        lines.append("----------上传的招标文件原文（未抽取、未改写，全文已贴在下面）----------")
+        lines.append(corpus)
+    elif corpus:
+        lines.append(
+            f"招标文件原文较长（约 {len(corpus)} 字），已经分页存入 read_tender(section=\"original\")，"
+            f"共约 {total_pages} 页，不给 query 时按 page 从 1 开始逐页调用通读，读完整份原文后再开始编制目录，"
+            "不要只读其中几页就下结论；也可以用 query 做关键词检索核对具体条款。"
+        )
+    else:
+        lines.append("（未能读取上传的招标文件原文，如确有必要请调用 read_tender 核实。）")
     return "\n".join(lines)
-
-
-def _call_outline_llm(
-    model_id: str | None,
-    project_name: str,
-    tender_text: str,
-    tender_toc: dict | None,
-    score_rules: list[dict],
-    must_respond: list[dict],
-) -> str:
-    return chat_complete(
-        model_id=model_id,
-        messages=[
-            {"role": "system", "content": OUTLINE_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": _build_outline_user_message(
-                    project_name, tender_text, tender_toc, score_rules, must_respond
-                ),
-            },
-        ],
-        temperature=0.2,
-        timeout=OUTLINE_TIMEOUT,
-        max_tokens=8192,
-    )
 
 
 _MD_HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
@@ -938,6 +1067,7 @@ _A4_WIDTH_MM = 210.0
 _A4_HEIGHT_MM = 297.0
 _PT_MM = 25.4 / 72
 _FONT_NAME_PT = {
+    "二号": 22,
     "小二": 18,
     "三号": 16,
     "小三": 15,
@@ -964,9 +1094,11 @@ def _body_pt(layout: dict | None) -> float:
 
 def _line_pt(layout: dict | None, body_pt: float) -> float:
     data = layout if isinstance(layout, dict) else {}
+    if data.get("lineSpacingExactPt"):
+        return max(_pref_float(data.get("lineSpacingExactPt"), body_pt), body_pt)
     spacing = str(data.get("lineSpacing") or "")
     fixed = re.search(r"固定值\s*(\d+(?:\.\d+)?)\s*磅", spacing)
-    if fixed:
+    if fixed and data.get("lineSpacingMul") is None:
         return max(float(fixed.group(1)), body_pt)
     mul = data.get("lineSpacingMul")
     if mul is None:
@@ -1074,8 +1206,13 @@ def generate_chapter_content(
     requirement: str | None = None,
     outline: list[dict] | None = None,
     chapter_id: str | None = None,
+    user_id: str | None = None,
+    project_id: str | None = None,
+    draft_id: str | None = None,
+    job_id: str | None = None,
+    enable_figures: bool = True,
 ) -> str:
-    """生成单章正文。失败或未配置 Key 时返回提示性占位文本，不抛错。"""
+    """生成单章正文。技术章由 Harness 撰写，失败时抛出，不写占位正文。"""
     kind = chapter_kind(chapter_title, part, chapter_idea, requirement or "")
     if kind == "form":
         return original_form_markdown(chapter_title, chapter_idea)
@@ -1101,50 +1238,26 @@ def generate_chapter_content(
         outline=outline,
         chapter_id=chapter_id,
     )
-    timeout = 180 if (knowledge_snippets or knowledge_images or product_features or qualification_assets) else 90
-    system = TECH_SOLUTION_SYSTEM
-    try:
-        text = chat_complete(
-            model_id=model_id,
-            messages=[
-                {"role": "system", "content": system},
-                {
-                    "role": "user",
-                    "content": _user_content_with_images(prompt, knowledge_images, model_id),
-                },
-            ],
-            temperature=0.5,
-            timeout=timeout,
-        )
-        solution = sanitize_chapter_markdown(text) or _fallback_chapter_content(
-            chapter_title, chapter_idea, "AI 返回内容为空"
-        )
-        return _wrap_tech_chapter(req_text, solution, layout)
-    except LlmError as exc:
-        if knowledge_images and is_vision_model(model_id):
-            try:
-                text = chat_complete(
-                    model_id=model_id,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.5,
-                    timeout=timeout,
-                )
-                solution = sanitize_chapter_markdown(text) or _fallback_chapter_content(
-                    chapter_title, chapter_idea, "AI 返回内容为空"
-                )
-                return _wrap_tech_chapter(req_text, solution, layout)
-            except Exception:
-                logger.exception("chapter generate retry without images failed")
-        return _wrap_tech_chapter(req_text, _fallback_chapter_content(chapter_title, chapter_idea, str(exc)), layout)
-    except Exception as exc:  # noqa: BLE001 —— 任何网络/解析异常都应降级为占位正文，而不是让任务失败
-        return _wrap_tech_chapter(
-            req_text,
-            _fallback_chapter_content(chapter_title, chapter_idea, f"调用大模型失败（{exc.__class__.__name__}）"),
-            layout,
-        )
+    from .writer_harness import write_tech_chapter
+
+    names = [str(feat.get("name") or "").strip() for feat in (product_features or []) if isinstance(feat, dict)]
+    names = [name for name in names if name]
+    solution = write_tech_chapter(
+        user_id=user_id or "",
+        project_id=project_id or "",
+        draft_id=draft_id or "",
+        job_id=job_id or "",
+        model_id=model_id,
+        prompt=prompt,
+        product_names=names,
+        require_gap=product_features is not None and not names,
+    )
+    solution = sanitize_chapter_markdown(solution)
+    if not solution:
+        from .writer_harness import HarnessError
+
+        raise HarnessError("技术章正文为空")
+    return _wrap_tech_chapter(req_text, solution, layout)
 
 
 _HEADING_LINE_RE = re.compile(r"^(#{1,6})\s+(.*)$")

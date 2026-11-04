@@ -305,8 +305,11 @@ export interface Checklist {
     unpackedFiles?: number;
     omittedCount?: Record<string, number>;
     filledRows?: number;
+    bidRequirementNote?: string;
   };
   omittedCount?: Record<string, number>;
+  techBidResponseRequirements?: string;
+  businessBidResponse?: string;
 }
 
 class ApiError extends Error {
@@ -690,9 +693,12 @@ export interface KnowledgeRef {
   mode: "manual" | "ai";
 }
 
+export type WriterDocKind = "tech" | "business";
+
 export interface WriterDraft {
   id: string;
   projectId: string;
+  docKind: WriterDocKind;
   modelId: string;
   selectedKnowledge: string[];
   selectedProductLibraryId?: string | null;
@@ -717,10 +723,24 @@ export interface UpdateWriterDraftPayload {
 
 export interface WriterJob {
   jobId: string;
-  kind: "outline" | "chapter" | "product-match";
+  kind: "outline" | "chapter" | "product-match" | "chat" | "batch";
   chapterId?: string | null;
   status: "queued" | "running" | "done" | "failed";
   error?: string | null;
+  result?: ({
+    reply?: string;
+    hasChecklist?: boolean;
+    engine?: string;
+    trace?: WriterChatTraceStep[];
+    edits?: WriterChatEdit[];
+  } & GenerateAllProgress) | null;
+}
+
+export interface WriterChatEdit {
+  chapterId: string;
+  content?: string;
+  title?: string;
+  idea?: string;
 }
 
 export interface TenderParagraph {
@@ -750,8 +770,11 @@ export interface TenderSheetPreview {
   sheets: TenderSheet[];
 }
 
-export async function getOrCreateWriterDraft(projectId: string): Promise<WriterDraft> {
-  return request<WriterDraft>(`/api/projects/${projectId}/writer-draft`);
+export async function getOrCreateWriterDraft(
+  projectId: string,
+  docKind: WriterDocKind = "tech",
+): Promise<WriterDraft> {
+  return request<WriterDraft>(`/api/projects/${projectId}/writer-draft?doc_kind=${docKind}`);
 }
 
 export async function updateWriterDraft(
@@ -780,12 +803,25 @@ export async function getWriterJobStatus(jobId: string): Promise<WriterJob> {
 /** 轮询撰写工作台的目录/正文生成任务直至完成/失败。 */
 export async function pollWriterJobUntilDone(
   jobId: string,
-  { intervalMs = 1500, timeoutMs = 5 * 60 * 1000 }: { intervalMs?: number; timeoutMs?: number } = {},
+  {
+    intervalMs = 1500,
+    timeoutMs = 5 * 60 * 1000,
+    onUpdate,
+  }: { intervalMs?: number; timeoutMs?: number; onUpdate?: (job: WriterJob) => void } = {},
 ): Promise<WriterJob> {
   const startedAt = Date.now();
   while (true) {
-    const status = await getWriterJobStatus(jobId);
-    if (status.status === "done" || status.status === "failed") return status;
+    try {
+      const status = await getWriterJobStatus(jobId);
+      onUpdate?.(status);
+      if (status.status === "done" || status.status === "failed") return status;
+    } catch (err) {
+      const status = err instanceof ApiError ? err.status : 0;
+      if (status >= 400 && status < 500 && status !== 408) throw err;
+      if (Date.now() - startedAt > timeoutMs) {
+        throw err instanceof ApiError ? err : new ApiError("生成任务超时，请稍后重试", 408);
+      }
+    }
     if (Date.now() - startedAt > timeoutMs) {
       throw new ApiError("生成任务超时，请稍后重试", 408);
     }
@@ -793,10 +829,92 @@ export async function pollWriterJobUntilDone(
   }
 }
 
+async function streamWriterJobUntilDone(
+  jobId: string,
+  {
+    timeoutMs = 10 * 60 * 1000,
+    onUpdate,
+  }: { timeoutMs?: number; onUpdate?: (job: WriterJob) => void } = {},
+): Promise<WriterJob> {
+  const token = localStorage.getItem("zhbiao_token") || "";
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`/api/writer-jobs/${jobId}/events`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "text/event-stream",
+      },
+      signal: controller.signal,
+    });
+    if (!res.ok || !res.body) {
+      throw new ApiError(`请求失败（${res.status}）`, res.status);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let last: WriterJob | null = null;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const chunks = buf.split("\n\n");
+      buf = chunks.pop() || "";
+      for (const chunk of chunks) {
+        const line = chunk.split("\n").find((item) => item.startsWith("data: "));
+        if (!line) continue;
+        let job: WriterJob;
+        try {
+          job = JSON.parse(line.slice(6)) as WriterJob;
+        } catch {
+          continue;
+        }
+        last = job;
+        onUpdate?.(job);
+        if (job.status === "done" || job.status === "failed") return job;
+      }
+    }
+    if (last) return last;
+    throw new ApiError("对话中断，请稍后重试", 408);
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 export async function createChapterGenerateJob(draftId: string, chapterId: string): Promise<WriterJob> {
   return request<WriterJob>(`/api/writer-drafts/${draftId}/chapters/${chapterId}/generate-jobs`, {
     method: "POST",
   });
+}
+
+export interface GenerateAllItem {
+  id: string;
+  title: string;
+  status: "queued" | "running" | "done" | "failed" | "skipped";
+  error?: string;
+}
+
+export interface GenerateAllProgress {
+  overwrite?: boolean;
+  total?: number;
+  done?: number;
+  skipped?: number;
+  items?: GenerateAllItem[];
+  failed?: GenerateAllItem[];
+}
+
+/** 按目录一次生成全部章节。默认只补空章节，overwrite=true 全部重写。 */
+export async function createGenerateAllJob(draftId: string, overwrite = false): Promise<WriterJob> {
+  return request<WriterJob>(`/api/writer-drafts/${draftId}/generate-all-jobs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ overwrite }),
+  });
+}
+
+export async function listWriterLayoutPresets(): Promise<Record<string, Record<string, unknown>>> {
+  const data = await request<{ presets: Record<string, Record<string, unknown>> }>("/api/writer-layout-presets");
+  return data.presets || {};
 }
 
 export async function saveChapterContent(
@@ -919,9 +1037,57 @@ export async function optimizeWriterImagePrompt(
   return out.prompt;
 }
 
+export interface WriterChatTraceStep {
+  id: string;
+  kind: string;
+  title: string;
+  detail: string;
+  args?: string;
+  result?: string;
+  status?: string;
+}
+
 export interface WriterChatResult {
   reply: string;
   hasChecklist: boolean;
+  edits: WriterChatEdit[];
+  engine: string;
+  trace: WriterChatTraceStep[];
+}
+
+export async function clearWriterChatMessages(token: string, draftId: string): Promise<void> {
+  await request(`/api/writer-drafts/${draftId}/chat-messages`, {
+    method: "DELETE",
+    headers: authHeaders(token),
+  });
+}
+
+export interface WriterChatFileInfo {
+  id: string;
+  filename: string;
+  kind?: "image" | "file" | string;
+  url?: string;
+}
+
+export async function listWriterChatMessages(
+  token: string,
+  draftId: string,
+): Promise<{ id: string; role: "user" | "assistant"; content: string; edits: WriterChatEdit[]; trace: WriterChatTraceStep[]; files?: WriterChatFileInfo[] }[]> {
+  return request(`/api/writer-drafts/${draftId}/chat-messages`, { headers: authHeaders(token) });
+}
+
+export async function uploadWriterChatFile(
+  token: string,
+  draftId: string,
+  file: File,
+): Promise<WriterChatFileInfo> {
+  const form = new FormData();
+  form.append("file", file);
+  return request<WriterChatFileInfo>(`/api/writer-drafts/${draftId}/chat-files`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
 }
 
 export async function writerChat(
@@ -929,16 +1095,53 @@ export async function writerChat(
   draftId: string,
   payload: {
     message: string;
-    history?: { role: "user" | "assistant"; content: string }[];
-    chapterTitle?: string;
-    chapterExcerpt?: string;
+    chapterId?: string;
+    fileIds?: string[];
   },
+  onUpdate?: (job: WriterJob) => void,
 ): Promise<WriterChatResult> {
-  return request<WriterChatResult>(`/api/writer-drafts/${draftId}/chat`, {
+  const started = await request<{ jobId: string }>(`/api/writer-drafts/${draftId}/chat`, {
     method: "POST",
     headers: authHeaders(token),
     body: JSON.stringify(payload),
   });
+  let job: WriterJob;
+  try {
+    job = await streamWriterJobUntilDone(started.jobId, {
+      timeoutMs: 10 * 60 * 1000,
+      onUpdate,
+    });
+  } catch {
+    job = await pollWriterJobUntilDone(started.jobId, {
+      intervalMs: 400,
+      timeoutMs: 10 * 60 * 1000,
+      onUpdate,
+    });
+  }
+  if (job.status === "failed") {
+    throw new ApiError(job.error || "对话失败，请稍后重试", 500);
+  }
+  let reply = job.result?.reply || "";
+  let edits = job.result?.edits || [];
+  let trace = job.result?.trace || [];
+  let hasChecklist = Boolean(job.result?.hasChecklist);
+  let engine = job.result?.engine || "AgentScope";
+  if (!reply) {
+    const rows = await listWriterChatMessages(token, draftId);
+    const last = [...rows].reverse().find((row) => row.role === "assistant" && row.content.trim());
+    if (last) {
+      reply = last.content;
+      edits = last.edits?.length ? last.edits : edits;
+      trace = last.trace?.length ? last.trace : trace;
+    }
+  }
+  return {
+    reply: reply || "助手没有返回内容。",
+    hasChecklist,
+    edits,
+    engine,
+    trace,
+  };
 }
 
 // 文档知识库真实后端接入相关请求。

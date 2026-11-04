@@ -167,16 +167,21 @@ class ReviewRun(Base):
 
 
 class WriterDraft(Base):
-    """AI 撰写工作台草稿，每个项目仅维护一份（project_id 唯一）。
+    """AI 撰写工作台草稿，每个项目按分册各一份（doc_kind：tech 技术标 / business 商务标）。
 
     outline_json 存储统一的目录节点列表（融合原 PlanNode 编写思路字段与 ChapterNode 生成状态字段），
     chapter_contents_json 存储各章节正文（{chapterId: content}）。
+    标书设置（modelId/知识库/产品库/排版设置/解读来源）和 step<=2 的推进在 tech/business 两条轨道间镜像，
+    outline_json/chapter_contents_json/knowledge_refs_json 和 step>=3 的推进完全独立，见
+    backend/app/routers/writer.py 的 get_or_create_writer_draft / update_writer_draft。
     """
 
     __tablename__ = "writer_drafts"
+    __table_args__ = (UniqueConstraint("project_id", "doc_kind", name="uq_writer_drafts_project_doc_kind"),)
 
     id = Column(String, primary_key=True, default=lambda: gen_id("draft"))
-    project_id = Column(String, index=True, nullable=False, unique=True)
+    project_id = Column(String, index=True, nullable=False)
+    doc_kind = Column(String, nullable=False, default="tech")  # tech | business
     model_id = Column(String, default="deepseek-v4-pro")
     selected_knowledge_json = Column(JSON, default=list)  # 全局知识库文档池，供无章节级引用时的检索兜底
     selected_product_library_id = Column(String, nullable=True)  # 撰写匹配用的产品库，一项目对应一个产品
@@ -201,8 +206,39 @@ class WriterJob(Base):
     chapter_id = Column(String, nullable=True)
     status = Column(String, default="queued")  # queued | running | done | failed
     error = Column(Text, nullable=True)
+    user_id = Column(String, index=True, nullable=True)
+    result_json = Column(JSON, default=dict)
     created_at = Column(DateTime, default=datetime.utcnow)
     finished_at = Column(DateTime, nullable=True)
+
+
+class WriterChatMessage(Base):
+    """撰写对话按用户和草稿分开保存，不与其他用户共享。"""
+
+    __tablename__ = "writer_chat_messages"
+
+    id = Column(String, primary_key=True, default=lambda: gen_id("wchat"))
+    user_id = Column(String, index=True, nullable=False)
+    draft_id = Column(String, ForeignKey("writer_drafts.id"), index=True, nullable=False)
+    role = Column(String, nullable=False)  # user | assistant
+    content = Column(Text, default="")
+    edits_json = Column(JSON, default=list)
+    trace_json = Column(JSON, default=list)
+    files_json = Column(JSON, default=list)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class WriterChatFile(Base):
+    """撰写对话附件只属于上传它的用户和那一份草稿。"""
+
+    __tablename__ = "writer_chat_files"
+
+    id = Column(String, primary_key=True, default=lambda: gen_id("wfile"))
+    user_id = Column(String, index=True, nullable=False)
+    draft_id = Column(String, ForeignKey("writer_drafts.id"), index=True, nullable=False)
+    filename = Column(String, nullable=False)
+    storage_path = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class WriterImage(Base):

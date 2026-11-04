@@ -59,6 +59,8 @@ services:
   worker:
     build: .
     env_file: .env
+    environment:
+      WRITER_BROWSER_URL: ${WRITER_BROWSER_URL:-http://writer-browser:8010}
     command: celery -A app.celery_app worker --loglevel=info --concurrency=2
     volumes:
       - ./uploads:/app/uploads
@@ -70,6 +72,15 @@ services:
         condition: service_healthy
       minio:
         condition: service_started
+
+  writer-browser:
+    build:
+      context: .
+      dockerfile: writer_browser/Dockerfile
+    env_file: .env
+    ports:
+      - "8010:8010"
+    restart: unless-stopped
 
 volumes:
   pgdata:

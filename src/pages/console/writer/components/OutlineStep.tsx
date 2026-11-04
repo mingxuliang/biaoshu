@@ -36,6 +36,7 @@ interface OutlineStepProps {
   onNext: () => void;
   onBack: () => void;
   selectedProductLibraryId?: string;
+  docKind?: "tech" | "business";
 }
 
 type RightTab = "outline" | "tenderDoc" | "score" | "overview";
@@ -62,7 +63,9 @@ export default function OutlineStep({
   onNext,
   onBack,
   selectedProductLibraryId = "",
+  docKind = "tech",
 }: OutlineStepProps) {
+  const docKindLabel = docKind === "business" ? "商务标" : "技术标";
   const [activeId, setActiveId] = useState<string>(outline[0]?.id ?? "");
   const [tab, setTab] = useState<RightTab>("outline");
   const [pickerId, setPickerId] = useState<string | null>(null);
@@ -147,7 +150,7 @@ export default function OutlineStep({
   const generateOutline = async (replaceExisting: boolean) => {
     if (replaceExisting && outline.length > 0) {
       const ok = window.confirm(
-        "将按招标文件重新生成全部目录。当前目录、编写思路、章节知识库绑定和已生成正文都会被替换，是否继续？",
+        `将按招标文件重新生成全部${docKindLabel}目录。当前目录、编写思路、章节知识库绑定和已生成正文都会被替换，是否继续？`,
       );
       if (!ok) return;
     }
@@ -159,7 +162,7 @@ export default function OutlineStep({
         showToast(result.error || "目录生成失败，请重试", "error");
         return;
       }
-      const refreshed = await getOrCreateWriterDraft(projectId);
+      const refreshed = await getOrCreateWriterDraft(projectId, docKind);
       const compacted = compactOutlineTitles(refreshed.outline || []);
       onOutlineChange(compacted);
       updateWriterDraft(draftId, { outline: compacted }).catch(() => {
@@ -237,7 +240,7 @@ export default function OutlineStep({
         showToast(result.error || "产品功能匹配失败，请检查模型配置后重试", "error");
         return;
       }
-      const refreshed = await getOrCreateWriterDraft(projectId);
+      const refreshed = await getOrCreateWriterDraft(projectId, docKind);
       const refs = refreshed.knowledgeRefs || {};
       setKnowledgeMap(refs);
       onOutlineRegenerated?.({ knowledgeRefs: refs });
@@ -322,7 +325,9 @@ export default function OutlineStep({
           <i className="ri-list-check-3 text-base"></i>
         </span>
         <div>
-          <div className="font-heading text-sm font-semibold tracking-wide text-foreground-900">第三步 · 目录生成</div>
+          <div className="font-heading text-sm font-semibold tracking-wide text-foreground-900">
+            第三步 · {docKindLabel}目录生成
+          </div>
           <div className="text-xs text-foreground-500">功能需求逐条对应；项目管理等其余需求整理为应标目录并覆盖全文</div>
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">
@@ -337,7 +342,7 @@ export default function OutlineStep({
               className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-accent-200 bg-accent-50 px-3 text-xs font-medium text-accent-700 transition-colors hover:bg-accent-100 disabled:cursor-not-allowed disabled:opacity-60"
             >
               <i className={`${generatingOutline ? "ri-loader-4-line animate-spin" : "ri-refresh-line"} text-xs`}></i>
-              {generatingOutline ? "正在重新生成…" : "重新生成目录"}
+              {generatingOutline ? "正在重新生成…" : `重新生成${docKindLabel}目录`}
             </button>
           )}
           {outline.length > 0 && (
@@ -424,9 +429,11 @@ export default function OutlineStep({
                   <span className="flex h-14 w-14 items-center justify-center rounded-xl border border-primary-200 bg-gradient-to-br from-primary-400 to-primary-600 text-background-50">
                     <i className="ri-sparkling-2-line text-2xl"></i>
                   </span>
-                  <div className="text-sm font-semibold text-foreground-900">尚未生成目录</div>
+                  <div className="text-sm font-semibold text-foreground-900">尚未生成{docKindLabel}目录</div>
                   <p className="max-w-md text-xs text-foreground-500">
-                    将由大模型阅读招标文件全文，按招标每一条独立要求编制可逐条打勾的应标目录。若已选产品功能库，生成后会再用大模型把技术标章节对应到功能点。生成约需 1～3 分钟。
+                    将由智能体通读招标文件全文，按招标每一条独立要求编制{docKindLabel}可逐条打勾的应标目录
+                    {docKind === "tech" ? "，并按标书设置里的目标篇幅适度扩展内容深度" : ""}
+                    。若已选产品功能库，生成后会再用大模型把技术标章节对应到功能点。生成约需 1～3 分钟。
                   </p>
                   <button
                     type="button"
@@ -435,7 +442,7 @@ export default function OutlineStep({
                     className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-4 text-sm font-medium text-background-50 transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     <i className={`${generatingOutline ? "ri-loader-4-line animate-spin" : "ri-magic-line"} text-sm`}></i>
-                    {generatingOutline ? "AI 正在生成目录…" : "AI 生成目录"}
+                    {generatingOutline ? "AI 正在生成目录…" : `AI 生成${docKindLabel}目录`}
                   </button>
                 </div>
               ) : (
@@ -889,7 +896,23 @@ export default function OutlineStep({
       </div>
 
       {/* 悬浮 AI 助手 */}
-      <FloatingChat projectName={projectName} draftId={draftId} />
+      <FloatingChat
+        projectName={projectName}
+        draftId={draftId}
+        chapterId={activeId}
+        onApplied={async () => {
+          try {
+            const refreshed = await getOrCreateWriterDraft(projectId, docKind);
+            onOutlineChange(compactOutlineTitles(refreshed.outline || []));
+            onOutlineRegenerated?.({
+              chapterContents: refreshed.chapterContents || {},
+              knowledgeRefs: refreshed.knowledgeRefs || {},
+            });
+          } catch {
+            /* 目录已经写回，刷新失败时重新进入本步仍会读到新目录 */
+          }
+        }}
+      />
 
       {/* 知识库弹窗 */}
       {pickerId && pickerNode && (

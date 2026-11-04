@@ -29,6 +29,13 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:3000"
 
+    writer_browser_url: str = ""
+    writer_browser_timeout_sec: int = 25
+    writer_browser_hosts: str = (
+        "gov.cn,ccgp.gov.cn,ggzy.gov.cn,chinabidding.com,"
+        "bidcenter.com.cn,duckduckgo.com,bing.com"
+    )
+
     secret_key: str = "dev-secret-change-me"
     access_token_expire_minutes: int = 60 * 24 * 7
 

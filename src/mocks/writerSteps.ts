@@ -70,9 +70,35 @@ export interface LayoutConfig {
   headingBold?: boolean;
   indentPt?: number;
   indentChars?: number;
-  lineSpacingMul?: number;
+  lineSpacingMul?: number | null;
+  lineSpacingExactPt?: number | null;
   fromTender?: boolean;
+  preset?: string;
+  bodyLatinFont?: string;
+  justify?: boolean;
+  paragraphBefore?: number;
+  paragraphAfter?: number;
+  headings?: Partial<Record<"h1" | "h2" | "h3", LayoutHeading>>;
+  header?: string;
+  pageNumber?: "none" | "simple" | "full";
+  orientation?: "portrait" | "landscape";
+  cover?: { enabled?: boolean; title?: string; subtitle?: string; company?: string; date?: string };
+  toc?: { enabled?: boolean; levels?: number };
+  table?: { headerFill?: string; fontSizePt?: number; headerBold?: boolean };
+  caption?: { font?: string; sizePt?: number };
 }
+
+export interface LayoutHeading {
+  font?: string;
+  sizePt?: number;
+  bold?: boolean;
+  align?: "left" | "center" | "right" | "justify";
+  spaceBefore?: number;
+  spaceAfter?: number;
+  color?: string;
+}
+
+export const layoutFontFamilies = ["宋体", "仿宋", "黑体", "楷体", "微软雅黑", "Times New Roman", "Arial"];
 
 export const defaultLayout: LayoutConfig = {
   margins: { top: 2, bottom: 2, left: 2, right: 2 },
@@ -80,9 +106,10 @@ export const defaultLayout: LayoutConfig = {
   lineSpacing: "1.5倍行距",
 };
 
-export const layoutFontSizes = ["小二", "三号", "小三", "四号", "小四", "五号", "小五"];
+export const layoutFontSizes = ["二号", "小二", "三号", "小三", "四号", "小四", "五号", "小五"];
 export const layoutLineSpacings = ["1.5倍行距", "2倍行距", "固定值28磅", "固定值30磅"];
 export const layoutFontNamePt: Record<string, number> = {
+  二号: 22,
   小二: 18,
   三号: 16,
   小三: 15,

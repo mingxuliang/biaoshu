@@ -46,11 +46,19 @@ _SYSTEM = """你是投标文件结构图抽取器。只根据用户给出的本�
 格式：
 {"title":"图名","nodes":[{"id":"n1","label":"不超过12字","note":"","layer":0,"parent":""}],"edges":[{"from":"n1","to":"n2","label":""}]}
 规则：
-- 功能架构、技术架构、部署拓扑：用 layer 从上到下分层，0 为最上层，parent 留空；
-- 人员组织：用 parent 表示直接上级，根节点 parent 为空，不要画成技术分层；
-- 流程图：节点按先后放在 layer 0，并用 edges 按顺序连接；
-- 节点最多 12 个，label 不超过 12 个字。
+- 功能架构、技术架构、部署拓扑：layer 从上到下，0 为最上层。每个非根节点的 parent 必须写成它所属的直接上层节点 id，绘图会从父框下沿连到子框上沿。根节点 parent 为空。
+- edges 只表示正文写明的连接、访问或数据交换，不要把“属于某一层/区域”再写成 edge。同一层不要按出现顺序串成一条链；部署拓扑只连接正文里真正相邻互通的两端，例如内网连边界、边界连外网。
+- 人员组织：用 parent 表示直接上级，根节点 parent 为空，不要画成技术分层。
+- 流程图：节点按先后放在 layer 0，并用 edges 按顺序连接，parent 留空。
+- 节点最多 12 个，label 不超过 12 个字，note 不超过 10 个字。
 """
+
+_BOX_W = 150.0
+_BOX_H = 78.0
+_GAP_X = 22.0
+_GAP_Y = 56.0
+_MARGIN = 28.0
+_TOP = 84.0
 
 
 def find_cjk_font() -> str:
@@ -144,6 +152,8 @@ def normalize_diagram(data: dict, kind: str) -> dict:
             root_id = nodes[0]["id"]
             for node in nodes[1:]:
                 node["parent"] = root_id
+    if layout == "layers":
+        edges = _bind_layer_parents(nodes, edges)
     title = _clip(str(data.get("title") or label), 20) or label
     return {"title": title, "layout": layout, "kindLabel": label, "mode": mode, "nodes": nodes, "edges": edges}
 
@@ -163,6 +173,207 @@ def _parse_json(text: str) -> dict:
     if not isinstance(data, dict):
         raise DiagramError("未能从正文抽出结构图，请补充本章解决方案后再试")
     return data
+
+
+def _bind_layer_parents(nodes: list[dict], edges: list[dict]) -> list[dict]:
+    """包含关系走 parent，连线只保留跨节点的真实连接。"""
+    by_id = {node["id"]: node for node in nodes}
+    for node in nodes:
+        parent = by_id.get(node["parent"])
+        if parent is None or parent["id"] == node["id"] or parent["layer"] >= node["layer"]:
+            node["parent"] = ""
+    kept: list[dict] = []
+    for edge in edges:
+        src = by_id.get(edge["from"])
+        dst = by_id.get(edge["to"])
+        if src is None or dst is None:
+            continue
+        if src["layer"] < dst["layer"] and not dst["parent"]:
+            dst["parent"] = src["id"]
+            continue
+        if dst["layer"] < src["layer"] and not src["parent"]:
+            src["parent"] = dst["id"]
+            continue
+        if dst["parent"] == src["id"] or src["parent"] == dst["id"]:
+            continue
+        kept.append(edge)
+    return kept
+
+
+def layout_diagram(spec: dict) -> dict[str, tuple[float, float, float, float]]:
+    """返回每个节点的 (x0, y0, x1, y1)。有父子关系时，子节点排在父节点正下方。"""
+    nodes = spec.get("nodes") or []
+    edges = spec.get("edges") or []
+    if spec.get("layout") == "flow":
+        return _layout_flow(nodes)
+    if any(node.get("parent") for node in nodes):
+        return _layout_forest(nodes, edges)
+    return _layout_rows(nodes, edges)
+
+
+def _order_by_links(nodes: list[dict], edges: list[dict]) -> list[dict]:
+    """同一层按真实连线排成相邻顺序，避免线条跨过中间的框。"""
+    if len(nodes) < 3:
+        return nodes
+    ids = [node["id"] for node in nodes]
+    idset = set(ids)
+    adj: dict[str, set[str]] = {node_id: set() for node_id in ids}
+    for edge in edges:
+        src, dst = edge.get("from"), edge.get("to")
+        if src in idset and dst in idset and src != dst:
+            adj[src].add(dst)
+            adj[dst].add(src)
+    if not any(adj.values()) or any(len(links) > 2 for links in adj.values()):
+        return nodes
+    starts = [node_id for node_id in ids if len(adj[node_id]) == 1]
+    start = starts[0] if starts else next((node_id for node_id in ids if adj[node_id]), None)
+    if start is None:
+        return nodes
+    ordered: list[str] = []
+    seen: set[str] = set()
+    current: str | None = start
+    while current and current not in seen:
+        seen.add(current)
+        ordered.append(current)
+        nxt = [node_id for node_id in ids if node_id in adj[current] and node_id not in seen]
+        current = nxt[0] if len(nxt) == 1 else None
+    if len(ordered) < 2:
+        return nodes
+    ordered.extend(node_id for node_id in ids if node_id not in seen)
+    by_id = {node["id"]: node for node in nodes}
+    return [by_id[node_id] for node_id in ordered]
+
+
+def route_between(
+    src: tuple[float, float, float, float],
+    dst: tuple[float, float, float, float],
+    obstacles: list[tuple[float, float, float, float]] | None = None,
+) -> list[tuple[float, float]]:
+    """从源框边框走到目标框边框，避开中间的框。"""
+    ax0, ay0, ax1, ay1 = src
+    bx0, by0, bx1, by1 = dst
+    acx, acy = (ax0 + ax1) / 2, (ay0 + ay1) / 2
+    bcx, bcy = (bx0 + bx1) / 2, (by0 + by1) / 2
+    blockers = obstacles or []
+
+    def clear(points: list[tuple[float, float]]) -> bool:
+        return all(not any(_segment_hits(p, q, rect) for rect in blockers) for p, q in zip(points, points[1:]))
+
+    if ay1 <= by0 + 0.5:
+        mid = (ay1 + by0) / 2
+        if abs(acx - bcx) < 0.5:
+            return [(acx, ay1), (bcx, by0)]
+        return [(acx, ay1), (acx, mid), (bcx, mid), (bcx, by0)]
+    if by1 <= ay0 + 0.5:
+        mid = (by1 + ay0) / 2
+        if abs(acx - bcx) < 0.5:
+            return [(acx, ay0), (bcx, by1)]
+        return [(acx, ay0), (acx, mid), (bcx, mid), (bcx, by1)]
+    side = [(ax1, acy), (bx0, bcy)] if acx <= bcx else [(ax0, acy), (bx1, bcy)]
+    if clear(side):
+        return side
+    above = min(ay0, by0) - 20
+    return [(acx, ay0), (acx, above), (bcx, above), (bcx, by0)]
+
+
+def _segment_hits(
+    p: tuple[float, float], q: tuple[float, float], rect: tuple[float, float, float, float]
+) -> bool:
+    (ax, ay), (bx, by) = p, q
+    x0, y0, x1, y1 = rect
+    if abs(ay - by) <= 0.6:
+        if ay < y0 or ay > y1:
+            return False
+        lo, hi = (ax, bx) if ax <= bx else (bx, ax)
+        return hi > x0 and lo < x1
+    if abs(ax - bx) <= 0.6:
+        if ax < x0 or ax > x1:
+            return False
+        lo, hi = (ay, by) if ay <= by else (by, ay)
+        return hi > y0 and lo < y1
+    return False
+
+
+def _layout_flow(nodes: list[dict]) -> dict[str, tuple[float, float, float, float]]:
+    rects: dict[str, tuple[float, float, float, float]] = {}
+    for index, node in enumerate(nodes):
+        left = _MARGIN + index * (_BOX_W + 36)
+        rects[node["id"]] = (left, 78, left + _BOX_W, 78 + _BOX_H)
+    return rects
+
+
+def _layout_rows(nodes: list[dict], edges: list[dict]) -> dict[str, tuple[float, float, float, float]]:
+    groups: dict[int, list[dict]] = {}
+    for node in nodes:
+        groups.setdefault(int(node["layer"]), []).append(node)
+    rects: dict[str, tuple[float, float, float, float]] = {}
+    for row, key in enumerate(sorted(groups)):
+        for col, node in enumerate(_order_by_links(groups[key], edges)):
+            left = _MARGIN + col * (_BOX_W + _GAP_X)
+            top = _TOP + row * (_BOX_H + _GAP_Y)
+            rects[node["id"]] = (left, top, left + _BOX_W, top + _BOX_H)
+    return rects
+
+
+def _forest(nodes: list[dict]) -> tuple[dict[str, list[dict]], list[dict]]:
+    ids = {node["id"] for node in nodes}
+    parent_of: dict[str, str] = {}
+    for node in nodes:
+        parent = node.get("parent") or ""
+        if parent in ids and parent != node["id"]:
+            parent_of[node["id"]] = parent
+    for node in nodes:
+        seen: list[str] = []
+        current = node["id"]
+        while current in parent_of:
+            if current in seen:
+                parent_of.pop(node["id"], None)
+                break
+            seen.append(current)
+            current = parent_of[current]
+    kids: dict[str, list[dict]] = {node["id"]: [] for node in nodes}
+    for node in nodes:
+        parent = parent_of.get(node["id"])
+        if parent:
+            kids[parent].append(node)
+    roots = [node for node in nodes if node["id"] not in parent_of]
+    return kids, roots or nodes[:1]
+
+
+def _span(node_id: str, kids: dict[str, list[dict]]) -> float:
+    group = kids.get(node_id) or []
+    if not group:
+        return _BOX_W
+    return max(_BOX_W, sum(_span(child["id"], kids) for child in group) + _GAP_X * (len(group) - 1))
+
+
+def _place(
+    node: dict,
+    left: float,
+    top: float,
+    kids: dict[str, list[dict]],
+    rects: dict[str, tuple[float, float, float, float]],
+) -> None:
+    span = _span(node["id"], kids)
+    x = left + (span - _BOX_W) / 2
+    rects[node["id"]] = (x, top, x + _BOX_W, top + _BOX_H)
+    cursor = left
+    for child in kids.get(node["id"]) or []:
+        child_span = _span(child["id"], kids)
+        _place(child, cursor, top + _BOX_H + _GAP_Y, kids, rects)
+        cursor += child_span + _GAP_X
+
+
+def _layout_forest(nodes: list[dict], edges: list[dict]) -> dict[str, tuple[float, float, float, float]]:
+    kids, roots = _forest(nodes)
+    kids = {node_id: _order_by_links(group, edges) for node_id, group in kids.items()}
+    roots = _order_by_links(roots, edges)
+    rects: dict[str, tuple[float, float, float, float]] = {}
+    cursor = _MARGIN
+    for root in roots:
+        _place(root, cursor, _TOP, kids, rects)
+        cursor += _span(root["id"], kids) + _GAP_X * 2
+    return rects
 
 
 def extract_diagram(model_id: str | None, kind: str, chapter_title: str, source: str) -> dict:
@@ -203,12 +414,28 @@ def render_diagram_png(spec: dict) -> bytes:
     if fitz is None:
         raise DiagramError("未安装 PyMuPDF，无法绘制结构图")
     font = find_cjk_font()
-    layout = spec.get("layout")
-    if layout == "tree":
-        return _render_tree(spec, font)
-    if layout == "flow":
-        return _render_flow(spec, font)
-    return _render_layers(spec, font)
+    rects = layout_diagram(spec)
+    width, height = _canvas(rects)
+    doc, page = _new_page(width, height, spec.get("title") or "", font)
+    for node in spec.get("nodes") or []:
+        x0, y0, x1, y1 = rects[node["id"]]
+        _box(page, fitz.Rect(x0, y0, x1, y1), font, node["label"], node.get("note") or "")
+    if spec.get("layout") != "flow":
+        _draw_containment(page, spec.get("nodes") or [], rects)
+    _draw_links(page, spec.get("edges") or [], rects)
+    return _png(doc)
+
+
+def _canvas(rects: dict[str, tuple[float, float, float, float]]) -> tuple[float, float]:
+    if not rects:
+        return 720, 220
+    return max(720, max(rect[2] for rect in rects.values()) + _MARGIN), max(200, max(rect[3] for rect in rects.values()) + 36)
+
+
+def _wrap(text: str, width: float, size: float, max_lines: int) -> str:
+    per = max(1, int(width / max(size, 1)))
+    lines = [text[i : i + per] for i in range(0, len(text), per)]
+    return "\n".join(lines[:max_lines])
 
 
 def _text(page, rect: fitz.Rect, text: str, font: str, size: float, color: tuple[float, float, float]) -> None:
@@ -219,9 +446,12 @@ def _text(page, rect: fitz.Rect, text: str, font: str, size: float, color: tuple
 
 def _box(page, rect: fitz.Rect, font: str, label: str, note: str = "") -> None:
     page.draw_rect(rect, color=(0.15, 0.35, 0.62), fill=(0.93, 0.96, 0.99), width=1.2)
-    _text(page, fitz.Rect(rect.x0 + 4, rect.y0 + 8, rect.x1 - 4, rect.y0 + 30), label, font, 12, (0.1, 0.16, 0.28))
+    inner_w = (rect.x1 - rect.x0) - 12
     if note:
-        _text(page, fitz.Rect(rect.x0 + 4, rect.y0 + 30, rect.x1 - 4, rect.y1 - 4), note, font, 9, (0.35, 0.4, 0.48))
+        _text(page, fitz.Rect(rect.x0 + 6, rect.y0 + 6, rect.x1 - 6, rect.y0 + 42), _wrap(label, inner_w, 12, 2), font, 12, (0.1, 0.16, 0.28))
+        _text(page, fitz.Rect(rect.x0 + 6, rect.y0 + 42, rect.x1 - 6, rect.y1 - 4), _wrap(note, inner_w, 9, 2), font, 9, (0.35, 0.4, 0.48))
+    else:
+        _text(page, fitz.Rect(rect.x0 + 6, rect.y0 + 8, rect.x1 - 6, rect.y1 - 6), _wrap(label, inner_w, 12, 3), font, 12, (0.1, 0.16, 0.28))
 
 
 def _new_page(width: float, height: float, title: str, font: str):
@@ -240,97 +470,36 @@ def _png(doc) -> bytes:
         doc.close()
 
 
-def _render_layers(spec: dict, font: str) -> bytes:
-    groups: dict[int, list[dict]] = {}
-    for node in spec["nodes"]:
-        groups.setdefault(int(node["layer"]), []).append(node)
-    levels = [groups[key] for key in sorted(groups)]
-    width = 860
-    height = 64 + len(levels) * 118
-    doc, page = _new_page(width, height, spec["title"], font)
-    centers: dict[str, tuple[float, float]] = {}
-    for row, nodes in enumerate(levels):
-        top = 56 + row * 118
-        gap = (width - 48) / max(len(nodes), 1)
-        box_w = min(150, gap - 16)
-        for col, node in enumerate(nodes):
-            left = 24 + col * gap + (gap - box_w) / 2
-            rect = fitz.Rect(left, top, left + box_w, top + 72)
-            _box(page, rect, font, node["label"], node["note"])
-            centers[node["id"]] = ((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
-        layer_name = next((node["layerName"] for node in nodes if node["layerName"]), "")
-        if layer_name:
-            _text(page, fitz.Rect(24, top - 16, 180, top), layer_name, font, 9, (0.4, 0.45, 0.55))
-    _draw_edges(page, spec["edges"], centers)
-    return _png(doc)
-
-
-def _render_flow(spec: dict, font: str) -> bytes:
-    nodes = spec["nodes"]
-    width = max(720, 48 + len(nodes) * 170)
-    doc, page = _new_page(width, 220, spec["title"], font)
-    centers: dict[str, tuple[float, float]] = {}
-    box_w = 140
-    for index, node in enumerate(nodes):
-        left = 24 + index * 170
-        rect = fitz.Rect(left, 78, left + box_w, 150)
-        _box(page, rect, font, node["label"], node["note"])
-        centers[node["id"]] = ((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
-    _draw_edges(page, spec["edges"], centers)
-    return _png(doc)
-
-
-def _render_tree(spec: dict, font: str) -> bytes:
-    by_parent: dict[str, list[dict]] = {}
-    for node in spec["nodes"]:
-        by_parent.setdefault(node["parent"], []).append(node)
-    levels: list[list[dict]] = []
-    current = by_parent.get("", []) or spec["nodes"][:1]
-    seen: set[str] = set()
-    while current and len(levels) < 5:
-        levels.append(current)
-        nxt: list[dict] = []
-        for node in current:
-            if node["id"] in seen:
-                continue
-            seen.add(node["id"])
-            nxt.extend(by_parent.get(node["id"], []))
-        current = nxt
-    widest = max(len(level) for level in levels)
-    width = max(720, 48 + widest * 170)
-    height = 64 + len(levels) * 120
-    doc, page = _new_page(width, height, spec["title"], font)
-    centers: dict[str, tuple[float, float]] = {}
-    for row, nodes in enumerate(levels):
-        top = 56 + row * 120
-        gap = (width - 48) / max(len(nodes), 1)
-        box_w = min(140, gap - 16)
-        for col, node in enumerate(nodes):
-            left = 24 + col * gap + (gap - box_w) / 2
-            rect = fitz.Rect(left, top, left + box_w, top + 64)
-            _box(page, rect, font, node["label"], node["note"])
-            centers[node["id"]] = ((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
-    parent_edges = [
-        {"from": node["parent"], "to": node["id"], "label": ""}
-        for node in spec["nodes"]
-        if node["parent"] and node["parent"] in centers
-    ]
-    _draw_edges(page, parent_edges, centers)
-    return _png(doc)
-
-
-def _draw_edges(page, edges: list[dict], centers: dict[str, tuple[float, float]]) -> None:
-    for edge in edges:
-        start = centers.get(edge["from"])
-        end = centers.get(edge["to"])
-        if not start or not end:
+def _stroke(page, points: list[tuple[float, float]]) -> None:
+    for start, end in zip(points, points[1:]):
+        if abs(start[0] - end[0]) < 0.4 and abs(start[1] - end[1]) < 0.4:
             continue
-        if abs(end[0] - start[0]) >= abs(end[1] - start[1]):
-            direction = 1 if end[0] >= start[0] else -1
-            p1 = (start[0] + direction * 72, start[1])
-            p2 = (end[0] - direction * 72, end[1])
-        else:
-            direction = 1 if end[1] >= start[1] else -1
-            p1 = (start[0], start[1] + direction * 36)
-            p2 = (end[0], end[1] - direction * 36)
-        page.draw_line(p1, p2, color=(0.45, 0.55, 0.7), width=1.1)
+        page.draw_line(start, end, color=(0.45, 0.55, 0.7), width=1.2)
+
+
+def _draw_containment(page, nodes: list[dict], rects: dict[str, tuple[float, float, float, float]]) -> None:
+    children: dict[str, list[tuple[float, float, float, float]]] = {}
+    for node in nodes:
+        parent = node.get("parent") or ""
+        if parent in rects and node["id"] in rects:
+            children.setdefault(parent, []).append(rects[node["id"]])
+    for parent_id, child_rects in children.items():
+        parent = rects[parent_id]
+        pcx = (parent[0] + parent[2]) / 2
+        bus_y = (parent[3] + min(rect[1] for rect in child_rects)) / 2
+        centers = [((rect[0] + rect[2]) / 2, rect[1]) for rect in child_rects]
+        xs = [point[0] for point in centers] + [pcx]
+        _stroke(page, [(pcx, parent[3]), (pcx, bus_y)])
+        _stroke(page, [(min(xs), bus_y), (max(xs), bus_y)])
+        for cx, top in centers:
+            _stroke(page, [(cx, bus_y), (cx, top)])
+
+
+def _draw_links(page, edges: list[dict], rects: dict[str, tuple[float, float, float, float]]) -> None:
+    for edge in edges:
+        src = rects.get(edge.get("from") or "")
+        dst = rects.get(edge.get("to") or "")
+        if src is None or dst is None:
+            continue
+        obstacles = [rect for node_id, rect in rects.items() if node_id not in (edge.get("from"), edge.get("to"))]
+        _stroke(page, route_between(src, dst, obstacles))
