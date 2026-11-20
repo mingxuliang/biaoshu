@@ -8,7 +8,7 @@ import httpx
 from sqlalchemy.orm import selectinload
 
 from ..config import get_settings
-from ..db import SessionLocal
+from ..db import platform_session
 from ..llm_catalog import provider_ready
 from ..models import LlmModel, LlmProvider
 
@@ -116,7 +116,7 @@ def is_vision_model(model_id: str | None) -> bool:
 
 
 def get_default_model_id() -> str:
-    db = SessionLocal()
+    db = platform_session()
     try:
         row = (
             db.query(LlmModel)
@@ -145,7 +145,7 @@ def get_default_model_id() -> str:
 
 def get_vision_model_id() -> str | None:
     """图纸识读需要看图。优先已启用的 DeepSeek Vision，再找其它名称含 vision 的模型。"""
-    db = SessionLocal()
+    db = platform_session()
     try:
         rows = (
             db.query(LlmModel)
@@ -213,7 +213,7 @@ def _from_row(model: LlmModel, provider: LlmProvider) -> ResolvedLlm:
 def _lookup_db(model_id: str | None) -> ResolvedLlm | None:
     raw = (model_id or "").strip()
     alias = _ALIASES.get(raw, raw)
-    db = SessionLocal()
+    db = platform_session()
     try:
         q = db.query(LlmModel).options(selectinload(LlmModel.provider))
         row = None
@@ -332,6 +332,28 @@ def _message_text(message: dict | None) -> str:
     return content if isinstance(content, str) else ""
 
 
+def _approx_tokens(text: str) -> int:
+    # 网关没返回 usage 时按字符估算：中文约 1.5 字/token
+    return int(len(text or "") / 1.5) + 1
+
+
+def _report_usage(resolved: ResolvedLlm, usage: dict, messages: list[dict], reply: str) -> None:
+    from ..billing import record_usage
+
+    prompt = usage.get("prompt_tokens")
+    completion = usage.get("completion_tokens")
+    if prompt is None:
+        prompt = sum(_approx_tokens(m.get("content") if isinstance(m.get("content"), str) else "") for m in messages)
+    if completion is None:
+        completion = _approx_tokens(reply)
+    record_usage(
+        model_id=resolved.model_id,
+        api_model=resolved.api_model,
+        prompt_tokens=int(prompt or 0),
+        completion_tokens=int(completion or 0),
+    )
+
+
 def chat_complete(
     *,
     model_id: str | None,
@@ -364,6 +386,7 @@ def chat_complete(
                 resp.raise_for_status()
                 body = resp.json()
                 text = _message_text((body.get("choices") or [{}])[0].get("message"))
+                _report_usage(resolved, body.get("usage") or {}, messages, text or "")
                 return text or ""
         except httpx.HTTPStatusError as exc:
             detail = (exc.response.text or "")[:240]

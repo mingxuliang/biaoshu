@@ -6,11 +6,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
 
 from ..auth import get_current_user
-from ..db import get_db
+from ..config import get_settings
+from ..db import get_db, get_platform_db
+from ..net_guard import validate_base_url
 from ..engines.llm import looks_like_vision_model, ping_model
 from ..llm_catalog import PRESETS, PROVIDER_KINDS, load_providers, mask_key, preset_for, provider_ready
 from ..models import LlmModel, LlmProvider, User, gen_id
 from ..permissions import PERM_SETTINGS, PERM_WRITER, require_perm
+from ..platform_auth import ROLE_OPS, require_roles
 from ..schemas import (
     LlmModelIn,
     LlmModelOut,
@@ -23,6 +26,17 @@ from ..schemas import (
 )
 
 router = APIRouter(prefix="/api", tags=["llm"])
+# 模型接入、秘钥和默认模型是平台级配置，只有平台后台能改
+admin_router = APIRouter(prefix="/api/admin", tags=["admin-llm"])
+
+
+def _llm_admin(admin=Depends(require_roles(ROLE_OPS))):
+    return admin
+
+
+def _allow_private(kind: str) -> bool:
+    # 「本地模型」本来就指向本机或内网；其他类型默认只允许公网地址
+    return kind == "local" or bool(get_settings().llm_allow_private_base_url)
 
 
 def _model_to_out(model: LlmModel, provider: LlmProvider) -> LlmModelOut:
@@ -44,15 +58,15 @@ def _model_to_out(model: LlmModel, provider: LlmProvider) -> LlmModelOut:
     )
 
 
-def _provider_to_out(provider: LlmProvider) -> LlmProviderOut:
+def _provider_to_out(provider: LlmProvider, reveal_key: bool = True) -> LlmProviderOut:
     models = sorted(provider.models or [], key=lambda m: (m.sort_order or 0, m.name or ""))
     return LlmProviderOut(
         id=provider.id,
         name=provider.name,
         kind=provider.kind,
-        baseUrl=provider.base_url or "",
-        apiKeyMasked=mask_key(provider.api_key),
+        apiKeyMasked=mask_key(provider.api_key) if reveal_key else "",
         hasKey=bool((provider.api_key or "").strip()),
+        baseUrl=(provider.base_url or "") if reveal_key else "",
         enabled=bool(provider.enabled),
         note=provider.note or "",
         ready=provider_ready(provider),
@@ -80,9 +94,8 @@ def _clear_defaults(db: Session, keep_id: str | None = None) -> None:
         row.is_default = False
 
 
-@router.get("/llm-presets", response_model=list[LlmPresetOut])
-def list_llm_presets(current_user: User = Depends(get_current_user)) -> list[LlmPresetOut]:
-    require_perm(current_user, PERM_SETTINGS)
+@admin_router.get("/llm-presets", response_model=list[LlmPresetOut])
+def list_llm_presets(admin=Depends(_llm_admin)) -> list[LlmPresetOut]:
     return [
         LlmPresetOut(
             kind=p["kind"],
@@ -122,21 +135,27 @@ def list_llm_providers(
     current_user: User = Depends(get_current_user),
 ) -> list[LlmProviderOut]:
     require_perm(current_user, PERM_SETTINGS)
+    # 模型接入由平台统一配置，企业只读，不返回任何秘钥信息
+    return [_provider_to_out(p, reveal_key=False) for p in load_providers(db)]
+
+
+@admin_router.get("/llm-providers", response_model=list[LlmProviderOut])
+def admin_list_llm_providers(db: Session = Depends(get_platform_db), admin=Depends(_llm_admin)) -> list[LlmProviderOut]:
     return [_provider_to_out(p) for p in load_providers(db)]
 
 
-@router.post("/llm-providers", response_model=LlmProviderOut)
+@admin_router.post("/llm-providers", response_model=LlmProviderOut)
 def create_llm_provider(
     payload: LlmProviderIn,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_platform_db),
+    admin=Depends(_llm_admin),
 ) -> LlmProviderOut:
-    require_perm(current_user, PERM_SETTINGS)
     kind = (payload.kind or "").strip()
     if kind not in PROVIDER_KINDS:
         raise HTTPException(400, "不支持的接入类型")
     name = payload.name.strip() or preset_for(kind)["label"]
     base = (payload.baseUrl or "").strip().rstrip("/") or preset_for(kind)["default_base_url"]
+    base = validate_base_url(base, allow_private=_allow_private(kind))
     provider = LlmProvider(
         id=gen_id("lp"),
         name=name,
@@ -152,14 +171,13 @@ def create_llm_provider(
     return _provider_to_out(provider)
 
 
-@router.patch("/llm-providers/{provider_id}", response_model=LlmProviderOut)
+@admin_router.patch("/llm-providers/{provider_id}", response_model=LlmProviderOut)
 def patch_llm_provider(
     provider_id: str,
     payload: LlmProviderPatchIn,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_platform_db),
+    admin=Depends(_llm_admin),
 ) -> LlmProviderOut:
-    require_perm(current_user, PERM_SETTINGS)
     provider = _require_provider(db, provider_id)
     data = payload.model_dump(exclude_unset=True)
     if "name" in data and data["name"] is not None:
@@ -167,7 +185,7 @@ def patch_llm_provider(
         if name:
             provider.name = name
     if "baseUrl" in data and data["baseUrl"] is not None:
-        provider.base_url = data["baseUrl"].strip().rstrip("/")
+        provider.base_url = validate_base_url(data["baseUrl"], allow_private=_allow_private(provider.kind or ""))
     if data.get("clearKey"):
         provider.api_key = ""
     elif "apiKey" in data and data["apiKey"] is not None:
@@ -183,27 +201,25 @@ def patch_llm_provider(
     return _provider_to_out(_require_provider(db, provider.id))
 
 
-@router.delete("/llm-providers/{provider_id}")
+@admin_router.delete("/llm-providers/{provider_id}")
 def delete_llm_provider(
     provider_id: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_platform_db),
+    admin=Depends(_llm_admin),
 ) -> dict:
-    require_perm(current_user, PERM_SETTINGS)
     provider = _require_provider(db, provider_id)
     db.delete(provider)
     db.commit()
     return {"ok": True}
 
 
-@router.post("/llm-providers/{provider_id}/models", response_model=LlmModelOut)
+@admin_router.post("/llm-providers/{provider_id}/models", response_model=LlmModelOut)
 def create_llm_model(
     provider_id: str,
     payload: LlmModelIn,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_platform_db),
+    admin=Depends(_llm_admin),
 ) -> LlmModelOut:
-    require_perm(current_user, PERM_SETTINGS)
     provider = _require_provider(db, provider_id)
     name = payload.name.strip()
     api_model = payload.apiModel.strip()
@@ -230,14 +246,13 @@ def create_llm_model(
     return _model_to_out(model, provider)
 
 
-@router.patch("/llm-models/{model_id}", response_model=LlmModelOut)
+@admin_router.patch("/llm-models/{model_id}", response_model=LlmModelOut)
 def patch_llm_model(
     model_id: str,
     payload: LlmModelPatchIn,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_platform_db),
+    admin=Depends(_llm_admin),
 ) -> LlmModelOut:
-    require_perm(current_user, PERM_SETTINGS)
     model = db.get(LlmModel, model_id)
     if not model:
         raise HTTPException(404, "模型不存在")
@@ -266,13 +281,12 @@ def patch_llm_model(
     return _model_to_out(model, provider)
 
 
-@router.delete("/llm-models/{model_id}")
+@admin_router.delete("/llm-models/{model_id}")
 def delete_llm_model(
     model_id: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_platform_db),
+    admin=Depends(_llm_admin),
 ) -> dict:
-    require_perm(current_user, PERM_SETTINGS)
     model = db.get(LlmModel, model_id)
     if not model:
         raise HTTPException(404, "模型不存在")
@@ -281,13 +295,12 @@ def delete_llm_model(
     return {"ok": True}
 
 
-@router.post("/llm-models/{model_id}/test", response_model=LlmTestOut)
+@admin_router.post("/llm-models/{model_id}/test", response_model=LlmTestOut)
 def test_llm_model(
     model_id: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_platform_db),
+    admin=Depends(_llm_admin),
 ) -> LlmTestOut:
-    require_perm(current_user, PERM_SETTINGS)
     model = db.get(LlmModel, model_id)
     if not model:
         raise HTTPException(404, "模型不存在")

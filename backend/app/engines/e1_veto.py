@@ -45,7 +45,18 @@ CERT_PROOF = {
     "安全生产许可证": ("安全生产许可证号", "许可范围", "安许证"),
     "资质证书": ("资质证书编号", "资质等级", "施工总承包", "专业承包", "证书编号"),
 }
-STAFF_PROOF = ("证书编号", "注册证书", "执业资格", "建造师", "职称证")
+# 建造师等是工程类凭证，PMP/信息系统项目管理师/软考是软件服务类常见凭证；两类标书共用
+# 同一个判定列表，天然不会在对方标书正文里出现，无需按 category 再拆一份。
+STAFF_PROOF = (
+    "证书编号",
+    "注册证书",
+    "执业资格",
+    "建造师",
+    "职称证",
+    "PMP",
+    "信息系统项目管理师",
+    "软考",
+)
 SOCIAL_PROOF = ("社保证明", "社保缴纳", "参保", "养老保险", "缴纳单位")
 
 
@@ -135,7 +146,8 @@ def run(
 ) -> list[dict]:
     findings: list[dict] = []
     today = _now()
-    full_text = "\n".join(p["text"] for p in paragraphs)
+    paragraphs = [p for p in paragraphs if isinstance(p, dict)]
+    full_text = "\n".join(str(p.get("text") or "") for p in paragraphs)
 
     checklist_params = checklist_params or {}
     validity_days_required = checklist_params.get("validity_days_required")
@@ -155,7 +167,7 @@ def run(
     seen_validity_days: int | None = None
 
     for p in paragraphs:
-        text = p["text"]
+        text = str(p.get("text") or "")
 
         if bid_elements_enabled and any(k in text for k in VALIDITY_KEYWORDS):
             seen_validity = True
@@ -403,23 +415,6 @@ def _context_findings(
                     tender_quote=_hit_tender(combined_req, ("投标保证金", "保证金")),
                     unanswered_confirmed=cover.unanswered_confirmed,
                     issue_class="human_check",
-                )
-            )
-
-    if bid_elements_enabled and checklist_params.get("anonymity_required") and context is not None:
-        bidder_name = ""
-        for q in getattr(context, "quals", []) or []:
-            if getattr(q, "kind", "") == "cert" and "营业执照" in (getattr(q, "name", "") or "") and (getattr(q, "owner", "") or "").strip():
-                bidder_name = q.owner.strip()
-                break
-        if bidder_name and len(bidder_name) >= 4 and bidder_name in full_text:
-            extra.append(
-                _finding(
-                    severity="降档",
-                    location="投标文件 / 暗标残留",
-                    excerpt=_hit_excerpt(full_text, paragraphs, (bidder_name,)),
-                    rule="F02.05 暗标文件不得出现单位名称",
-                    suggestion=f"招标要求暗标评审，投标书正文出现本企业名称「{bidder_name}」。请删除单位名称、徽标等可识别身份信息",
                 )
             )
 

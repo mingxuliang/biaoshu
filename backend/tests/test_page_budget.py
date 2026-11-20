@@ -23,7 +23,7 @@ class PageBudgetTest(unittest.TestCase):
             {"fontSize": "小四", "lineSpacing": "1.5倍行距", "lineSpacingMul": 1.5, "margins": {"top": 2, "bottom": 2, "left": 2, "right": 2}}
         )
         fixed = chars_per_page(
-            {"fontSize": "小四", "lineSpacing": "固定值28磅", "lineSpacingMul": 1.5, "margins": {"top": 2, "bottom": 2, "left": 2, "right": 2}}
+            {"fontSize": "小四", "lineSpacing": "固定值28磅", "lineSpacingMul": None, "margins": {"top": 2, "bottom": 2, "left": 2, "right": 2}}
         )
         self.assertLess(fixed, normal)
 

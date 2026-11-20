@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
-import { ApiError } from "@/lib/api";
+import { ApiError, getAuthOptions, sendSignupCode, type AuthOptions, type TenantKind } from "@/lib/api";
 
 const featureHighlights = [
   {
@@ -28,21 +28,65 @@ const featureHighlights = [
 
 export default function LoginPage() {
   const navigate = useNavigate();
-  const { login, register } = useAuth();
-  const [mode, setMode] = useState<"login" | "register">("login");
+  const { login, register, signupTenant } = useAuth();
+  const [mode, setMode] = useState<"login" | "register" | "signup">("login");
+  const [options, setOptions] = useState<AuthOptions>({ allowRegister: false });
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [companyName, setCompanyName] = useState("");
+  const [signupKind, setSignupKind] = useState<TenantKind>("企业");
+  const [code, setCode] = useState("");
+  const [codeCooldown, setCodeCooldown] = useState(0);
   const [showPwd, setShowPwd] = useState(false);
   const [remember, setRemember] = useState(true);
+
+  useEffect(() => {
+    const notice = sessionStorage.getItem("zhbiao_auth_notice");
+    if (notice) {
+      sessionStorage.removeItem("zhbiao_auth_notice");
+      setError(notice);
+    }
+    getAuthOptions()
+      .then(setOptions)
+      .catch(() => setOptions({ allowRegister: false }));
+  }, []);
+
+  useEffect(() => {
+    if (codeCooldown <= 0) return;
+    const timer = window.setTimeout(() => setCodeCooldown((s) => s - 1), 1000);
+    return () => window.clearTimeout(timer);
+  }, [codeCooldown]);
+
+  const signupMode = options.allowTenantSignup ? "signup" : options.allowRegister ? "register" : null;
+  const isSignup = mode === "signup";
+  const isOrgSignup = isSignup && signupKind === "企业";
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  const handleSendCode = async () => {
+    setError("");
+    if (!email.trim()) {
+      setError("请先填写手机号或邮箱");
+      return;
+    }
+    try {
+      await sendSignupCode(email.trim());
+      setCodeCooldown(60);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "验证码发送失败");
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (loading) return;
     setError("");
-    if (mode === "register" && !name.trim()) {
+    if (isOrgSignup && !companyName.trim()) {
+      setError("请填写企业名称");
+      return;
+    }
+    if (mode !== "login" && !name.trim()) {
       setError("请填写姓名");
       return;
     }
@@ -50,9 +94,22 @@ export default function LoginPage() {
       setError("请填写账号和密码");
       return;
     }
+    if (isSignup && options.signupCodeRequired && !code.trim()) {
+      setError("请填写验证码");
+      return;
+    }
     setLoading(true);
     try {
-      if (mode === "register") {
+      if (isSignup) {
+        await signupTenant({
+          kind: signupKind,
+          companyName: isOrgSignup ? companyName.trim() : "",
+          name: name.trim(),
+          account: email.trim(),
+          password,
+          code: code.trim(),
+        });
+      } else if (mode === "register") {
         await register({ name: name.trim(), email: email.trim(), password });
       } else {
         await login(email.trim(), password);
@@ -176,10 +233,16 @@ export default function LoginPage() {
         <div className="w-full max-w-sm">
           <div className="mb-8">
             <h2 className="font-heading text-[26px] font-bold tracking-wide text-foreground-950">
-              {mode === "login" ? "欢迎回来" : "创建你的账号"}
+              {mode === "login" ? "欢迎回来" : isOrgSignup ? "开通企业账号" : isSignup ? "开通个人账号" : "创建你的账号"}
             </h2>
             <p className="font-label mt-1.5 text-sm text-foreground-500">
-              {mode === "login" ? "登录你的慧投标工作台，继续高效的投标之旅" : "注册新账号，开启智能标书之旅"}
+              {mode === "login"
+                ? "登录你的慧投标工作台，继续高效的投标之旅"
+                : isOrgSignup
+                  ? "免费试用，赠送体验积分；你将成为企业管理员，邀请的同事共用企业积分池"
+                  : isSignup
+                    ? "免费试用，赠送体验积分；个人独立空间，以后可一键升级为企业"
+                    : "注册新账号，开启智能标书之旅"}
             </p>
           </div>
 
@@ -201,7 +264,55 @@ export default function LoginPage() {
               </div>
             )}
 
-            {mode === "register" && (
+            {isSignup && (
+              <div className="grid grid-cols-2 gap-2 rounded-lg border border-background-300 bg-background-100 p-1">
+                {(
+                  [
+                    { kind: "企业", icon: "ri-building-line", label: "企业 / 单位", hint: "多人共享积分池" },
+                    { kind: "个人", icon: "ri-user-line", label: "个人", hint: "无单位，自己使用" },
+                  ] as const
+                ).map((opt) => (
+                  <button
+                    key={opt.kind}
+                    type="button"
+                    onClick={() => setSignupKind(opt.kind)}
+                    className={`flex cursor-pointer flex-col items-center rounded-md px-2 py-2 text-sm transition-colors ${
+                      signupKind === opt.kind
+                        ? "bg-gradient-to-br from-primary-400 to-primary-600 text-background-50"
+                        : "text-foreground-700 hover:bg-background-200"
+                    }`}
+                  >
+                    <span className="font-medium">
+                      <i className={`${opt.icon} mr-1`}></i>
+                      {opt.label}
+                    </span>
+                    <span className={`text-[11px] ${signupKind === opt.kind ? "text-background-50/80" : "text-foreground-500"}`}>{opt.hint}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {isOrgSignup && (
+              <div>
+                <label className="font-label mb-1.5 block text-[13px] font-semibold text-foreground-800">
+                  企业名称
+                </label>
+                <div className="relative">
+                  <i className="ri-building-line absolute left-3 top-1/2 -translate-y-1/2 text-sm text-foreground-500"></i>
+                  <input
+                    type="text"
+                    name="organization"
+                    autoComplete="organization"
+                    value={companyName}
+                    onChange={(e) => setCompanyName(e.target.value)}
+                    placeholder="与营业执照一致的单位全称"
+                    className="h-11 w-full rounded-lg border border-background-300 bg-background-100 pl-9 pr-3 text-sm text-foreground-900 placeholder:text-foreground-500 outline-none transition-all focus:border-primary-400 focus:ring-2 focus:ring-primary-400/20"
+                  />
+                </div>
+              </div>
+            )}
+
+            {mode !== "login" && (
               <div>
                 <label className="font-label mb-1.5 block text-[13px] font-semibold text-foreground-800">
                   姓名
@@ -233,11 +344,38 @@ export default function LoginPage() {
                   autoComplete="username"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="邮箱、手机号或工号均可"
+                  placeholder={isSignup ? "手机号或邮箱，用于登录和接收通知" : "邮箱、手机号或工号均可"}
                   className="h-11 w-full rounded-lg border border-background-300 bg-background-100 pl-9 pr-3 text-sm text-foreground-900 placeholder:text-foreground-500 outline-none transition-all focus:border-primary-400 focus:ring-2 focus:ring-primary-400/20"
                 />
               </div>
             </div>
+
+            {isSignup && options.signupCodeRequired && (
+              <div>
+                <label className="font-label mb-1.5 block text-[13px] font-semibold text-foreground-800">
+                  验证码
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    value={code}
+                    onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                    placeholder="6 位验证码"
+                    className="h-11 min-w-0 flex-1 rounded-lg border border-background-300 bg-background-100 px-3 text-sm text-foreground-900 placeholder:text-foreground-500 outline-none transition-all focus:border-primary-400 focus:ring-2 focus:ring-primary-400/20"
+                  />
+                  <button
+                    type="button"
+                    disabled={codeCooldown > 0}
+                    onClick={handleSendCode}
+                    className="h-11 shrink-0 cursor-pointer rounded-lg border border-primary-300 px-3 text-sm text-primary-600 transition-colors hover:bg-primary-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {codeCooldown > 0 ? `${codeCooldown}s 后重发` : "获取验证码"}
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* 密码 */}
             <div>
@@ -261,7 +399,7 @@ export default function LoginPage() {
                   name="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder={mode === "login" ? "请输入登录密码" : "至少 6 位密码"}
+                  placeholder={mode === "login" ? "请输入登录密码" : "至少 8 位，含字母和数字"}
                   className="h-11 w-full rounded-lg border border-background-300 bg-background-100 pl-9 pr-11 text-sm text-foreground-900 placeholder:text-foreground-500 outline-none transition-all focus:border-primary-400 focus:ring-2 focus:ring-primary-400/20"
                 />
                 <button
@@ -304,11 +442,11 @@ export default function LoginPage() {
               {loading ? (
                 <>
                   <span className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-background-50/40 border-t-background-50"></span>
-                  {mode === "login" ? "正在安全登录…" : "正在创建账号…"}
+                  {mode === "login" ? "正在安全登录…" : isOrgSignup ? "正在开通企业…" : isSignup ? "正在开通个人账号…" : "正在创建账号…"}
                 </>
               ) : (
                 <>
-                  {mode === "login" ? "登 录" : "注 册"}
+                  {mode === "login" ? "登 录" : isOrgSignup ? "开通企业并试用" : isSignup ? "开通个人账号并试用" : "注 册"}
                   <i className="ri-arrow-right-line ml-1.5 text-base transition-transform duration-200 group-hover:translate-x-0.5"></i>
                 </>
               )}
@@ -347,20 +485,27 @@ export default function LoginPage() {
             </button>
           </div>
 
-          {/* 注册引导 */}
-          <p className="font-label mt-8 text-center text-[13px] text-foreground-500">
-            {mode === "login" ? "还没有账号？" : "已有账号？"}
-            <button
-              type="button"
-              onClick={() => {
-                setError("");
-                setMode((m) => (m === "login" ? "register" : "login"));
-              }}
-              className="font-semibold text-primary-600 transition-colors hover:text-primary-700"
-            >
-              {mode === "login" ? "立即注册" : "直接登录"}
-            </button>
-          </p>
+          {/* 注册引导：未开放自助注册时只提示找管理员开通 */}
+          {signupMode ? (
+            <p className="font-label mt-8 text-center text-[13px] text-foreground-500">
+              {mode === "login" ? "还没有账号？" : "已有账号？"}
+              <button
+                type="button"
+                onClick={() => {
+                  setError("");
+                  setMode((m) => (m === "login" ? signupMode : "login"));
+                }}
+                className="font-semibold text-primary-600 transition-colors hover:text-primary-700"
+              >
+                {mode === "login" ? (signupMode === "signup" ? "免费开通（企业或个人）" : "立即注册") : "直接登录"}
+              </button>
+              {mode === "login" && signupMode === "signup" && (
+                <span className="mt-1 block text-[11px]">单位已开通的，请由企业管理员在「团队管理」中邀请你加入</span>
+              )}
+            </p>
+          ) : (
+            <p className="font-label mt-8 text-center text-[13px] text-foreground-500">还没有账号？请联系管理员开通</p>
+          )}
         </div>
 
         {/* 底部版权 */}

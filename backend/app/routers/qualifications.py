@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 from datetime import date, datetime
 
@@ -8,12 +10,15 @@ from sqlalchemy.orm import Session, joinedload
 
 from ..audit import write_audit
 from ..auth import get_current_user
+from ..billing import require_credits
 from ..db import get_db
+from ..engines.safe_office import check_upload
 from ..engines.ocr import ocr_file
 from ..engines.qualification_dedup import VALID_KINDS as DEDUP_KINDS
 from ..engines.qualification_dedup import is_business_license, mark_keep_both, merge_assets
+from ..engines.qualification_schema import clean_attrs
 from ..models import QualificationAsset, QualificationAssetImage, QualificationSourceDoc, User
-from ..permissions import PERM_QUAL_EDIT, require_perm
+from ..permissions import PERM_QUAL_EDIT, require_library_read, require_perm
 from ..schemas import (
     QualificationExtractJobOut,
     QualificationImageOut,
@@ -111,6 +116,7 @@ def _to_out(item: QualificationAsset) -> QualificationOut:
         evidence=list(item.evidence_json or []),
         fieldConflict=list(item.field_conflict_json or []),
         suspectedIds=list(item.suspected_ids_json or []),
+        attrs=clean_attrs(kind, item.attrs_json),
         images=images,
         updatedAt=updated.date().isoformat() if updated else "",
     )
@@ -139,6 +145,17 @@ def _save_file(file: UploadFile, content: bytes) -> tuple[str, str]:
         raise HTTPException(400, "扫描件仅支持 PDF / JPG / PNG / WEBP")
     key = storage.put_bytes("qualifications", content, ext)
     return original, key
+
+
+def _parse_attrs(kind: str, raw: str) -> dict | None:
+    """前端以 JSON 字符串提交结构化字段；空串表示不改。"""
+    if not (raw or "").strip():
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(400, "结构化字段格式不正确")
+    return clean_attrs(kind, data)
 
 
 def _fill_ocr(item: QualificationAsset, ref: str) -> None:
@@ -174,12 +191,27 @@ def _existing_business_license(db: Session, exclude_id: str | None = None) -> Qu
     return None
 
 
+def reset_library(db: Session) -> int:
+    """删除全部证照条目和扫描图（含对象存储文件），保留来源文件记录。"""
+    rows = db.query(QualificationAsset).options(joinedload(QualificationAsset.images)).all()
+    refs: list[str] = []
+    for item in rows:
+        refs.extend(img.storage_path for img in (item.images or []) if img.storage_path)
+        if item.storage_path:
+            refs.append(item.storage_path)
+        db.delete(item)
+    db.flush()
+    for ref in dict.fromkeys(refs):
+        storage.delete(ref)
+    return len(rows)
+
+
 @router.get("/qualifications", response_model=list[QualificationOut])
 def list_qualifications(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[QualificationOut]:
-    _ = current_user
+    require_library_read(current_user)
     items = (
         db.query(QualificationAsset)
         .options(joinedload(QualificationAsset.images))
@@ -198,6 +230,7 @@ async def create_qualification(
     valid_until: str = Form("长期"),
     owner: str = Form(""),
     detail: str = Form(""),
+    attrs: str = Form(""),
     file: UploadFile | None = File(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -226,6 +259,7 @@ async def create_qualification(
         valid_until=(valid_until.strip() or "长期"),
         owner=owner.strip(),
         detail=detail.strip(),
+        attrs_json=_parse_attrs(kind, attrs) or {},
         filename=filename,
         storage_path=storage_path,
         review_status="已入库",
@@ -254,6 +288,7 @@ async def update_qualification(
     owner: str = Form(""),
     detail: str = Form(""),
     review_status: str = Form(""),
+    attrs: str = Form(""),
     file: UploadFile | None = File(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -276,6 +311,9 @@ async def update_qualification(
         item.owner = owner.strip()
     if detail != "":
         item.detail = detail.strip()
+    new_attrs = _parse_attrs(item.kind, attrs)
+    if new_attrs is not None:
+        item.attrs_json = new_attrs
     if is_business_license(item.name, item.number, item.detail) and _existing_business_license(db, exclude_id=item.id):
         raise HTTPException(400, "营业执照全公司只需一条，请编辑已有条目")
     if review_status:
@@ -352,7 +390,7 @@ def get_qualification_file(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Response:
-    _ = current_user
+    require_library_read(current_user)
     item = _require_asset(db, qual_id)
     ref = item.storage_path
     filename = item.filename or "scan"
@@ -381,7 +419,7 @@ def get_qualification_image_file(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _ = current_user
+    require_library_read(current_user)
     img = db.get(QualificationAssetImage, image_id)
     if not img or not img.storage_path or not storage.exists(img.storage_path):
         raise HTTPException(404, "扫描图不存在")
@@ -402,7 +440,7 @@ def list_source_docs(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[QualificationParseJobOut]:
-    _ = current_user
+    require_library_read(current_user)
     rows = db.query(QualificationSourceDoc).order_by(QualificationSourceDoc.created_at.desc()).all()
     return [_job_to_out(d) for d in rows]
 
@@ -413,41 +451,65 @@ async def upload_source_docs(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[QualificationParseJobOut]:
+    require_credits("qualification_extract")
     require_perm(current_user, PERM_QUAL_EDIT)
     if not files:
         raise HTTPException(400, "请先选择商务标文件")
     created: list[QualificationSourceDoc] = []
+    skipped: list[QualificationParseJobOut] = []
+    batch_hashes: set[str] = set()
     for upload in files:
         filename = upload.filename or ""
         ext = os.path.splitext(filename)[1].lower()
         if ext not in ALLOWED_SOURCE_EXTS:
             raise HTTPException(400, "仅支持 .doc / .docx / .pdf 格式")
         content = await upload.read()
+        check_upload(content, ext)
+        digest = hashlib.sha256(content).hexdigest()
+        if digest in batch_hashes:
+            continue
+        batch_hashes.add(digest)
+        same = (
+            db.query(QualificationSourceDoc)
+            .filter(
+                QualificationSourceDoc.content_sha256 == digest,
+                QualificationSourceDoc.status != "failed",
+            )
+            .first()
+        )
+        if same:
+            out = _job_to_out(same)
+            out.duplicate = True
+            out.note = f"与已上传的《{same.filename}》内容完全相同，未重复抽取"
+            skipped.append(out)
+            continue
         key = storage.put_bytes("qualification-docs", content, ext)
         doc = QualificationSourceDoc(
             filename=filename,
             storage_path=key,
             size_bytes=len(content),
+            content_sha256=digest,
             status="queued",
             note="排队抽取资质、合同与财务…",
         )
         db.add(doc)
         db.flush()
         created.append(doc)
-    write_audit(
-        db,
-        action="引用知识",
-        user_name=current_user.name,
-        target="企业资质证照库",
-        detail=f"上传 {len(created)} 份商务标并启动抽取",
-    )
+    if created:
+        write_audit(
+            db,
+            action="引用知识",
+            user_name=current_user.name,
+            target="企业资质证照库",
+            detail=f"上传 {len(created)} 份商务标并启动抽取",
+        )
     db.commit()
     from ..tasks import run_qualification_extract_task
 
     for doc in created:
         db.refresh(doc)
         run_qualification_extract_task.delay(doc.id)
-    return [_job_to_out(d) for d in created]
+    return [_job_to_out(d) for d in created] + skipped
 
 
 @router.get("/qualification-source-docs/{doc_id}/file")
@@ -456,7 +518,7 @@ def get_source_doc_file(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Response:
-    _ = current_user
+    require_library_read(current_user)
     doc = db.get(QualificationSourceDoc, doc_id)
     if not doc or not doc.storage_path or not storage.exists(doc.storage_path):
         raise HTTPException(404, "来源商务标不存在")
@@ -477,7 +539,7 @@ def get_extract_job(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> QualificationExtractJobOut:
-    _ = current_user
+    require_library_read(current_user)
     doc = db.get(QualificationSourceDoc, job_id)
     if not doc:
         raise HTTPException(404, "抽取任务不存在")
@@ -492,3 +554,48 @@ def get_extract_job(
         error=doc.error,
         note=doc.note or "",
     )
+
+
+@router.post("/qualification-source-docs/reextract")
+def reextract_library(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """清空资质库条目，对已上传的商务标源文件（按内容去重）重新抽取。"""
+    require_credits("qualification_extract")
+    require_perm(current_user, PERM_QUAL_EDIT)
+    from ..tasks import run_qualification_extract_task
+
+    removed = reset_library(db)
+    docs = (
+        db.query(QualificationSourceDoc)
+        .filter(QualificationSourceDoc.storage_path != "")
+        .order_by(QualificationSourceDoc.created_at.asc())
+        .all()
+    )
+    seen: set[str] = set()
+    keep: list[QualificationSourceDoc] = []
+    for doc in docs:
+        try:
+            digest = hashlib.sha256(storage.get_bytes(doc.storage_path)).hexdigest()
+        except Exception:  # noqa: BLE001
+            continue
+        if digest in seen:
+            continue
+        seen.add(digest)
+        keep.append(doc)
+    for doc in keep:
+        doc.status = "queued"
+        doc.note = "重新抽取排队中…"
+        doc.error = None
+    write_audit(
+        db,
+        action="引用知识",
+        user_name=current_user.name,
+        target="企业资质证照库",
+        detail=f"清空 {removed} 条并对 {len(keep)} 份商务标重新抽取",
+    )
+    db.commit()
+    for doc in keep:
+        run_qualification_extract_task.delay(doc.id)
+    return {"removed": removed, "queued": len(keep)}

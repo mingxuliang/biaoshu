@@ -70,6 +70,21 @@ def branch_legacy_draft(db: Session, legacy: WriterDraft, wanted_doc_kind: str) 
     return other if wanted_doc_kind == other_kind else legacy
 
 
+SERVER_SETTINGS_KEYS = ("ledger", "formRegistry", "responses", "placedFeatures", "teamFill", "formAuto", "engFacts", "engPlan", "waterCheckJson")
+
+
+def merge_settings(previous, incoming):
+    """前端回存设置时，台账、附录登记表、应答记录由后端维护：丢掉前端带回的旧值，保留库里现有的。"""
+    if not isinstance(incoming, dict):
+        return incoming
+    prev = previous if isinstance(previous, dict) else {}
+    merged = {k: v for k, v in incoming.items() if k not in SERVER_SETTINGS_KEYS}
+    for key in SERVER_SETTINGS_KEYS:
+        if key in prev:
+            merged[key] = prev[key]
+    return merged
+
+
 def mirror_shared_fields(db: Session, draft: WriterDraft, data: dict) -> WriterDraft | None:
     """标书设置（第一步）/标书解读来源（第二步）在技术标、商务标两条轨道间共享。
 
@@ -89,7 +104,7 @@ def mirror_shared_fields(db: Session, draft: WriterDraft, data: dict) -> WriterD
     if "selectedProductLibraryId" in data:
         sibling.selected_product_library_id = data["selectedProductLibraryId"] or None
     if "settings" in data:
-        sibling.settings_json = data["settings"]
+        sibling.settings_json = merge_settings(sibling.settings_json, data["settings"])
         flag_modified(sibling, "settings_json")
     if "interpretSource" in data:
         sibling.interpret_source = data["interpretSource"]

@@ -300,7 +300,7 @@ export default function ProjectDetailPage() {
 
       {/* 全部文档：招标文件 / 招标解析 / 技术标 / 商务标 */}
       <div className="mt-5">
-        <ProjectDocuments projectId={project.id} />
+        <ProjectDocuments projectId={project.id} category={project.category} />
       </div>
 
       <div className="mt-5 flex justify-end">

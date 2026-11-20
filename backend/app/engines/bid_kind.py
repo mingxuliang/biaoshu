@@ -316,6 +316,26 @@ def filter_standard_review(raw, scope: str):
     return out
 
 
+def severity_counts(items: list[dict]) -> tuple[int, int, int, str]:
+    """报告、导出、预审落库共用的计数口径：
+    只有自动判定的废标算废标（红）；需人工核验的废标不确定是否真废标，按风险（橙）计，不会让总灯偏绿；
+    降档、扣分算风险；建议单独计。issueClass 缺失的旧数据按自动废标处理。"""
+    waste = risk = suggest = 0
+    for item in items:
+        severity = item.get("severity")
+        if severity == "废标":
+            if str(item.get("issueClass") or "auto_veto") == "auto_veto":
+                waste += 1
+            else:
+                risk += 1
+        elif severity in ("降档", "扣分"):
+            risk += 1
+        elif severity == "建议":
+            suggest += 1
+    light = "红" if waste else ("橙" if risk else "绿")
+    return waste, risk, suggest, light
+
+
 def project_booklet_payload(payload: dict, scope: str) -> dict:
     """把合订 full 结果切成商务或技术分册视图，各自满分 100，不再混算。"""
     if scope not in (SCOPE_BUSINESS, SCOPE_TECH):
@@ -332,15 +352,7 @@ def project_booklet_payload(payload: dict, scope: str) -> dict:
             or str(i.get("location") or "").startswith("自定义规则")
         )
     ]
-    waste = sum(1 for i in issues if i.get("severity") == "废标")
-    risk = sum(1 for i in issues if i.get("severity") in ("降档", "扣分"))
-    suggest = sum(1 for i in issues if i.get("severity") == "建议")
-    if waste:
-        light = "红"
-    elif risk:
-        light = "橙"
-    else:
-        light = "绿"
+    waste, risk, suggest, light = severity_counts(issues)
     out = dict(payload)
     out["scope"] = scope
     out["levels"] = levels

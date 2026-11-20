@@ -8,13 +8,23 @@ from sqlalchemy.orm import Session
 
 from ..audit import actor_from_request, project_label, write_audit
 from ..auth import get_current_user
+from ..billing import require_credits
 from ..db import get_db
 from .. import storage
 from ..engines import e_tender_score, rules_config
+from ..engines.parse_schema import is_engineering_category
+from ..engines.rules_data import catalog_bundle
 from ..engines.excerpt_guard import chapter_from_location, display_rule, split_bid_and_tender
 from ..engines.e_business_vision import is_transport_stub_finding
 from ..engines.docx_extract import extract_document_plain_text, extract_full_text, extract_paragraphs
-from ..engines.bid_kind import filter_tender_rules, normalize_kind, normalize_scope, project_booklet_payload, BOOKLET_LEVELS
+from ..engines.bid_kind import (
+    BOOKLET_LEVELS,
+    filter_tender_rules,
+    normalize_kind,
+    normalize_scope,
+    project_booklet_payload,
+    severity_counts,
+)
 from ..engines.review_export import review_run_to_docx
 from ..models import BidDocument, Project, ReviewFinding, ReviewRun, User
 from ..permissions import PERM_REVIEW, require_project
@@ -42,6 +52,7 @@ def _finding_to_issue(f: ReviewFinding) -> dict:
         "strategyKey": str(extra.get("strategyKey") or ""),
         "applyText": str(extra.get("applyText") or ""),
         "issueClass": str(extra.get("issueClass") or ""),
+        "basis": str(extra.get("basis") or ""),
     }
 
 
@@ -53,6 +64,7 @@ def create_prereview_job(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> JobStatusOut:
+    require_credits("prereview")
     require_project(db, current_user, project_id, PERM_REVIEW)
     doc = db.get(BidDocument, payload.bid_document_id)
     if not doc:
@@ -213,13 +225,20 @@ def _backfill_tender_rules(db: Session, run: ReviewRun) -> dict:
                     text = extract_full_text(path)
         except Exception:
             text = ""
-    strategy_keys = rules_config.load_enabled_catalog_keys(db, "strategy")
+    # 与正式预审同一口径：软件服务类读 sw_ 系列策略，工程类读原策略
+    project_row = db.get(Project, run.project_id)
+    is_engineering = is_engineering_category(project_row.category if project_row else None)
+    if is_engineering:
+        strategy_keys = rules_config.load_enabled_catalog_keys(db, "strategy")
+    else:
+        strategy_keys = rules_config.load_enabled_sw_catalog_keys(db, "strategy")
     report = e_tender_score.run(
         text,
         checklist.score_rules,
         checklist.dimensions,
         headings=headings,
         strategy_keys=strategy_keys,
+        strategy_catalog=catalog_bundle(is_engineering).get("strategy"),
     )
     report = filter_tender_rules(report, getattr(run, "scope", None) or "full")
     run.tender_rules_json = report
@@ -237,19 +256,50 @@ def _latest_done_run(db: Session, project_id: str, scope: str | None = None, *, 
     return run
 
 
-def _issues_from_findings(findings) -> list[dict]:
+def _legacy_tender_parse_finding(finding: ReviewFinding) -> bool:
+    """旧版招标解析约定。历史轮次里已经落库的也不再展示，规范对标负责招标书和技术评分。"""
+    if (finding.engine or "") == "e_parse_match":
+        return True
+    blob = f"{finding.rule or ''}\n{finding.location or ''}"
+    return "招标解析约定" in blob
+
+
+def _visible_findings(findings) -> list[ReviewFinding]:
     return [
-        _finding_to_issue(f)
+        f
         for f in findings
         if not is_transport_stub_finding(f.location or "", f.suggestion or "")
+        and not _legacy_tender_parse_finding(f)
     ]
 
 
-def _custom_rules_payload(raw) -> list[dict]:
-    if not isinstance(raw, list):
-        return []
+def _issues_from_findings(findings) -> list[dict]:
+    return [_finding_to_issue(f) for f in _visible_findings(findings)]
+
+
+def _counts_without_legacy(findings: list[ReviewFinding]) -> tuple[int, int, int, str]:
+    """报告上的废标/扣分/建议按仍在展示的问题重算，旧解析约定不再计入。"""
+    return severity_counts([_finding_to_issue(f) for f in findings])
+
+
+def _levels_without_legacy(levels, findings: list[ReviewFinding]) -> list:
+    by_level: dict[str, int] = {}
+    for finding in findings:
+        key = finding.level or ""
+        by_level[key] = by_level.get(key, 0) + 1
     out = []
-    for item in raw:
+    for level in levels or []:
+        if not isinstance(level, dict):
+            continue
+        row = dict(level)
+        row["issues"] = by_level.get(str(row.get("key") or ""), 0)
+        out.append(row)
+    return out
+
+
+def _custom_rules_payload(raw) -> list:
+    out = []
+    for item in raw or []:
         if not isinstance(item, dict):
             continue
         status = item.get("status")
@@ -358,27 +408,30 @@ def _run_to_report(db: Session, run: ReviewRun, as_scope: str | None = None) -> 
     tender_rules = run.tender_rules_json or {}
     if not (isinstance(tender_rules, dict) and tender_rules.get("groups")):
         tender_rules = _backfill_tender_rules(db, run)
-    custom_rules = _custom_rules_payload(getattr(run, "custom_rules_json", None))
-    issues = _issues_from_findings(db.query(ReviewFinding).filter(ReviewFinding.run_id == run.id).all())
-    light = run.light if run.light in ("绿", "橙", "红") else "橙"
+    visible = _visible_findings(db.query(ReviewFinding).filter(ReviewFinding.run_id == run.id).all())
+    waste, risk, suggest, light = _counts_without_legacy(visible)
     payload = {
         "round": run.round,
-        "waste": run.waste,
-        "risk": run.risk,
-        "suggest": run.suggest,
+        "waste": waste,
+        "risk": risk,
+        "suggest": suggest,
         "light": light,
         "scope": getattr(run, "scope", None) or "full",
-        "levels": run.levels_json or [],
+        "levels": _levels_without_legacy(run.levels_json or [], visible),
         "dimensions": run.dimensions_json or [],
         "techModules": run.tech_modules_json or [],
-        "tenderRules": tender_rules or None,
-        "customRules": custom_rules,
+        "tenderRules": tender_rules if isinstance(tender_rules, dict) and tender_rules.get("groups") else None,
+        "customRules": _custom_rules_payload(getattr(run, "custom_rules_json", None)),
         "standardReview": _standard_review_payload(getattr(run, "standard_review_json", None)),
-        "issues": issues,
+        "issues": [_finding_to_issue(f) for f in visible],
+        "bidDocumentId": run.bid_document_id or "",
+        "checklistLocked": rules_config.checklist_locked(db, run.project_id),
     }
     run_scope = payload["scope"]
-    if as_scope in ("business", "tech") and run_scope == "full":
-        payload = project_booklet_payload(payload, as_scope)
+    # 页面和导出都按分册投影，计数口径与过滤规则一致
+    view_scope = as_scope if run_scope == "full" else run_scope
+    if view_scope in ("business", "tech"):
+        payload = project_booklet_payload(payload, view_scope)
     return ReviewReportOut(**payload)
 
 

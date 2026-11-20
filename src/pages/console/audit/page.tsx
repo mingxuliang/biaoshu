@@ -11,6 +11,7 @@ import {
   createPrereviewJob,
   exportLatestReviewReport,
   getBidDocument,
+  getLatestChecklist,
   getLatestReviewPair,
   getReviewRunTrend,
   pollJobUntilDone,
@@ -20,8 +21,9 @@ import {
   type ReviewReportPair,
   type TrendPoint,
 } from "@/lib/api";
-import { issueChapter, issueRuleKind, issueRuleLabel, NO_BID_EXCERPT_HINT, splitBidAndTender, type IssueRuleKind } from "@/lib/excerpt";
+import { isLegacyTenderParseIssue, isTechScoreRulerItem, issueChapter, issueRuleKind, issueRuleLabel, NO_BID_EXCERPT_HINT, splitBidAndTender, type IssueRuleKind } from "@/lib/excerpt";
 import { GRADE_BADGE_CLASS, GRADE_LABEL, GRADE_TEXT_CLASS, LIGHT_LABEL, lightFromCounts } from "@/lib/grade";
+import { isEngineeringCategory } from "@/mocks/projects";
 
 type TabKey = "result" | "trend" | "report";
 
@@ -82,8 +84,14 @@ export default function AuditPage() {
   const [loadingReport, setLoadingReport] = useState(false);
 
   const hasDocs = !!(docs?.business || docs?.tech);
-  const bizReport = docs?.business ? reports.business : null;
-  const techReport = docs?.tech ? reports.tech : null;
+  // 报告必须是对当前选中文件跑出来的；文件换了（如修改闭环保存的新版本），旧报告不能当成新结果展示
+  const reportMatchesDoc = (r: ReviewReportPair["business"], slot: "business" | "tech") =>
+    !!r && (!r.bidDocumentId || r.bidDocumentId === docs?.[slot]?.bidDocumentId);
+  const bizRaw = docs?.business ? reports.business : null;
+  const techRaw = docs?.tech ? reports.tech : null;
+  const bizReport = reportMatchesDoc(bizRaw, "business") ? bizRaw : null;
+  const techReport = reportMatchesDoc(techRaw, "tech") ? techRaw : null;
+  const staleReport = reportScope === "business" ? (bizRaw && !bizReport ? bizRaw : null) : techRaw && !techReport ? techRaw : null;
   const activeReport = reportScope === "business" ? bizReport : techReport;
   const report = bizReport || techReport;
   const view = activeReport;
@@ -91,9 +99,10 @@ export default function AuditPage() {
   const scopeLevelKeys = reportScope === "business" ? ["L1", "L2"] : ["L3", "L4", "L5"];
   const resultIssues = (view?.issues || []).filter(
     (issue) =>
-      scopeLevelKeys.includes(issue.level) ||
-      (issue.rule || "").startsWith("自定义规则") ||
-      (issue.location || "").startsWith("自定义规则"),
+      !isLegacyTenderParseIssue(issue) &&
+      (scopeLevelKeys.includes(issue.level) ||
+        (issue.rule || "").startsWith("自定义规则") ||
+        (issue.location || "").startsWith("自定义规则")),
   );
   const isTechScoreIssue = (issue: { rule?: string; location?: string }) =>
     /技术标评分/.test(`${issue.rule || ""}\n${issue.location || ""}`);
@@ -101,9 +110,11 @@ export default function AuditPage() {
     (issue) => issueRuleKind(issue) === "tender" && !isTechScoreIssue(issue),
   );
   const reviewIssues = resultIssues.filter((issue) => issueRuleKind(issue) === "review");
-  const rulerItems = (view?.tenderRules?.groups ?? [])
-    .filter((group) => /技术标评分/.test(`${group.key || ""}${group.label || ""}`))
-    .flatMap((group) => (group.items || []).map((item) => ({ ...item, groupLabel: group.label })));
+  const rulerItems = (view?.tenderRules?.groups ?? []).flatMap((group) =>
+    (group.items || [])
+      .filter((item) => isTechScoreRulerItem(item, group))
+      .map((item) => ({ ...item, groupLabel: group.label })),
+  );
   const listedIssues = issueKind === "tender" ? tenderIssues : reviewIssues;
   const tenderCount = tenderIssues.length + rulerItems.length;
 
@@ -117,7 +128,7 @@ export default function AuditPage() {
         const base = (slot: "business" | "tech"): PreReviewDoc => ({
           kind: "existing",
           name: d.filename,
-          source: "修改闭环二次评审",
+          source: d.source === "writer" ? "撰写工作台导出" : "修改闭环二次评审",
           size: formatDocSize(d.sizeBytes),
           updated: "刚刚",
           bidDocumentId: d.id,
@@ -252,11 +263,20 @@ export default function AuditPage() {
 
   const startReview = () => {
     if (busy || !hasDocs) return;
+    if (reportScope === "tech" && currentProject && isEngineeringCategory(currentProject.category)) {
+      // 工程标技术册依赖工程量清单和图纸，缺件时先提醒，不拦截
+      getLatestChecklist(currentProject.id)
+        .then((cl) => {
+          const warns = cl.extractStats?.engineeringWarnings || [];
+          if (warns.length) showToast(`提示：${warns[0]}`, "info");
+        })
+        .catch(() => undefined);
+    }
     void runPrereview("first", reportScope);
   };
 
   const startSecondReview = () => {
-    if (busy || !hasDocs || !view) return;
+    if (busy || !hasDocs) return;
     void runPrereview("second", reportScope);
   };
 
@@ -298,7 +318,7 @@ export default function AuditPage() {
       ...(target.levels || []).map((lv) => `${lv.key} ${lv.name}：等级 ${lv.grade}，${lv.issues} 项，${lv.status}`),
       "",
       "问题摘要：",
-      ...target.issues.slice(0, 20).map((issue, i) => {
+      ...target.issues.filter((issue) => !isLegacyTenderParseIssue(issue)).slice(0, 20).map((issue, i) => {
         const { excerpt } = splitBidAndTender(issue.excerpt, issue.tenderQuote, issue.rule);
         return `${i + 1}. [${issue.severity}] ${issueRuleLabel(issue)} @ ${issueChapter(issue.location) || issue.location}：${excerpt || NO_BID_EXCERPT_HINT}`;
       }),
@@ -355,8 +375,8 @@ export default function AuditPage() {
             <button
               type="button"
               onClick={startSecondReview}
-              disabled={busy || !view}
-              title={!view ? "请先完成当前分册预审，回改标书后再发起二次评审" : undefined}
+              disabled={busy}
+              title={!view ? "当前文件还没有预审结果，会直接对它跑一轮评审" : undefined}
               className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-4 text-sm font-medium text-background-50 transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-60"
             >
               <i className={`${secondReviewing ? "ri-loader-4-line animate-spin" : "ri-refresh-line"} text-sm`}></i>
@@ -371,6 +391,7 @@ export default function AuditPage() {
           projectId={currentProject.id}
           projectName={currentProject.name}
           projectCode={currentProject.code}
+          category={currentProject.category}
           onContinue={setDocs}
         />
       ) : (
@@ -474,6 +495,30 @@ export default function AuditPage() {
               ? ` 上一轮已标记修复 ${searchParams.get("resolved")!.split(",").filter(Boolean).length} 项，请对照新报告确认是否消除。`
               : ""}
           </span>
+        </div>
+      )}
+
+      {staleReport && (
+        <div className="mb-4 flex flex-col gap-2 rounded-lg border border-secondary-200 bg-secondary-50 px-4 py-3 text-xs text-foreground-700 sm:flex-row sm:items-center sm:justify-between">
+          <span className="flex items-start gap-2">
+            <i className="ri-time-line mt-0.5 text-secondary-600"></i>
+            该分册最近一次预审（第 {staleReport.round} 轮）审的是另一个文件，当前选中的文件还没有预审结果，旧报告不再展示。
+          </span>
+          <button
+            type="button"
+            onClick={startSecondReview}
+            disabled={busy}
+            className="h-8 shrink-0 cursor-pointer whitespace-nowrap rounded-md bg-primary-500 px-3 text-xs font-medium text-background-50 hover:bg-primary-600 disabled:opacity-60"
+          >
+            对当前文件发起评审
+          </button>
+        </div>
+      )}
+
+      {view && view.checklistLocked === false && (
+        <div className="mb-4 flex items-start gap-2 rounded-lg border border-secondary-200 bg-secondary-50 px-4 py-3 text-xs text-foreground-700">
+          <i className="ri-lock-unlock-line mt-0.5 text-secondary-600"></i>
+          <span>评标尺子还没有锁定，本次预审用的是最新一份解析结果。建议到「招标解析」核对后锁定，避免重新解析后口径变化。</span>
         </div>
       )}
 
@@ -917,6 +962,7 @@ export default function AuditPage() {
               <PreReviewReport
                 projectName={currentProject.name}
                 projectCode={currentProject.code}
+                category={currentProject.category}
                 levels={view.levels}
                 issues={view.issues}
                 dimensions={view.dimensions}

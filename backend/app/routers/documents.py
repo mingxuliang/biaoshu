@@ -4,11 +4,13 @@ import os
 import docx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
 from ..config import get_settings
 from ..db import get_db
+from ..engines.safe_office import check_upload
 from ..models import BidDocument, User
 from ..permissions import PERM_REVIEW, PERM_WRITER, require_any_perm, require_project
 from ..engines.bid_kind import normalize_kind
@@ -48,6 +50,7 @@ async def upload_bid_document(
         raise HTTPException(400, "仅支持 .docx 或可复制文字的 PDF")
 
     content = await file.read()
+    check_upload(content, ext)
     if ext == ".docx":
         try:
             docx.Document(io.BytesIO(content))
@@ -98,6 +101,7 @@ def list_project_bid_documents(
     docs = (
         db.query(BidDocument)
         .filter(BidDocument.project_id == project_id)
+        .filter(or_(BidDocument.source.is_(None), BidDocument.source != "revision-working"))  # 修改闭环工作稿不对外展示
         .order_by(BidDocument.uploaded_at.desc())
         .all()
     )

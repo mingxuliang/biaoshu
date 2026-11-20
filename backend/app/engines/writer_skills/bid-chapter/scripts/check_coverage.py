@@ -27,7 +27,20 @@ def main() -> int:
     names = [str(name) for name in (data.get("product_names") or []) if str(name).strip()]
     require_gap = bool(data.get("require_gap"))
     solution = chapter_path.read_text(encoding="utf-8", errors="ignore") if chapter_path.is_file() else ""
-    problems = _coverage_problems(obligations, solution, names, require_gap)
+    facts_path = Path("facts.txt")
+    facts = [line.strip() for line in facts_path.read_text(encoding="utf-8").splitlines() if line.strip()] if facts_path.is_file() else []
+    min_path = Path("min_chars.txt")
+    try:
+        min_chars = int(min_path.read_text(encoding="utf-8").strip() or 0) if min_path.is_file() else 0
+    except ValueError:
+        min_chars = 0
+    checks_path = Path("response_checks.txt")
+    marks = (
+        [line.strip() for line in checks_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if checks_path.is_file()
+        else []
+    )
+    problems = _coverage_problems(obligations, solution, names, require_gap, facts, min_chars, marks)
     print(json.dumps({"ok": not problems, "problems": problems[:20]}, ensure_ascii=False))
     return 1 if problems else 0
 

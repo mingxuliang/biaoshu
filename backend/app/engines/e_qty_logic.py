@@ -13,7 +13,9 @@ from __future__ import annotations
 import json
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
+
+from ..ctx_executor import ContextThreadPoolExecutor as ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from . import qty_boq, rules_data
@@ -724,6 +726,30 @@ def _compare_capacity(agg: BoqAgg, bid: BidQty, dev_ok: float, default_yield: fl
     return findings
 
 
+def check_labor_schedule(text: str) -> list[dict]:
+    """工期、高峰人数和总工日三者同时出现时，核对总工日是否超过高峰人数乘工期。"""
+    days = re.search(r"(?:工期|日历天)[^\d]{0,12}(\d{2,4})\s*(?:日历天|天)", text or "")
+    people = re.search(r"(?:高峰期|高峰人数|劳动力)[^\d]{0,8}(\d{1,5})\s*人", text or "")
+    mandays = re.search(r"(?:总工日|工日合计)[^\d]{0,8}(\d{2,8})", text or "")
+    if not (days and people and mandays):
+        return []
+    day_n = int(days.group(1))
+    person_n = int(people.group(1))
+    total = int(mandays.group(1))
+    if day_n <= 0 or person_n <= 0:
+        return []
+    if total <= day_n * person_n:
+        return []
+    return [
+        _finding(
+            rule="F06.09 工期与劳动力不匹配",
+            excerpt=mandays.group(0)[:80],
+            suggestion=f"总工日 {total} 超过高峰 {person_n} 人乘工期 {day_n} 天。请核对劳动力计划表和进度计划。",
+            severity="扣分",
+        )
+    ]
+
+
 def compare(agg: BoqAgg, bid: BidQty, thresholds: dict | None = None) -> list[dict]:
     """三条确定性比对，可供单测注入抽取结果。"""
     dev_ok = _threshold(thresholds, "qty_deviation_ok", 5)
@@ -811,4 +837,5 @@ def evaluate(
     agg = qty_boq.aggregate(dimensions)
     bid = extracted if extracted is not None else extract_from_bid(paragraphs, full_text or "")
     findings = compare(agg, bid, thresholds)
+    findings.extend(check_labor_schedule(full_text or ""))
     return findings, module_score(findings, no_boq=not agg.has_rows)

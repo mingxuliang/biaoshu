@@ -1,34 +1,63 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { OutlineNode } from "@/lib/api";
 import { isSkipAiWrite } from "@/lib/outlineNum";
-import type { LayoutConfig } from "@/mocks/writerSteps";
+import { defaultLayout, type LayoutConfig } from "@/mocks/writerSteps";
 import StatusBadge from "../../components/StatusBadge";
 import ChapterEditor, { type ChapterEditorHandle } from "./ChapterEditor";
+import LayoutPreview from "./LayoutPreview";
 
 export interface EditorPanelHandle {
   insertImage: (src: string, alt: string) => boolean;
 }
 
 interface EditorPanelProps {
+  draftId: string;
   chapter: OutlineNode | undefined;
   content: string;
   generating: boolean;
   onGenerate: () => void;
-  onSave: () => void;
+  onSave: () => void | Promise<void>;
   onExport: () => void;
+  onSelfCheck?: () => void;
+  selfChecking?: boolean;
   onContentChange: (text: string) => void;
   exporting?: boolean;
   layout?: LayoutConfig | null;
 }
 
+function writingLayout(layout?: LayoutConfig | null): LayoutConfig {
+  if (!layout || layout.fromTender) return defaultLayout;
+  return {
+    ...defaultLayout,
+    ...layout,
+    headings: { ...defaultLayout.headings, ...layout.headings },
+  };
+}
+
 const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(function EditorPanel(
-  { chapter, content, generating, onGenerate, onSave, onExport, onContentChange, exporting = false, layout },
+  {
+    draftId,
+    chapter,
+    content,
+    generating,
+    onGenerate,
+    onSave,
+    onExport,
+    onSelfCheck,
+    selfChecking = false,
+    onContentChange,
+    exporting = false,
+    layout,
+  },
   ref,
 ) {
-  const layoutFont = layout?.bodyFont || "宋体";
-  const layoutSize = layout?.fontSize || "小四";
+  const applied = writingLayout(layout);
+  const layoutFont = applied.bodyFont || "仿宋";
+  const layoutSize = applied.fontSize || "小四";
   const [fontSize, setFontSize] = useState(layoutSize);
   const [fontFamily, setFontFamily] = useState(layoutFont);
+  const [mode, setMode] = useState<"edit" | "preview">("edit");
+  const [refreshToken, setRefreshToken] = useState(0);
   const chapterRef = useRef<ChapterEditorHandle | null>(null);
   const wordCount = content.trim() ? Math.round(content.replace(/\s/g, "").length) : 0;
   const useOriginal = !!chapter && isSkipAiWrite(chapter);
@@ -38,6 +67,10 @@ const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(function Edi
     setFontSize(layoutSize);
   }, [layoutFont, layoutSize]);
 
+  useEffect(() => {
+    setMode("edit");
+  }, [chapter?.id]);
+
   useImperativeHandle(
     ref,
     () => ({
@@ -45,6 +78,17 @@ const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(function Edi
     }),
     [],
   );
+
+  const handleSaveClick = async () => {
+    await onSave();
+    if (mode === "preview") setRefreshToken((n) => n + 1);
+  };
+
+  const switchToPreview = async () => {
+    await onSave();
+    setMode("preview");
+    setRefreshToken((n) => n + 1);
+  };
 
   return (
     <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-background-300 bg-background-100">
@@ -59,18 +103,66 @@ const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(function Edi
             AI 已优化 {chapter.aiRounds} 轮
           </span>
         )}
+        {chapter && (
+          <div className="flex h-7 items-center rounded-md border border-background-300 bg-background-50 p-0.5 text-xs">
+            <button
+              type="button"
+              onClick={() => setMode("edit")}
+              className={`flex h-full cursor-pointer items-center gap-1 rounded px-2 transition-colors ${
+                mode === "edit" ? "bg-primary-500 text-background-50" : "text-foreground-600 hover:bg-background-200"
+              }`}
+            >
+              <i className="ri-edit-line text-xs"></i>
+              编辑
+            </button>
+            <button
+              type="button"
+              onClick={switchToPreview}
+              className={`flex h-full cursor-pointer items-center gap-1 rounded px-2 transition-colors ${
+                mode === "preview" ? "bg-primary-500 text-background-50" : "text-foreground-600 hover:bg-background-200"
+              }`}
+              title="按 Word 版式渲染本章，所见与导出一致"
+            >
+              <i className="ri-file-word-2-line text-xs"></i>
+              版式预览
+            </button>
+          </div>
+        )}
         <div className="ml-auto flex items-center gap-2">
-          <span className="hidden text-xs text-foreground-500 sm:block">
-            约 <span className="font-label text-gradient font-medium">{wordCount}</span> 字
-          </span>
+          {mode === "edit" && (
+            <span className="hidden text-xs text-foreground-500 sm:block">
+              约 <span className="font-label text-gradient font-medium">{wordCount}</span> 字
+            </span>
+          )}
+          {mode === "preview" && (
+            <button
+              type="button"
+              onClick={switchToPreview}
+              className="flex h-7 cursor-pointer items-center gap-1 whitespace-nowrap rounded-md border border-background-300 px-2.5 text-xs font-medium text-foreground-600 transition-colors hover:bg-background-200"
+            >
+              <i className="ri-refresh-line text-xs"></i>
+              刷新预览
+            </button>
+          )}
           <button
             type="button"
-            onClick={onSave}
+            onClick={handleSaveClick}
             className="flex h-7 cursor-pointer items-center gap-1 whitespace-nowrap rounded-md border border-background-300 px-2.5 text-xs font-medium text-foreground-600 transition-colors hover:bg-background-200"
           >
             <i className="ri-save-3-line text-xs"></i>
             保存
           </button>
+          {onSelfCheck && (
+            <button
+              type="button"
+              onClick={onSelfCheck}
+              disabled={selfChecking}
+              className="flex h-7 cursor-pointer items-center gap-1 whitespace-nowrap rounded-md border border-background-300 px-2.5 text-xs font-medium text-foreground-600 transition-colors hover:bg-background-200 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <i className={`${selfChecking ? "ri-loader-4-line animate-spin" : "ri-shield-check-line"} text-xs`}></i>
+              {selfChecking ? "自查中…" : "提交前自查"}
+            </button>
+          )}
           <button
             type="button"
             onClick={onExport}
@@ -101,7 +193,9 @@ const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(function Edi
         </div>
       )}
 
-      {chapter ? (
+      {chapter && mode === "preview" ? (
+        <LayoutPreview draftId={draftId} chapterId={chapter.id} refreshToken={refreshToken} />
+      ) : chapter ? (
         <ChapterEditor
           key={chapter.id}
           chapterId={chapter.id}
@@ -112,7 +206,7 @@ const EditorPanel = forwardRef<EditorPanelHandle, EditorPanelProps>(function Edi
           onFontFamily={setFontFamily}
           onFontSize={setFontSize}
           onMarkdownChange={onContentChange}
-          layout={layout}
+          layout={applied}
           applyTenderIndent={!useOriginal}
           onReady={(handle) => {
             chapterRef.current = handle;

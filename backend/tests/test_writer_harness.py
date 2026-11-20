@@ -9,6 +9,7 @@ import unittest
 from app.engines.writer_harness import (
     HarnessError,
     _bad_outline_headings,
+    _outline_has_heading,
     _coverage_problems,
     content_edit_block_reason,
     outline_add,
@@ -99,9 +100,14 @@ class WriterHarnessRulesTest(unittest.TestCase):
         from app.engines.writer_harness import read_upload_text
 
         self.assertEqual(read_upload_text([], "说明.docx"), "没有这个附件")
+        from app.config import get_settings
+
         listed = read_upload_text([{"filename": "说明.txt", "storagePath": "missing"}], "")
         self.assertIn("说明.txt", listed)
-        fd, path = tempfile.mkstemp(suffix=".txt")
+        # 历史本地路径只认上传目录下的文件
+        upload_dir = get_settings().upload_dir
+        os.makedirs(upload_dir, exist_ok=True)
+        fd, path = tempfile.mkstemp(suffix=".txt", dir=upload_dir)
         os.write(fd, "全天候热线".encode("utf-8"))
         os.close(fd)
         try:
@@ -332,6 +338,22 @@ class WriterLayoutTest(unittest.TestCase):
         self.assertEqual(normal.element.rPr.rFonts.get(qn("w:ascii")), "Times New Roman")
         self.assertEqual(normal.element.rPr.rFonts.get(qn("w:eastAsia")), "仿宋")
         self.assertEqual(normal.font.size.pt, 14)
+        self.assertIsNone(h1.element.rPr.rFonts.get(qn("w:eastAsiaTheme")))
+        body = next(p for p in doc.paragraphs if p.text.startswith("平台分三层"))
+        self.assertEqual(body.runs[0].font.size.pt, 14)
+        self.assertEqual(body.runs[0]._element.rPr.rFonts.get(qn("w:eastAsia")), "仿宋")
+        mixed = chapters_to_docx(
+            "混字体",
+            [{"id": "a", "parentId": None, "title": "章", "num": "一、", "part": "tech"}],
+            {"a": "{{楷体:10.5pt}}这段不该是楷体五号。"},
+            {},
+            {"fromTender": True, "bodyFont": "楷体", "bodySizePt": 10.5, "fontSize": "五号"},
+        )
+        mixed_doc = docx.Document(io.BytesIO(mixed))
+        sample = next(p for p in mixed_doc.paragraphs if "不该是楷体" in p.text)
+        self.assertEqual(sample.runs[0]._element.rPr.rFonts.get(qn("w:eastAsia")), "仿宋")
+        self.assertEqual(sample.runs[0].font.size.pt, 12)
+        self.assertEqual(sample.paragraph_format.first_line_indent.pt, 24)
 
     def test_legacy_layout_still_exports(self) -> None:
         import io
@@ -360,6 +382,10 @@ class WriterToolRuntimeTest(unittest.TestCase):
         from app.engines.writer_tool_runtime import materialize_tender_extracts, read_tender_text, skill_directories
 
         self.assertEqual(len(skill_directories()), 4)
+        water_dirs = skill_directories("water")
+        self.assertEqual(len(water_dirs), 5)
+        self.assertTrue(any(path.endswith("water-bid") for path in water_dirs))
+        self.assertFalse(any(path.endswith("water-bid") for path in skill_directories("engineering")))
 
         workdir = self.workdir
         materialize_tender_extracts(
@@ -389,6 +415,100 @@ class WriterToolRuntimeTest(unittest.TestCase):
         self.assertIn("没有这个脚本", text)
         unsafe = run_skill_script(self.workdir, "bid-outline", "lint_outline.py", ["outline.md;rm"])
         self.assertIn("参数不安全", unsafe)
+
+    def test_requirement_pages_keep_whole_items(self) -> None:
+        from app.engines.writer_tool_runtime import materialize_tender_extracts, read_tender_text
+
+        items = [f"{index}、功能域{index}：" + ("指标" * 2000) for index in range(1, 18)]
+        materialize_tender_extracts(self.workdir, {"tech": "\n".join(items), "business": "", "format": ""})
+        page1 = read_tender_text(self.workdir, section="tech", page=1)
+        self.assertIn("功能域1", page1)
+        self.assertNotIn("功能域3", page1)
+        self.assertIn("条目还没列完", page1)
+        self.assertNotIn("请用 query 检索", page1)
+        later = ""
+        for page in range(2, 18):
+            later = read_tender_text(self.workdir, section="tech", page=page)
+            if "功能域17" in later:
+                break
+        self.assertIn("功能域17", later)
+
+    def test_missing_original_is_loaded_for_the_workspace(self) -> None:
+        from unittest.mock import patch
+
+        from app.engines.writer_tool_runtime import read_tender_text
+
+        with patch(
+            "app.engines.writer_tool_runtime.load_original_tender_text",
+            return_value="招标正文。应提供全天候热线。",
+        ):
+            text = read_tender_text(self.workdir, project_id="proj-1", section="original")
+        self.assertIn("全天候热线", text)
+        self.assertNotIn("尚未提供招标书原文", text)
+
+    def test_read_tender_numbers_items_and_hits_keep_their_ids(self) -> None:
+        from app.engines.writer_tool_runtime import materialize_tender_extracts, read_tender_text
+
+        materialize_tender_extracts(
+            self.workdir,
+            {
+                "tech": "1、招标范围：覆盖全部分厂\n2、提醒与消息：须提前三天提醒\n3、本地化部署：支持500并发",
+                "business": "1、投标函：按格式填写\n2、实施方案：分三阶段",
+                "format": "",
+            },
+        )
+        listed = read_tender_text(self.workdir, section="tech")
+        self.assertIn("【T1】1、招标范围", listed)
+        self.assertIn("【T3】3、本地化部署", listed)
+        hit = read_tender_text(self.workdir, section="tech", query="三天")
+        self.assertIn("【T2】", hit)
+        self.assertNotIn("【T3】", hit)
+        business = read_tender_text(self.workdir, section="business", query="实施")
+        self.assertIn("【B2】", business)
+
+    def test_source_ref_lines_and_ids_round_trip(self) -> None:
+        from app.engines.writer_tool_runtime import outline_cited_ids, parse_source_refs, requirement_item_map
+
+        self.assertEqual(parse_source_refs("依据：T5"), ["T5"])
+        self.assertEqual(parse_source_refs("- 依据: T5, b2，T7"), ["T5", "B2", "T7"])
+        self.assertEqual(parse_source_refs("依据：T3-T5"), ["T3", "T4", "T5"])
+        self.assertIsNone(parse_source_refs("## 依据说明"))
+        self.assertEqual(outline_cited_ids("# 技术\n依据：T1\n## 部署\n依据：T2,B1\n"), {"T1", "T2", "B1"})
+        mapping = requirement_item_map({"tech": "1、甲\n2、乙", "business": "1、丙"})
+        self.assertEqual(mapping, {"T1": "1、甲", "T2": "2、乙", "B1": "1、丙"})
+
+    def test_hard_facts_are_extracted_and_checked_with_numeral_variants(self) -> None:
+        from app.engines.writer_tool_runtime import extract_hard_facts, missing_hard_facts
+
+        text = "支持500并发，响应时间不超过2秒，可用性不低于99.9%，计划课程须提前三天提醒，保留一个接口。"
+        facts = extract_hard_facts(text)
+        self.assertIn("500并发", facts)
+        self.assertIn("不低于99.9%", facts)
+        self.assertIn("三天", facts)
+        self.assertFalse(any(item.startswith("一") for item in facts))
+        plus = extract_hard_facts("5500+注册学员，100+管理员，800+课程")
+        self.assertEqual(plus, ["5500+", "100+", "800+"])
+        self.assertEqual(missing_hard_facts(plus, "支持5500名以上学员、不少于100名管理员、800门课程"), [])
+        self.assertEqual(missing_hard_facts(plus, "支持5000名学员"), ["5500+", "100+", "800+"])
+        body = "系统按 500 个并发用户设计，响应时间控制在2 秒内，可用性达到99.9%，提前3天推送提醒。"
+        self.assertEqual(missing_hard_facts(facts, body), [])
+        gap = missing_hard_facts(facts, "系统支持高并发，响应很快。")
+        self.assertIn("500并发", gap)
+        self.assertIn("不低于99.9%", gap)
+
+    def test_chapter_coverage_requires_facts_and_real_content(self) -> None:
+        from app.engines.writer_harness import _coverage_problems, _min_solution_chars
+
+        obligations = [{"title": "提醒策略"}]
+        problems = _coverage_problems(
+            obligations, "提醒策略：支持灵活配置。", [], False, ["三天", "5次"], _min_solution_chars("条款" * 100)
+        )
+        joined = "；".join(problems)
+        self.assertIn("「三天」", joined)
+        self.assertIn("「5次」", joined)
+        self.assertIn("不足以逐条应答", joined)
+        ok = "提醒策略" + "：系统支持提前3天提醒，每日最多推送5次，并保留触达记录。" * 20
+        self.assertEqual(_coverage_problems(obligations, ok, [], False, ["三天", "5次"], 100), [])
 
     def test_lint_outline_script_runs(self) -> None:
         from pathlib import Path
@@ -475,3 +595,53 @@ class BidRequirementMergeTest(unittest.TestCase):
 
         merged = _merge(["功能登录\n功能登录", "验收标准"])
         self.assertEqual(merged, "功能登录\n验收标准")
+
+
+class WaterChatGateTest(unittest.TestCase):
+    def test_replace_chapter_blocks_water_and_lets_building_through(self) -> None:
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from app.engines.writer_harness import DraftBinding, HarnessError
+
+        class Db:
+            def __init__(self, project):
+                self.project = project
+
+            def get(self, _model, _id):
+                return self.project
+
+            def commit(self):
+                return None
+
+            def close(self):
+                return None
+
+        def flag(_obj, _name):
+            return None
+
+        outline = [{"id": "c1", "title": "工程概况", "parentId": None, "part": "tech", "engKind": "pairs"}]
+        water_draft = SimpleNamespace(
+            project_id="p",
+            doc_kind="tech",
+            settings_json={"engFacts": {"structures": [{"name": "新建泵站", "count": "2", "spec": ""}]}},
+            outline_json=outline,
+            chapter_contents_json={},
+        )
+        binding = DraftBinding("u", "d", "c1")
+        with mock.patch.object(DraftBinding, "_open", return_value=(Db(SimpleNamespace(category="工程类", specialty="水利")), water_draft, flag)):
+            with mock.patch("app.engines.engineering_check.check_inputs", return_value={}):
+                with self.assertRaises(HarnessError) as caught:
+                    binding.replace_chapter("c1", "新建泵站 3 座。")
+        self.assertIn("3 座", str(caught.exception))
+
+        house = SimpleNamespace(
+            project_id="p",
+            doc_kind="tech",
+            settings_json={},
+            outline_json=list(outline),
+            chapter_contents_json={},
+        )
+        with mock.patch.object(DraftBinding, "_open", return_value=(Db(SimpleNamespace(category="工程类", specialty="房建")), house, flag)):
+            self.assertIn("已更新", binding.replace_chapter("c1", "新建泵站 3 座。"))
+        self.assertIn("3 座", house.chapter_contents_json["c1"])

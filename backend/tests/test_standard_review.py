@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from app.engines.standard_ingest import detect_specialty, parse_standard_code, split_clauses
+from app.engines.standard_ingest import detect_specialty, detect_work_type, parse_standard_code, split_clauses
 from app.engines.standard_review import (
     CHUNK_CHARS,
     DIRECT_BID_CHARS,
@@ -80,6 +80,35 @@ class ClauseSplitTests(unittest.TestCase):
         self.assertEqual(detect_specialty("高标准农田灌溉"), "水利")
         self.assertEqual(detect_specialty("建筑基坑支护"), "房建")
 
+    def test_specialty_not_confused_by_generic_engineering_words(self) -> None:
+        """水利渠道、堤防工程也大量出现混凝土/结构/基坑等通用工程词，不能被误判成房建。"""
+        blob = (
+            "本工程为河道治理堤防加固工程，渠道开挖基坑后浇筑混凝土挡墙结构，"
+            "围堰导流后进行水下作业，资质要求：水利水电工程施工总承包三级。"
+        )
+        self.assertEqual(detect_specialty(blob), "水利")
+
+    def test_specialty_qualification_name_is_strong_signal(self) -> None:
+        self.assertEqual(
+            detect_specialty("投标人须具备市政公用工程施工总承包贰级及以上资质"), "市政"
+        )
+        self.assertEqual(
+            detect_specialty("投标人须具备公路工程施工总承包贰级及以上资质"), "公路"
+        )
+
+    def test_detect_work_type(self) -> None:
+        self.assertEqual(detect_work_type("本工程为水库除险加固工程"), "除险加固")
+        self.assertEqual(detect_work_type("堤防维修养护工程"), "维修养护")
+        self.assertEqual(detect_work_type("泵站改扩建及提升工程"), "改建")
+        self.assertEqual(detect_work_type("灌区扩建工程"), "扩建")
+        self.assertEqual(detect_work_type("新建渠道工程"), "新建")
+        self.assertEqual(detect_work_type("没有任何工程类型关键词"), "新建")
+        self.assertEqual(
+            detect_work_type("安徽省合肥市店埠河治理工程。本次对未治理河道进行整治，未达标段进行提标建设。承包人对其使用的交通道路进行必要的维修加固。"),
+            "改建",
+        )
+        self.assertEqual(detect_work_type("交通道路进行必要的维修加固"), "新建")
+
 
 class ParseRowTests(unittest.TestCase):
     def test_object_wrapper_keeps_bracket_inside_text(self) -> None:
@@ -124,12 +153,27 @@ class IndicatorTests(unittest.TestCase):
                     "chapter": "施工方案",
                     "axis": "合规性",
                 },
+                {
+                    "factor": "投标保证金证明材料",
+                    "mustWrite": "附基本存款账户证明扫描件",
+                    "axis": "规范性",
+                },
+                {
+                    "factor": "工程保险",
+                    "mustWrite": "承包人投保建筑工程一切险",
+                    "axis": "合规性",
+                },
+                {
+                    "factor": "导流方案",
+                    "mustWrite": "写明导流、围堰和度汛措施",
+                    "axis": "完整性",
+                },
             ]
         )
 
     def test_tech_leaves_drop_business_and_keep_must_write(self) -> None:
         leaves = self._leaves()
-        self.assertEqual([item["factor"] for item in leaves], ["混凝土强度"])
+        self.assertEqual([item["factor"] for item in leaves], ["混凝土强度", "导流方案"])
         score_rules = [
             {
                 "dimension": "商务标",

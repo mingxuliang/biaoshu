@@ -14,10 +14,19 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..models import QualificationSourceDoc
 from .. import storage
+from .doc_parse import scan_page_text
 from .docx_extract import extract_paragraphs
 from .legacy_doc import as_docx
 from .knowledge_extract import _is_heading
 from .llm import LlmError, chat_complete
+from .qualification_schema import (
+    NOT_QUAL_TITLE,
+    clean_attrs,
+    describe,
+    is_fragment_name,
+    looks_like_person_name,
+)
+from .table_md import docx_table_rows, rows_to_markdown
 from .qualification_dedup import (
     VALID_KINDS,
     apply_to_library,
@@ -58,18 +67,27 @@ NUMBER_RE = re.compile(
     r"(?:证号|证书编号|编号|合同号|合同编号|统一社会信用代码)[:：\s]*([A-Za-z0-9\-]{4,})"
 )
 DATE_RE = re.compile(r"(?:有效期至|有效期|截止日期|报表日期|审计截止)[:：\s]*(\d{4}-\d{2}-\d{2}|长期)")
-EXTRACT_SYSTEM = """你从本公司过往商务标中抽取企业资质材料。只抽取证照、人员证书、合同/业绩、财务资料、设备与信用材料。
-商务标正文经常很少，材料本身就是营业执照、资质证书、合同扫描件等图片；章节标题能对应到证照时也要抽取。
-不要抽取技术方案、功能点、报价。
-返回 JSON 数组，每项字段：
-{"name":"短名称","kind":"cert|people|achievement|equipment|credit|contract|financial","number":"证号或合同号","level":"等级","validUntil":"YYYY-MM-DD或长期","owner":"持有人/主体","detail":"原文要点","low_confidence":false}
+EXTRACT_SYSTEM = """你从本公司过往商务标中抽取企业资质材料，每一份材料输出一条记录。
+只抽取：企业证照与资质证书（cert）、拟派人员简历与资格（people）、合同与项目业绩（contract/achievement）、财务资料（financial）、信用材料（credit）、设备（equipment）。
+不要抽取：技术方案、功能点、功能说明表、报价表、服务单价表、评分索引表、保密声明、投标函正文、目录。
+正文给的是章节文字或一张表（Markdown 表，第一行是表头）。表里每一行通常是一条记录（一个项目、一个人或一份证书），请按表头把各列对应到字段。
+返回 JSON 数组，每项：
+{"kind":"cert|people|contract|achievement|financial|credit|equipment","name":"材料名称（不超过40字，用客户+项目名或证书名或姓名，不能是字段标签或序号）","number":"证号或合同号","validUntil":"YYYY-MM-DD或长期","owner":"人员姓名（仅people）","detail":"原文中的关键信息，原样摘录，不要改写","attrs":{...},"low_confidence":false}
+attrs 按类型填写下列字段，原文没有的字段不要写，更不能编造：
+- cert：certName、issuer、number、level、validFrom、validUntil
+- people：name、role、title、certificates、education、years
+- contract / achievement：projectName、client、contractNo、amount（带单位，如 158万元）、signDate、startDate、endDate、category（如 培训平台、学习管理系统、软件开发）、scope、contact
+- financial：year、docType（审计报告、资产负债表、纳税证明等）
+- credit：docType、issuer、issueDate
+- equipment：model、quantity
 规则：
-- 营业执照全公司只有一套，名称用「营业执照」，kind=cert。
-- 荣誉证书、奖状、获奖证明 kind=cert，不要写成 credit。
-- 人员证书必须写 owner（持证人姓名），有证号则填 number；同名证书不同人要分开。
-- 合同 kind=contract，写清合同编号与金额。
-- 财务（审计报告、报表、纳税）kind=financial，必须写 validUntil（报表截止日或年度，如 2024-12-31）；过期也要抽取，不要丢弃。
-- 看不清则 low_confidence=true，不要编造证号。只返回 JSON 数组。"""
+- 营业执照全公司只有一套，name 用「营业执照」，kind=cert。荣誉证书、奖状 kind=cert。
+- 客户合同、项目业绩一律用 contract（有合同则 contract，仅写了业绩无合同才用 achievement）；不要把合同归成 people 或 credit。
+- people 必须有姓名；没有姓名的行不要输出。
+- 财务材料必须给 validUntil（报表截止日或年度，如 2024-12-31）；过期也要抽取。
+- 看不清则 low_confidence=true。只返回 JSON 数组。"""
+
+ROWS_PER_CALL = 8
 
 
 def _extract_model_id() -> str:
@@ -220,31 +238,18 @@ def extract_docx_qual_blocks(path: str) -> tuple[list[dict], list[dict], list[di
                 current_texts.append(text)
         elif child.tag == qn("w:tbl"):
             table = Table(child, document)
-            rows: list[list[str]] = []
-            for row in table.rows:
-                cells = [" ".join(cell.text.split()) for cell in row.cells]
-                cells = [c for c in cells if c]
-                if cells:
-                    rows.append(cells)
+            rows = [r for r in docx_table_rows(table) if any(c for c in r)]
             heading = current_heading
             for blob, ext in _blip_blobs(child, document):
                 images.append(_image_dict(blob, ext, heading))
             if not rows:
                 continue
             header = " ".join(rows[0])
-            table_text = "\n".join(" | ".join(r) for r in rows)
-            if TABLE_HINT.search(header) or TABLE_HINT.search(heading) or _looks_target(heading, header):
-                blocks.append({"heading": heading, "text": table_text[:CHUNK_CHARS]})
-                for row in rows[1:]:
-                    name = row[0][:40]
-                    if name and not _looks_boilerplate(name):
-                        expected.append(
-                            {
-                                "heading": name,
-                                "text": " | ".join(row)[:800],
-                                "kind": "table",
-                            }
-                        )
+            table_text = rows_to_markdown(rows)
+            if NOT_QUAL_TITLE.search(header) or NOT_QUAL_TITLE.search(heading):
+                current_texts.append(table_text)
+            elif TABLE_HINT.search(header) or TABLE_HINT.search(heading) or _looks_target(heading, header):
+                blocks.append({"heading": heading, "text": table_text, "rows": rows})
             else:
                 current_texts.append(table_text)
 
@@ -270,7 +275,13 @@ def extract_pdf_qual_blocks(path: str) -> tuple[list[dict], list[dict], list[dic
                 pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
                 blob = pix.tobytes("png")
                 if len(blob) >= 8192:
-                    images.append(_image_dict(blob, ".png", heading))
+                    item = _image_dict(blob, ".png", heading)
+                    # 扫描页文字交给解析路由（MinerU 优先），后面识别证照字段时复用，不再重复 OCR
+                    scan_text, source = scan_page_text(doc, i - 1)
+                    if scan_text:
+                        item["ocr_text"] = scan_text
+                        item["ocr_source"] = source
+                    images.append(item)
             elif not (_looks_boilerplate(text[:40]) and not _looks_target(text[:80], text)):
                 if _looks_target(heading, text) or TARGET_HEADING.search(text[:400]):
                     blocks.append({"heading": heading, "text": text[:CHUNK_CHARS]})
@@ -332,11 +343,14 @@ def _regex_fields(text: str) -> tuple[str, str]:
 
 
 def _fallback_from_block(block: dict) -> list[dict]:
+    """模型没返回时的兜底：只认标题明确是证照材料的非表格章节，表格和碎片一律不兜底。"""
     heading = (block.get("heading") or "").strip()
     text = (block.get("text") or "").strip()
-    if not heading or heading in ("全文",) or _looks_boilerplate(heading):
+    if block.get("rows") or text.startswith("|"):
         return []
-    if not _looks_target(heading, text):
+    if not heading or heading in ("全文",) or _looks_boilerplate(heading) or is_fragment_name(heading):
+        return []
+    if NOT_QUAL_TITLE.search(heading) or not looks_like_qualification(heading, text):
         return []
     number, valid_until = _regex_fields(text)
     kind = _guess_kind(heading, text)
@@ -353,6 +367,7 @@ def _fallback_from_block(block: dict) -> list[dict]:
             "validUntil": valid_until or "长期",
             "owner": "",
             "detail": text[:800],
+            "attrs": {},
             "evidence": [{"heading": heading, "excerpt": text[:300]}],
             "images": [],
             "low_confidence": True,
@@ -360,11 +375,7 @@ def _fallback_from_block(block: dict) -> list[dict]:
     ]
 
 
-def _llm_fill_block(block: dict) -> list[dict]:
-    heading = block.get("heading") or ""
-    text = (block.get("text") or "")[:CHUNK_CHARS]
-    if not text.strip():
-        return []
+def _call_extract(heading: str, text: str) -> list[dict]:
     user = f"章节标题：{heading}\n\n正文：\n{text}"
     try:
         content = chat_complete(
@@ -374,54 +385,95 @@ def _llm_fill_block(block: dict) -> list[dict]:
                 {"role": "user", "content": user},
             ],
             temperature=0.1,
-            timeout=60,
-            max_tokens=1800,
+            timeout=90,
+            max_tokens=3000,
         )
-        rows = _parse_json_array(content)
+        return _parse_json_array(content)
     except LlmError:
-        rows = []
+        return []
     except Exception:
         logger.exception("qualification extract llm failed for %s", heading)
-        rows = []
-    if not rows:
-        return _fallback_from_block(block)
+        return []
+
+
+def _candidate_from_row(row: dict, heading: str, text: str) -> dict | None:
+    kind = row.get("kind") if row.get("kind") in VALID_KINDS else _guess_kind(row.get("name") or heading, text)
+    attrs = clean_attrs(kind, row.get("attrs"))
+    name = (row.get("name") or "").strip()[:40]
+    if kind in ("contract", "achievement"):
+        derived = f"{attrs.get('client', '')}{attrs.get('projectName', '')}"
+        if not name or is_fragment_name(name):
+            name = derived[:40]
+    elif kind == "people":
+        name = name if name and not is_fragment_name(name, 2) else attrs.get("name", "")
+    elif kind == "cert" and (not name or is_fragment_name(name)):
+        name = attrs.get("certName", "")
+    if not name or is_fragment_name(name, 2 if kind == "people" else 3) or _looks_boilerplate(name):
+        return None
+    if NOT_QUAL_TITLE.search(name):
+        return None
+    owner = (row.get("owner") or attrs.get("name") or (name if kind == "people" else "") or "").strip()[:80]
+    if kind == "people" and not looks_like_person_name(owner):
+        return None
+    if kind == "people":
+        attrs.setdefault("name", owner)
+    if re.search(r"荣誉|奖状|获奖", name) and kind == "credit":
+        kind = "cert"
+    valid_until = (row.get("validUntil") or attrs.get("validUntil") or "").strip() or "长期"
+    if kind == "financial" and valid_until in ("", "长期"):
+        year = re.search(r"(20\d{2})", attrs.get("year", "") + name + text)
+        if year:
+            valid_until = f"{year.group(1)}-12-31"
+    number = (row.get("number") or attrs.get("number") or attrs.get("contractNo") or "").strip()[:80]
+    detail = (row.get("detail") or "").strip()[:800] or describe(kind, attrs)
+    return {
+        "name": name,
+        "kind": kind,
+        "number": number,
+        "level": (attrs.get("level") or attrs.get("title") or "").strip()[:80],
+        "validUntil": valid_until,
+        "owner": owner,
+        "detail": detail,
+        "attrs": attrs,
+        "evidence": [{"heading": heading, "excerpt": text[:300]}],
+        "images": [],
+        "low_confidence": bool(row.get("low_confidence")),
+    }
+
+
+def _llm_fill_block(block: dict) -> list[dict]:
+    heading = block.get("heading") or ""
+    rows = block.get("rows")
+    pieces: list[str] = []
+    if rows and len(rows) > 1:
+        head, body = rows[0], rows[1:]
+        for i in range(0, len(body), ROWS_PER_CALL):
+            pieces.append(rows_to_markdown([head] + body[i : i + ROWS_PER_CALL]))
+    else:
+        text = (block.get("text") or "").strip()
+        if not text:
+            return []
+        pieces = [text[i : i + CHUNK_CHARS] for i in range(0, len(text), CHUNK_CHARS)]
     out: list[dict] = []
-    for row in rows:
-        name = (row.get("name") or "").strip()[:40] or heading[:40]
-        if _looks_boilerplate(name):
-            continue
-        kind = row.get("kind") if row.get("kind") in VALID_KINDS else _guess_kind(name, text)
-        if re.search(r"荣誉|奖状|获奖", name) and kind == "credit":
-            kind = "cert"
-        valid_until = (row.get("validUntil") or "").strip() or "长期"
-        if kind == "financial" and valid_until in ("", "长期"):
-            year = re.search(r"(20\d{2})", name + text)
-            if year:
-                valid_until = f"{year.group(1)}-12-31"
-        out.append(
-            {
-                "name": name,
-                "kind": kind,
-                "number": (row.get("number") or "").strip()[:80],
-                "level": (row.get("level") or "").strip()[:80],
-                "validUntil": valid_until,
-                "owner": (row.get("owner") or "").strip()[:80],
-                "detail": (row.get("detail") or "").strip()[:800],
-                "evidence": [{"heading": heading, "excerpt": text[:300]}],
-                "images": [],
-                "low_confidence": bool(row.get("low_confidence")),
-            }
-        )
+    for piece in pieces:
+        got = _call_extract(heading, piece)
+        for row in got:
+            cand = _candidate_from_row(row, heading, piece)
+            if cand:
+                out.append(cand)
     return out or _fallback_from_block(block)
 
 
 def _coverage_fill(expected: list[dict], candidates: list[dict]) -> list[dict]:
+    """按标题回扫：只补标题本身就是证照名称的章节，不把表格行首格当材料。"""
     have = {normalize_name(c.get("name") or "") for c in candidates}
     extra: list[dict] = []
     for row in expected:
+        if row.get("kind") == "table":
+            continue
         heading = (row.get("heading") or "").strip()
         key = normalize_name(heading)
-        if not key or key in have:
+        if not key or key in have or is_fragment_name(heading):
             continue
         extra.extend(_fallback_from_block({"heading": heading, "text": row.get("text") or ""}))
         have.add(key)
@@ -477,10 +529,10 @@ def _candidates_from_orphan_images(images: list[dict]) -> list[dict]:
             continue
         ocr_parts: list[str] = []
         for img in imgs[:3]:
+            text = img.get("ocr_text") or ""
             blob = img.get("blob") or b""
-            if not blob:
-                continue
-            text, _status = ocr_image_bytes(blob)
+            if not text and blob:
+                text, _status = ocr_image_bytes(blob)
             if text:
                 ocr_parts.append(text)
         ocr_text = "\n".join(ocr_parts)
@@ -496,21 +548,100 @@ def _candidates_from_orphan_images(images: list[dict]) -> list[dict]:
                 if first_line:
                     name = first_line[:40]
         number, valid_until = _regex_fields(ocr_text)
+        kind = _guess_kind(name, ocr_text or heading)
+        attrs: dict = {}
+        low_confidence = True
+        if needs_vision(ocr_text, number, valid_until):
+            row = _vision_read_cert(next((img.get("blob") for img in imgs if img.get("blob")), b""))
+            if row:
+                name = (row.get("name") or name).strip()[:40] or name
+                number = (row.get("number") or number).strip()[:80]
+                valid_until = (row.get("validUntil") or valid_until).strip()
+                if row.get("kind") in VALID_KINDS:
+                    kind = row["kind"]
+                attrs = clean_attrs(kind, row.get("attrs"))
+                low_confidence = bool(row.get("low_confidence", True))
         extra.append(
             {
                 "name": name,
-                "kind": _guess_kind(name, ocr_text or heading),
+                "kind": kind,
                 "number": number,
                 "level": "",
                 "validUntil": valid_until or "长期",
                 "owner": "",
                 "detail": (ocr_text or heading)[:800],
+                "attrs": attrs,
                 "evidence": [{"heading": heading, "excerpt": (ocr_text or "扫描件")[:300]}],
                 "images": imgs,
-                "low_confidence": True,
+                "low_confidence": low_confidence,
             }
         )
     return extra
+
+
+VISION_PROMPT = """这是一张企业资质材料的扫描件（证书、执照、合同或财务报表）。只读图上真实可见的文字，看不清的字段留空，不要编造。
+返回 JSON 对象：{"kind":"cert|people|contract|achievement|financial|credit|equipment","name":"材料名称","number":"证号或合同号","validUntil":"YYYY-MM-DD或长期","attrs":{"certName":"","issuer":"","validFrom":""},"low_confidence":false}"""
+
+
+def needs_vision(ocr_text: str, number: str, valid_until: str) -> bool:
+    """OCR 字数太少，或证号、有效期都没认出来时，才值得调用视觉模型。"""
+    if len((ocr_text or "").strip()) < 40:
+        return True
+    return not number and not valid_until
+
+
+def _vision_read_cert(blob: bytes) -> dict | None:
+    if not blob:
+        return None
+    from .llm import get_vision_model_id, is_vision_model
+
+    try:
+        model_id = get_vision_model_id()
+    except Exception:
+        return None
+    if not model_id or not is_vision_model(model_id):
+        return None
+    import base64
+    import io
+
+    from PIL import Image
+
+    from .ocr import image_to_jpeg_bytes
+
+    try:
+        with Image.open(io.BytesIO(blob)) as img:
+            jpeg = image_to_jpeg_bytes(img)
+    except Exception:
+        return None
+    b64 = base64.b64encode(jpeg).decode("ascii")
+    try:
+        raw = chat_complete(
+            model_id=model_id,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": VISION_PROMPT},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                    ],
+                }
+            ],
+            temperature=0.1,
+            timeout=60,
+            extra={"response_format": {"type": "json_object"}},
+        )
+    except Exception:
+        logger.warning("qualification vision read failed", exc_info=True)
+        return None
+    text = (raw or "").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        data = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def extract_candidates(path: str) -> list[dict]:
@@ -530,7 +661,28 @@ def extract_candidates(path: str) -> list[dict]:
     candidates.extend(_coverage_fill(expected, candidates))
     unused = _attach_images(candidates, images)
     candidates.extend(_candidates_from_orphan_images(unused))
+    candidates = [c for c in (_tidy_candidate(c) for c in candidates) if c]
+    candidates = [
+        c
+        for c in candidates
+        if not is_fragment_name(c.get("name") or "", 2 if c.get("kind") == "people" else 3)
+        and c.get("kind") in VALID_KINDS
+        and (c.get("kind") != "people" or looks_like_person_name(c.get("owner") or ""))
+    ]
     return merge_candidates_in_doc(candidates)
+
+
+_LIST_ITEM_RE = re.compile(r"^\s*\d{1,2}\s*(?:[、)）]|[.．](?!\d))\s*\S")
+_HEADING_NO_RE = re.compile(r"^\s*\d+(?:\.\d+){2,4}\s*|^\s*\d+\.\d+\s+")
+
+
+def _tidy_candidate(cand: dict) -> dict | None:
+    """名称前的章节号去掉；正文清单里「1、某某银行（…）」这类只有一行字的条目丢弃（表格里有完整记录）。"""
+    name = str(cand.get("name") or "").strip()
+    if _LIST_ITEM_RE.match(name) and not cand.get("attrs"):
+        return None
+    cand["name"] = _HEADING_NO_RE.sub("", name).strip()
+    return cand
 
 
 def run_extract_for_source_doc(db: Session, source_doc_id: str) -> None:

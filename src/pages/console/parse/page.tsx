@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import Toast from "../components/Toast";
 import TypeBadge from "../components/TypeBadge";
@@ -15,12 +15,14 @@ import {
   listProjectTenderDocuments,
   locateTenderText,
   lockChecklist,
+  unlockChecklist,
   pollTenderParseJobUntilDone,
   triggerFileDownload,
   type Checklist,
   type TenderDocumentSummary,
 } from "@/lib/api";
 import { TENDER_KIND_LABELS, effectiveTenderKind, isSpreadsheetFile } from "@/lib/tenderPackage";
+import { isEngineeringCategory } from "@/mocks/projects";
 import { findContentAnchor, findSheetRow, type LocateTarget } from "@/lib/tenderAnchor";
 import WordViewer, { type WordViewerHandle } from "./components/WordViewer";
 import ParseResults from "./components/ParseResults";
@@ -38,6 +40,7 @@ export default function ParsePage() {
   const { projects } = useProjects();
   const { token } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const selectedId = searchParams.get("project") || "";
   const currentProject = projects.find((p) => p.id === selectedId);
 
@@ -167,9 +170,14 @@ export default function ParsePage() {
   const startParse = async () => {
     if (!currentProject || !docs.length || parsing) return;
     const ids = docs.map((d) => d.id);
-    const primary = docs.find((d) => effectiveTenderKind(d.kind, d.filename) === "main") || docs[0];
+    const primary = docs.find((d) => effectiveTenderKind(d.kind, d.filename, currentProject.category) === "main") || docs[0];
     setParsing(true);
-    showToast(`AI 正在一并解析招标文件包（${docs.length} 份）：按固定指标抽取，并提取施工图纸设计说明…`, "info");
+    showToast(
+      isEngineeringCategory(currentProject.category)
+        ? `AI 正在一并解析招标文件包（${docs.length} 份）：按固定指标抽取，并提取施工图纸设计说明…`
+        : `AI 正在一并解析招标文件包（${docs.length} 份）：按软件服务类固定指标抽取…`,
+      "info",
+    );
     try {
       const job = await createTenderParseJob(currentProject.id, primary.id, ids);
       const finalStatus = await pollTenderParseJobUntilDone(job.job_id, { timeoutMs: 40 * 60 * 1000 });
@@ -210,6 +218,20 @@ export default function ParsePage() {
     }
   };
 
+  const handleUnlock = async () => {
+    if (!currentProject || !checklist || !checklist.locked || locking) return;
+    setLocking(true);
+    try {
+      const unlocked = await unlockChecklist(currentProject.id, checklist.id);
+      setChecklist(unlocked);
+      showToast("已解除锁定。重新解析并核对后，记得再锁定一次", "info");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "解除锁定失败，请重试", "error");
+    } finally {
+      setLocking(false);
+    }
+  };
+
   const handleDocsChange = (next: TenderDocumentSummary[]) => {
     setDocs(next);
     setActiveDocId((prev) => (prev && next.some((d) => d.id === prev) ? prev : next[0]?.id || ""));
@@ -221,7 +243,7 @@ export default function ParsePage() {
       <div>
         <PageHeader
           title="招标文件解析与对标清单"
-          description="把招标文件包（正文、图纸、答疑补遗、清单、其他材料）解析为可执行的评分点与否决项清单。第一步，请先选择要解析的投标项目。"
+          description="把招标文件包解析为可执行的评分点与否决项清单。软件服务类不抽图纸和工程量清单。第一步，请先选择要解析的投标项目。"
         />
         <div className="overflow-hidden rounded-lg border border-background-300 bg-background-100">
           <div className="flex items-center gap-2.5 border-b border-background-300 bg-background-50 px-5 py-4">
@@ -283,7 +305,11 @@ export default function ParsePage() {
     <div className="flex h-[calc(100vh-6rem)] flex-col">
       <PageHeader
         title="招标文件解析与对标清单"
-        description="分类上传招标文件包后一并解析。左侧预览原文，右侧查看各类型抽取字段；施工图纸只抽取设计说明。自定义规则进入 AI 预审。"
+        description={
+          isEngineeringCategory(currentProject.category)
+            ? "分类上传招标文件包后一并解析。左侧预览原文，右侧查看各类型抽取字段；施工图纸只抽取设计说明。自定义规则进入 AI 预审。"
+            : "分类上传招标文件包后一并解析。软件服务类只解析正文、答疑补遗与其他材料，不识别施工图纸和工程量清单。"
+        }
         actions={
           <div className="flex items-center gap-2">
             <button
@@ -354,7 +380,7 @@ export default function ParsePage() {
               title={activeDoc?.filename}
             >
               {docs.map((doc) => {
-                const kind = effectiveTenderKind(doc.kind, doc.filename);
+                const kind = effectiveTenderKind(doc.kind, doc.filename, currentProject.category);
                 return (
                   <option key={doc.id} value={doc.id}>
                     {doc.filename} · {TENDER_KIND_LABELS[kind] || kind}
@@ -374,15 +400,38 @@ export default function ParsePage() {
         </div>
       </div>
 
+      {isEngineeringCategory(currentProject.category) && (checklist?.extractStats?.engineeringWarnings?.length ?? 0) > 0 && (
+        <div className="mb-4 rounded-lg border border-secondary-200 bg-secondary-50 px-4 py-3 text-xs text-foreground-700">
+          <div className="mb-1 flex items-center gap-1.5 font-medium text-secondary-700">
+            <i className="ri-error-warning-line"></i>
+            工程标招标包缺件提示
+          </div>
+          <ul className="list-disc space-y-0.5 pl-5">
+            {checklist!.extractStats!.engineeringWarnings!.map((w) => (
+              <li key={w}>{w}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <Modal
         open={rulesOpen}
         onClose={() => setRulesOpen(false)}
         title="自定义规则"
-        subtitle="按招标文件、图纸或多种类型补充人工理解的规则，启用后进入 AI 预审"
+        subtitle={
+          isEngineeringCategory(currentProject.category)
+            ? "按招标文件、图纸或多种类型补充人工理解的规则，启用后进入 AI 预审"
+            : "按招标文件补充人工理解的规则，启用后进入 AI 预审"
+        }
         width="max-w-3xl"
       >
         {currentProject ? (
-          <CustomRulesPanel projectId={currentProject.id} onCountChange={setCustomRuleCount} onToast={showToast} />
+          <CustomRulesPanel
+            projectId={currentProject.id}
+            category={currentProject.category}
+            onCountChange={setCustomRuleCount}
+            onToast={showToast}
+          />
         ) : null}
       </Modal>
 
@@ -390,7 +439,11 @@ export default function ParsePage() {
         open={packageOpen}
         onClose={() => setPackageOpen(false)}
         title="上传招标文件包"
-        subtitle="按类型上传正文、答疑补遗、工程量清单、其他材料、施工图纸，关闭后可一并解析"
+        subtitle={
+          isEngineeringCategory(currentProject.category)
+            ? "按类型上传正文、答疑补遗、工程量清单、其他材料、施工图纸，关闭后可一并解析"
+            : "按类型上传正文、答疑补遗与其他材料，关闭后可一并解析"
+        }
         width="max-w-5xl"
       >
         <TenderPackagePanel
@@ -398,6 +451,7 @@ export default function ParsePage() {
           docs={docs}
           loading={docsLoading}
           onDocsChange={handleDocsChange}
+          category={currentProject.category}
         />
         <div className="mt-4 flex justify-end border-t border-background-200 pt-3">
           <button
@@ -434,10 +488,14 @@ export default function ParsePage() {
             parsing={parsing}
             locking={locking}
             category={currentProject.category}
-            focusKind={activeDoc ? effectiveTenderKind(activeDoc.kind, activeDoc.filename) : undefined}
+            focusKind={activeDoc ? effectiveTenderKind(activeDoc.kind, activeDoc.filename, currentProject.category) : undefined}
             focusFileId={activeDoc?.id}
             onLock={handleLock}
+            onUnlock={handleUnlock}
+            onGoWriter={() => navigate(`/console/writer?project=${currentProject.id}`)}
             onLocate={(target) => { void handleLocate(target); }}
+            projectId={currentProject.id}
+            onChecklist={setChecklist}
             onShare={async () => {
               try {
                 await navigator.clipboard.writeText(window.location.href);

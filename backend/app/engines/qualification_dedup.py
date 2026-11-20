@@ -14,6 +14,7 @@ from ..config import get_settings
 from ..models import QualificationAsset, QualificationAssetImage, QualificationSourceDoc, gen_id
 from .. import storage
 from .llm import LlmError, chat_complete
+from .qualification_schema import clean_attrs
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ AUTO_JACCARD = 0.72
 GRAY_JACCARD = 0.45
 MAX_LLM_PAIRS = 20
 VALID_KINDS = {"cert", "people", "achievement", "equipment", "credit", "contract", "financial"}
+UNDECIDED = "未判定"
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -102,6 +104,12 @@ def identity_key(item: dict | QualificationAsset) -> str | None:
         return f"financial|{normalize_name(name)}" if normalize_name(name) else None
     if num:
         return f"{kind or 'cert'}|{num}"
+    if kind in ("contract", "achievement"):
+        attrs = (item.attrs_json if isinstance(item, QualificationAsset) else item.get("attrs")) or {}
+        client = normalize_name(attrs.get("client") or "")
+        project = normalize_name(attrs.get("projectName") or "")
+        if client and project:
+            return f"contract|{client}|{project}"
     return None
 
 
@@ -146,6 +154,10 @@ def _union_candidate(base: dict, extra: dict) -> None:
             base["validUntil"] = extra["validUntil"]
     if extra.get("detail") and len(extra["detail"]) > len(base.get("detail") or ""):
         base["detail"] = extra["detail"]
+    attrs = dict(base.get("attrs") or {})
+    for key, value in (extra.get("attrs") or {}).items():
+        attrs.setdefault(key, value)
+    base["attrs"] = attrs
     evidence = list(base.get("evidence") or [])
     for row in extra.get("evidence") or []:
         if row not in evidence:
@@ -192,10 +204,10 @@ def _llm_same_asset(a: dict, b: QualificationAsset) -> str:
             max_tokens=20,
         )
     except LlmError:
-        return "不同"
+        return UNDECIDED
     except Exception:
         logger.exception("qualification pairwise judge failed")
-        return "不同"
+        return UNDECIDED
     raw = (text or "").strip()
     if "应分开" in raw:
         return "应分开"
@@ -209,6 +221,11 @@ def apply_to_library(
     source_doc: QualificationSourceDoc,
     candidates: list[dict],
 ) -> dict[str, int]:
+    # 多份源文件并发抽取时，库里的比对和写入要排队，否则两边都看不到对方刚写的条目而重复入库
+    if db.bind is not None and db.bind.dialect.name == "postgresql":
+        from sqlalchemy import text
+
+        db.execute(text("SELECT pg_advisory_xact_lock(7340211)"))
     existing = (
         db.query(QualificationAsset)
         .options(selectinload(QualificationAsset.images))
@@ -228,12 +245,15 @@ def apply_to_library(
             action = "merge"
         elif hit and score >= AUTO_JACCARD:
             action = "merge"
-        elif hit and GRAY_JACCARD <= score < AUTO_JACCARD and gray_used < MAX_LLM_PAIRS:
-            gray_used += 1
-            verdict = _llm_same_asset(cand, hit)
+        elif hit and GRAY_JACCARD <= score < AUTO_JACCARD:
+            # 大模型不可用或超出判定配额时不能默认「不同」直接新增，交人工确认
+            verdict = UNDECIDED
+            if gray_used < MAX_LLM_PAIRS:
+                gray_used += 1
+                verdict = _llm_same_asset(cand, hit)
             if verdict == "相同":
                 action = "merge"
-            elif verdict == "应分开":
+            elif verdict in ("应分开", UNDECIDED):
                 action = "suspect"
             else:
                 action = "new"
@@ -347,6 +367,12 @@ def _merge_into_asset(item: QualificationAsset, cand: dict, source_row: dict) ->
         item.level = cand["level"]
     if cand.get("owner") and not item.owner:
         item.owner = cand["owner"]
+    incoming_attrs = cand.get("attrs") or {}
+    if incoming_attrs:
+        merged_attrs = dict(item.attrs_json or {})
+        for key, value in incoming_attrs.items():
+            merged_attrs.setdefault(key, value)
+        item.attrs_json = merged_attrs
     if cand.get("detail"):
         if not item.detail:
             item.detail = cand["detail"]
@@ -377,6 +403,7 @@ def _insert_asset(db: Session, cand: dict, source_row: dict, merge_status: str) 
         valid_until=(cand.get("validUntil") or "长期").strip() or "长期",
         owner=(cand.get("owner") or "").strip()[:80],
         detail=(cand.get("detail") or "").strip()[:2000],
+        attrs_json=clean_attrs(kind, cand.get("attrs")),
         review_status="待审核",
         merge_status=merge_status,
         aliases_json=list(cand.get("aliases") or []),
@@ -442,6 +469,7 @@ def merge_assets(db: Session, keep: QualificationAsset, drop: QualificationAsset
         "validUntil": drop.valid_until,
         "owner": drop.owner,
         "detail": drop.detail,
+        "attrs": drop.attrs_json or {},
         "evidence": drop.evidence_json or [],
     }
     for src in drop.sources_json or []:

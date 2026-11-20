@@ -9,19 +9,53 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
 
-from ..models import CatalogRule, EvaluationChecklist, FillerWordRule, RulePackage, ThresholdRule, VetoRule, WeightTemplate
+from ..models import (
+    CatalogRule,
+    EvaluationChecklist,
+    FillerWordRule,
+    RulePackage,
+    SwCatalogRule,
+    SwFillerWordRule,
+    SwRulePackage,
+    SwThresholdRule,
+    SwVetoRule,
+    ThresholdRule,
+    VetoRule,
+    WeightTemplate,
+)
 from . import rules_data
 
 
-def load_active_weight_name(db: Session) -> str:
-    template = db.query(WeightTemplate).filter(WeightTemplate.active.is_(True)).first()
-    return (template.name if template else "") or "青天默认五维"
+def _weight_category(category: str | None) -> str:
+    from .parse_schema import is_engineering_category
+
+    return "工程类" if is_engineering_category(category) else "软件服务类"
 
 
-def load_active_weights(db: Session) -> dict[str, float]:
-    """五维权重：取当前 active 模板，查不到则回退 DEFAULT_WEIGHTS。"""
-    template = db.query(WeightTemplate).filter(WeightTemplate.active.is_(True)).first()
+def _active_template(db: Session, category: str | None) -> WeightTemplate | None:
+    """按类别取 active 模板。category 为 None 时沿用旧口径（工程类）。"""
+    key = _weight_category(category) if category is not None else "工程类"
+    q = db.query(WeightTemplate).filter(WeightTemplate.active.is_(True))
+    row = q.filter(WeightTemplate.category == key).first()
+    if row is None and key == "工程类":
+        # 补列前的旧数据 category 为空
+        row = q.filter((WeightTemplate.category.is_(None)) | (WeightTemplate.category == "")).first()
+    return row
+
+
+def load_active_weight_name(db: Session, category: str | None = None) -> str:
+    template = _active_template(db, category)
+    if template:
+        return template.name or "青天默认五维"
+    return "软件服务默认五维" if category is not None and _weight_category(category) == "软件服务类" else "青天默认五维"
+
+
+def load_active_weights(db: Session, category: str | None = None) -> dict[str, float]:
+    """五维权重：取该类别当前 active 模板。软件服务类没有配置时用 SW_DEFAULT_WEIGHTS，不再套工程类权重。"""
+    template = _active_template(db, category)
     if not template:
+        if category is not None and _weight_category(category) == "软件服务类":
+            return dict(rules_data.SW_DEFAULT_WEIGHTS)
         return dict(rules_data.DEFAULT_WEIGHTS)
     return {
         "completeness": template.completeness,
@@ -84,6 +118,64 @@ def load_enabled_catalog_keys(db: Session, kind: str) -> set[str]:
     return {r.key for r in rows if r.enabled is not False}
 
 
+# ---------------------------------------------------------------------------
+# 软件服务类标书专属规则加载：彻底独立于上面的工程类四个函数，查询 sw_ 系列表，
+# 查不到回退 rules_data.SW_* 常量。供 orchestrator 按 project.category 分流调用。
+# ---------------------------------------------------------------------------
+
+
+def load_enabled_sw_veto_keys(db: Session) -> set[str]:
+    """启用中的软件服务类一票否决项 key 集合。"""
+    rows = db.query(SwVetoRule).all()
+    if not rows:
+        return {item["key"] for item in rules_data.SW_VETO_CHECK_POINTS}
+    return {r.key for r in rows if r.enabled is not False}
+
+
+def load_enabled_sw_filler_words(db: Session) -> list[tuple[str, str, str, str]]:
+    """软件服务类虚词表。查不到任何行则回退与工程类相同的内置目录，但运行时只读 sw_ 表。"""
+    rows = db.query(SwFillerWordRule).filter(SwFillerWordRule.enabled.is_(True)).all()
+    if not rows:
+        return [
+            (item["word"], item["category"], item["level"], item.get("rewrite") or "")
+            for item in rules_data.FILLER_WORDS
+        ]
+    return [(r.word, r.category, r.level, r.rewrite or "") for r in rows]
+
+
+def load_sw_thresholds(db: Session) -> dict[str, float]:
+    """软件服务类数值阈值。缺失的 key 回退内置默认值，不读取工程类 threshold_rules。"""
+    result = dict(rules_data.THRESHOLDS)
+    rows = db.query(SwThresholdRule).all()
+    for row in rows:
+        result[row.key] = row.value
+    return result
+
+
+def load_enabled_sw_catalog_keys(db: Session, kind: str) -> set[str]:
+    """启用中的软件服务类商务自查/技术评分/高分策略/专项检查 key 集合，按 kind 过滤。"""
+    rows = db.query(SwCatalogRule).filter(SwCatalogRule.kind == kind).all()
+    if not rows:
+        return {item["key"] for item in rules_data.SW_RULE_CATALOGS.get(kind, [])}
+    return {r.key for r in rows if r.enabled is not False}
+
+
+def load_sw_local_items(db: Session) -> list[str]:
+    """启用中的软件服务类行业/属地合规条目，供 E2 对照正文；无启用包时回退内置启用包。"""
+    rows = db.query(SwRulePackage).filter(SwRulePackage.status == "启用").all()
+    if not rows:
+        return [
+            item
+            for pkg in rules_data.SW_RULE_PACKAGES
+            if pkg.get("status") == "启用"
+            for item in (pkg.get("items") or [])
+        ]
+    items: list[str] = []
+    for row in rows:
+        items.extend(row.items_json or [])
+    return items
+
+
 def load_project_custom_rules(db: Session, project_id: str) -> list[dict]:
     """解析页人工补充的启用中自定义规则，供预审引擎逐条对照投标书。"""
     from ..models import ProjectCustomRule
@@ -138,21 +230,42 @@ class ProjectChecklist:
     weight_name: str = ""
     tech_rules: list = field(default_factory=list)
     drawing_rules: list = field(default_factory=list)
+    drawing_facts: list = field(default_factory=list)
+    project_rules: list = field(default_factory=list)
+    boq_rows: list = field(default_factory=list)
 
 
-def load_project_checklist(db: Session, project_id: str) -> ProjectChecklist:
+def select_checklist(db: Session, project_id: str) -> EvaluationChecklist | None:
+    """预审与撰写共用的评标清单选取：已锁定的优先，否则取最新一份解析完成的。
+    正在重新解析或解析失败的新版本不参与，避免两边读到不同的清单。"""
     locked = (
         db.query(EvaluationChecklist)
         .filter(EvaluationChecklist.project_id == project_id, EvaluationChecklist.locked.is_(True))
         .order_by(EvaluationChecklist.version.desc())
         .first()
     )
-    row = locked or (
+    if locked:
+        return locked
+    return (
         db.query(EvaluationChecklist)
         .filter(EvaluationChecklist.project_id == project_id, EvaluationChecklist.status == "done")
         .order_by(EvaluationChecklist.version.desc())
         .first()
     )
+
+
+def checklist_locked(db: Session, project_id: str) -> bool:
+    """项目是否有已锁定的评标尺子。未锁定时预审、导出照常可用，但界面要提醒。"""
+    return (
+        db.query(EvaluationChecklist.id)
+        .filter(EvaluationChecklist.project_id == project_id, EvaluationChecklist.locked.is_(True))
+        .first()
+        is not None
+    )
+
+
+def load_project_checklist(db: Session, project_id: str) -> ProjectChecklist:
+    row = select_checklist(db, project_id)
     if not row:
         return ProjectChecklist()
     data = row.checklist_json or {}
@@ -174,4 +287,7 @@ def load_project_checklist(db: Session, project_id: str) -> ProjectChecklist:
         extract_stats=data.get("extractStats") if isinstance(data.get("extractStats"), dict) else {},
         tech_rules=_list("techRules"),
         drawing_rules=_list("drawingRules"),
+        drawing_facts=_list("drawingFacts"),
+        project_rules=_list("projectRules"),
+        boq_rows=_list("boqRows"),
     )

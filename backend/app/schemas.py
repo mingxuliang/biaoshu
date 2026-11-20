@@ -64,6 +64,9 @@ class PreReviewIssueOut(BaseModel):
     issueClass: str = ""
     sectionId: str = ""
     chapter: str = ""
+    fixMode: str = "text"  # text：可在正文改写；manual：要到别的文件或证件里处理
+    fixHint: str = ""
+    basis: str = ""
 
 
 class DimensionOut(BaseModel):
@@ -200,6 +203,8 @@ class ReviewReportOut(BaseModel):
     customRules: list[CustomRuleReviewOut] = []
     standardReview: StandardReviewOut | None = None
     issues: list[PreReviewIssueOut]
+    bidDocumentId: str = ""  # 这份报告审的是哪个投标文件；二次评审要据此判断报告是否过期
+    checklistLocked: bool = True
 
 
 class ReviewReportPairOut(BaseModel):
@@ -345,6 +350,30 @@ class DrawingReviewRuleOut(BaseModel):
     axis: str = ""
 
 
+class ProjectRuleOut(BaseModel):
+    id: str = ""
+    source: str = ""
+    title: str = ""
+    requirement: str = ""
+    checkType: str = ""
+    severity: str = ""
+    evidence: str = ""
+    enabled: bool = True
+
+
+class ToggleProjectRuleIn(BaseModel):
+    enabled: bool
+
+
+class DrawingFactOut(BaseModel):
+    object: str = ""
+    field: str = ""
+    value: str = ""
+    drawingNo: str = ""
+    page: int | None = None
+    evidence: str = ""
+
+
 class ProjectStandardRulesOut(BaseModel):
     projectId: str
     version: Optional[int] = None
@@ -352,6 +381,8 @@ class ProjectStandardRulesOut(BaseModel):
     note: str = ""
     tenderRules: list[TenderLeafRuleOut] = []
     drawingRules: list[DrawingReviewRuleOut] = []
+    projectRules: list[ProjectRuleOut] = []
+    drawingFacts: list[DrawingFactOut] = []
 
 
 class ChecklistOut(BaseModel):
@@ -373,6 +404,8 @@ class ChecklistOut(BaseModel):
     omittedCount: dict = {}
     techBidResponseRequirements: str = ""
     businessBidResponse: str = ""
+    projectRules: list[ProjectRuleOut] = []
+    drawingFacts: list[DrawingFactOut] = []
 
 
 # 以下模型对应项目 / 认证真正落库（P0），字段严格对齐前端 src/context/AuthContext.tsx 的
@@ -387,6 +420,24 @@ class UserOut(BaseModel):
     company: str = ""
     position: str = ""
     role: str = "成员"
+    departmentId: Optional[str] = None
+    # 内置角色或自定义角色解析后的权限点，前端据此显示菜单
+    perms: list[str] = []
+    dataScope: str = ""
+    # 所在企业：id、name、status、plan、verifyStatus
+    tenant: Optional[dict] = None
+    # 仅改密码时返回：旧令牌已作废，前端换用这一个
+    token: Optional[str] = None
+
+
+class TenantSignupIn(BaseModel):
+    kind: str = "企业"  # 企业 | 个人
+    companyName: str = ""
+    name: str = ""
+    account: str
+    password: str
+    code: str = ""
+    phone: str = ""
 
 
 class RegisterIn(BaseModel):
@@ -415,6 +466,7 @@ class UpdateProfileIn(BaseModel):
     company: Optional[str] = None
     position: Optional[str] = None
     password: Optional[str] = None
+    currentPassword: Optional[str] = None
 
 
 class TenderUploadMetaOut(BaseModel):
@@ -433,6 +485,11 @@ class TeamMemberOut(BaseModel):
     disabled: bool = False
     projectCount: int = 0
     joinedAt: str = ""
+    departmentId: Optional[str] = None
+    departmentName: str = ""
+    customRoleId: Optional[str] = None
+    monthlyCreditLimit: Optional[int] = None
+    lastLoginAt: str = ""
 
 
 class InviteUserIn(BaseModel):
@@ -441,6 +498,9 @@ class InviteUserIn(BaseModel):
     phone: str = ""
     role: str = "撰写专家"
     password: str = ""
+    departmentId: Optional[str] = None
+    customRoleId: Optional[str] = None
+    monthlyCreditLimit: Optional[int] = None
 
 
 class InviteUserOut(TeamMemberOut):
@@ -452,6 +512,12 @@ class UpdateUserIn(BaseModel):
     phone: Optional[str] = None
     role: Optional[str] = None
     disabled: Optional[bool] = None
+    departmentId: Optional[str] = None
+    customRoleId: Optional[str] = None
+    # -1 表示取消个人上限
+    monthlyCreditLimit: Optional[int] = None
+    # 停用时把名下项目和个人库文档交接给谁
+    handoverTo: Optional[str] = None
 
 
 class QualificationImageOut(BaseModel):
@@ -482,6 +548,7 @@ class QualificationOut(BaseModel):
     evidence: list[dict] = []
     fieldConflict: list[str] = []
     suspectedIds: list[str] = []
+    attrs: dict[str, str] = {}
     images: list[QualificationImageOut] = []
     updatedAt: str = ""
 
@@ -508,6 +575,7 @@ class QualificationParseJobOut(BaseModel):
     uploadedAt: str
     note: str = ""
     error: Optional[str] = None
+    duplicate: bool = False
 
 
 class QualificationExtractJobOut(BaseModel):
@@ -526,7 +594,9 @@ class ProjectOut(BaseModel):
     code: str
     name: str
     type: Literal["工程", "政采", "医疗", "交通", "IT", "能源"]
-    category: Literal["软件服务类", "工程类"] = "软件服务类"
+    category: Literal["软件服务类", "工程类", "产品标", "工程标"] = "软件服务类"
+    specialty: str = ""  # 水利 | 房建 | 市政 | 公路 | ""：仅工程类有效，解析后自动回填
+    workType: str = ""  # 新建 | 改建 | 扩建 | 除险加固 | 维修养护 | 其他
     owner: str
     budget: str
     deadline: str
@@ -536,13 +606,16 @@ class ProjectOut(BaseModel):
     createdAt: str
     tenderDoc: Optional[TenderUploadMetaOut] = None
     team: list[TeamMemberOut] = []
+    needsReparse: bool = False  # 改了类别后，原评标尺子按旧类别解析，需要重新解析
 
 
 class CreateProjectIn(BaseModel):
     name: str
     code: str
     type: Literal["工程", "政采", "医疗", "交通", "IT", "能源"]
-    category: Literal["软件服务类", "工程类"] = "软件服务类"
+    category: Literal["软件服务类", "工程类", "产品标", "工程标"] = "软件服务类"
+    specialty: str = ""
+    workType: str = ""
     budget: Optional[str] = None
     deadline: Optional[str] = None
     owner: Optional[str] = None
@@ -603,6 +676,8 @@ class OutlineNodeOut(BaseModel):
     sourceIndex: Optional[int] = None
     part: Optional[Literal["tech", "business", "form"]] = None
     requirement: Optional[str] = None
+    engKind: Optional[Literal["box", "pairs", "grid", "figure", "group"]] = None
+    engSource: Optional[str] = None
 
 
 class OutlineNodeIn(OutlineNodeOut):
@@ -658,6 +733,8 @@ class GenerateAllChaptersIn(BaseModel):
 
 class SaveChapterContentIn(BaseModel):
     content: str
+    # 协作写标的乐观锁：带上读取时的版本号，别人先保存过就返回 409
+    baseVersion: int | None = None
 
 
 class WriterImageOut(BaseModel):
@@ -788,6 +865,9 @@ class BidRevisionOut(BaseModel):
     layout: Optional[dict] = None
     resolvedIds: list[str] = []
     runSwitched: bool = False
+    category: str = ""  # 工程类 / 软件服务类
+    categoryLabel: str = ""  # 工程标 / 软件服务标
+    fromFullRun: bool = False  # 该册没有单独预审，问题取自合订轮次
 
 
 class PatchRevisionContentIn(BaseModel):
@@ -824,10 +904,17 @@ class BidRevisionVersionOut(BaseModel):
 
 class RestoreVersionOut(BaseModel):
     contentState: dict
+    versionId: str = ""
+    bidDocumentId: str = ""
 
 
 # 以下模型对应「文档知识库」真实后端接入：真实存储 + 分段切片 + 轻量级检索，
 # 供 Writer 撰写章节时引用（见 engines/knowledge_extract.py / knowledge_retrieval.py）。
+
+
+class KnowledgeProgressOut(BaseModel):
+    done: int = 0
+    total: int = 0
 
 
 class KnowledgeDocumentOut(BaseModel):
@@ -841,6 +928,11 @@ class KnowledgeDocumentOut(BaseModel):
     sliceCount: int = 0
     reviewFlag: Optional[str] = None
     updatedAt: str
+    status: str = "done"
+    error: Optional[str] = None
+    progress: Optional[KnowledgeProgressOut] = None
+    duplicateHint: str = ""
+    duplicate: bool = False
 
 
 class KnowledgeSliceImageOut(BaseModel):
@@ -892,15 +984,26 @@ class ExportChecksOut(BaseModel):
     items: list[ExportCheckItemOut] = []
     blocked: bool
     blockReason: str = ""
+    scope: Literal["business", "tech"] = "business"
+    category: str = ""  # 工程类 / 软件服务类
+    categoryLabel: str = ""  # 工程标 / 软件服务标
+    mode: Literal["明标", "暗标"] = "明标"  # 本次复检实际使用的模式
+    defaultMode: Literal["明标", "暗标"] = "明标"  # 跟随招标文件的默认模式
+    anonymityRequired: bool = False  # 招标文件是否要求暗标
+    blindAllowed: bool = False  # 当前分册能否选择暗标（只有技术册可以）
+    checklistLocked: bool = True  # 评标尺子是否已锁定；未锁定只提醒，不拦截
 
 
 class CreateExportIn(BaseModel):
-    mode: Literal["明标", "暗标"]
+    mode: Optional[Literal["明标", "暗标"]] = None  # 不传则跟随招标文件
+    scope: Literal["business", "tech"] = "business"
 
 
 class ExportRecordOut(BaseModel):
     id: str
     projectId: str
+    scope: str = ""
+    category: str = ""
     mode: Literal["明标", "暗标"]
     operator: str
     checkStatus: Literal["通过", "阻断"]
@@ -915,7 +1018,9 @@ class UpdateProjectIn(BaseModel):
     name: Optional[str] = None
     code: Optional[str] = None
     type: Optional[Literal["工程", "政采", "医疗", "交通", "IT", "能源"]] = None
-    category: Optional[Literal["软件服务类", "工程类"]] = None
+    category: Optional[Literal["软件服务类", "工程类", "产品标", "工程标"]] = None
+    specialty: Optional[str] = None
+    workType: Optional[str] = None
     owner: Optional[str] = None
     budget: Optional[str] = None
     deadline: Optional[str] = None
@@ -937,6 +1042,7 @@ class WeightTemplateOut(BaseModel):
     feasibility: float
     standardization: float
     scope: str
+    category: str = "工程类"
     active: bool
 
 
@@ -948,6 +1054,7 @@ class WeightTemplateIn(BaseModel):
     feasibility: float
     standardization: float
     scope: str = "全局默认"
+    category: str = "工程类"
 
 
 class UpdateWeightTemplateIn(BaseModel):
@@ -1030,6 +1137,9 @@ class VetoRuleOut(BaseModel):
     engine: str = ""
     seq: int = 0
     enabled: bool = True
+    specialties: list[str] = []
+    workTypes: list[str] = []
+    itemSpecialties: dict[str, list[str]] = {}
 
 
 class UpdateVetoRuleIn(BaseModel):
@@ -1038,7 +1148,7 @@ class UpdateVetoRuleIn(BaseModel):
 
 class CatalogRuleOut(BaseModel):
     id: str
-    kind: Literal["business", "tech", "dup_check", "dup_sim", "strategy"]
+    kind: Literal["business", "tech", "dup_check", "dup_sim", "strategy", "anon"]
     key: str
     category: str
     point: str
@@ -1049,6 +1159,9 @@ class CatalogRuleOut(BaseModel):
     engine: str = ""
     seq: int = 0
     enabled: bool = True
+    specialties: list[str] = []
+    workTypes: list[str] = []
+    itemSpecialties: dict[str, list[str]] = {}
 
 
 class UpdateCatalogRuleIn(BaseModel):
@@ -1246,6 +1359,7 @@ class ProductParseJobOut(BaseModel):
     uploadedAt: str
     note: str = ""
     error: Optional[str] = None
+    duplicate: bool = False
 
 
 class ProductExtractJobOut(BaseModel):

@@ -9,7 +9,7 @@ import AssignMembersModal from "./components/AssignMembersModal";
 import ProjectFilesModal from "./components/ProjectFilesModal";
 import ProjectFormModal, { type ProjectFormValues } from "./components/ProjectFormModal";
 import DeleteProjectModal from "./components/DeleteProjectModal";
-import { projectTypes, projectStatuses, type Project } from "@/mocks/projects";
+import { isEngineeringCategory, projectTypes, projectStatuses, type Project } from "@/mocks/projects";
 import { useProjects } from "@/context/ProjectContext";
 import { useAuth } from "@/context/AuthContext";
 import { hasPerm } from "@/lib/permissions";
@@ -40,7 +40,7 @@ export default function ProjectsPage() {
   const navigate = useNavigate();
   const { projects, addProject, updateProject, deleteProject } = useProjects();
   const { user } = useAuth();
-  const canEditProject = hasPerm(user?.role, "project_edit");
+  const canEditProject = hasPerm(user, "project_edit");
   const [keyword, setKeyword] = useState("");
   const [typeFilter, setTypeFilter] = useState<string>("全部");
   const [statusFilter, setStatusFilter] = useState<string>("全部");
@@ -89,6 +89,15 @@ export default function ProjectsPage() {
       return;
     }
     if (editOpen && editTarget) {
+      const categoryChanged = isEngineeringCategory(values.category) !== isEngineeringCategory(editTarget.category);
+      if (
+        categoryChanged &&
+        !window.confirm(
+          "改了项目类别后，工程标和软件服务标的解析骨架、预审规则都不同：已锁定的评标尺子会被解除，需要重新解析招标文件。确定要改吗？",
+        )
+      ) {
+        return;
+      }
       try {
         await updateProject(
           editTarget.id,
@@ -97,6 +106,8 @@ export default function ProjectsPage() {
             name: values.name.trim(),
             type: values.type,
             category: values.category,
+            specialty: values.specialty,
+            workType: values.workType,
             owner: values.owner,
             budget: values.budget ? `¥ ${values.budget} 万` : "待定",
             deadline: values.deadline || "2026-12-31",
@@ -106,9 +117,12 @@ export default function ProjectsPage() {
         setEditOpen(false);
         setEditTarget(null);
         showToast(
-          values.tenderFile
-            ? `已更新「${values.name.trim()}」项目信息（招标文件：${values.tenderFile.name}）`
-            : `已更新「${values.name.trim()}」项目信息（分配 ${values.memberIds.length} 人）`,
+          categoryChanged
+            ? `已改为${isEngineeringCategory(values.category) ? "工程标" : "软件服务标"}，请到「招标解析」重新解析并锁定评标尺子`
+            : values.tenderFile
+              ? `已更新「${values.name.trim()}」项目信息（招标文件：${values.tenderFile.name}）`
+              : `已更新「${values.name.trim()}」项目信息（分配 ${values.memberIds.length} 人）`,
+          categoryChanged ? "info" : "success",
         );
       } catch (err) {
         showToast(err instanceof Error ? err.message : "更新项目失败，请稍后重试", "error");
@@ -121,6 +135,8 @@ export default function ProjectsPage() {
         name: values.name.trim(),
         type: values.type,
         category: values.category,
+        specialty: values.specialty,
+        workType: values.workType,
         owner: values.owner,
         budget: values.budget,
         deadline: values.deadline || "2026-12-31",
@@ -308,7 +324,7 @@ export default function ProjectsPage() {
                     <td className="px-3 py-3.5">
                       <div className="flex flex-wrap items-center gap-1">
                         <TypeBadge type={project.type} />
-                        {project.category === "工程类" && (
+                        {isEngineeringCategory(project.category) && (
                           <span className="inline-flex items-center whitespace-nowrap rounded-md border border-primary-200 bg-primary-50 px-2 py-0.5 text-xs font-medium text-primary-600">
                             工程类
                           </span>

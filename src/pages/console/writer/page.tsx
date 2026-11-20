@@ -10,7 +10,8 @@ import BidSettings, { type WriterSettingsPayload } from "./components/BidSetting
 import BidInterpret from "./components/BidInterpret";
 import OutlineStep from "./components/OutlineStep";
 import ContentStep from "./components/ContentStep";
-import { getOrCreateWriterDraft, updateWriterDraft, type OutlineNode, type WriterDocKind, type WriterDraft } from "@/lib/api";
+import { ApiError, getOrCreateWriterDraft, updateWriterDraft, type EngineeringFacts, type OutlineNode, type WriterDocKind, type WriterDraft } from "@/lib/api";
+import { isEngineeringCategory } from "@/mocks/projects";
 import { compactOutlineTitles, isOriginalFormTitle } from "@/lib/outlineNum";
 import type { InterpretSource } from "@/mocks/writerSteps";
 
@@ -82,8 +83,8 @@ export default function WriterPage() {
         for (const n of compacted) {
           if (n.status === "用原文" && !nextContents[n.id]) {
             nextContents[n.id] = isOriginalFormTitle(n.title, n.num)
-              ? `## ${n.title}\n\n本章为招标书已给出的固定格式文件，请直接使用招标书原文填写后打印签字，系统不展开目录、不撰写正文。`
-              : `## ${n.title}\n\n商务标本章无需撰写应标正文。承诺书、报价文件、偏差表等固定格式件请直接使用招标书原文填写后打印签字。`;
+              ? `## ${n.title}\n\n招标书未提供本文件的固定格式，请按投标人自有格式提供并签字盖章。`
+              : `## ${n.title}\n\n商务标本章无需撰写应标正文。承诺书、授权委托、投标函、开标一览及证照业绩请直接使用招标书原文或扫描件。`;
           }
         }
         setChapterContents(nextContents);
@@ -171,8 +172,9 @@ export default function WriterPage() {
 
   const handleOutlineNext = () => {
     if (draft) {
-      updateWriterDraft(draft.id, { outline }).catch(() => {
-        showToast("目录保存失败，请检查网络后重试", "error");
+      updateWriterDraft(draft.id, { outline }).catch((err) => {
+        const message = err instanceof ApiError ? err.message : "目录保存失败，请检查网络后重试";
+        showToast(message, "error");
       });
     }
     completeStep(3);
@@ -308,17 +310,6 @@ export default function WriterPage() {
                 商务标
               </button>
             </div>
-            <select
-              value={currentProject.id}
-              onChange={(e) => selectProject(e.target.value)}
-              className="h-7 w-full cursor-pointer rounded-md border border-background-300 bg-background-50 px-2 text-xs text-foreground-600 outline-none focus:border-primary-400 sm:w-auto sm:max-w-[280px]"
-            >
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
             <StatusBadge status={currentProject.status} />
           </div>
         </div>
@@ -335,7 +326,7 @@ export default function WriterPage() {
               setModelId(id);
               if (draft) {
                 updateWriterDraft(draft.id, { modelId: id }).catch(() => {
-                  /* 模型选择失败不阻塞界面，进入下一步时会再次保存 */
+                  showToast("模型选择保存失败，请检查网络后重新选择", "error");
                 });
               }
             }}
@@ -351,6 +342,7 @@ export default function WriterPage() {
               }
             }}
             initialSettings={settingsPayload}
+            engineering={docKind === "tech" && isEngineeringCategory(currentProject.category)}
             onNext={handleSettingsNext}
           />
         )}
@@ -388,6 +380,10 @@ export default function WriterPage() {
             onBack={goBack}
             selectedProductLibraryId={selectedProductLibraryId}
             docKind={docKind}
+            initialEngFacts={(draft.settings?.engFacts as EngineeringFacts | undefined) ?? null}
+            onEngFactsChange={(facts) =>
+              setDraft((d) => (d ? { ...d, settings: { ...(d.settings || {}), engFacts: facts } } : d))
+            }
           />
         )}
         {step === 4 && (

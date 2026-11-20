@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
+
+from ..ctx_executor import ContextThreadPoolExecutor as ThreadPoolExecutor
 
 from .excerpt_guard import snap_bid_excerpt
 from .llm import chat_complete, get_default_model_id

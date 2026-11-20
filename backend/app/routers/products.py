@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import datetime
 
@@ -10,7 +11,9 @@ from sqlalchemy.orm import Session, selectinload
 
 from ..audit import write_audit
 from ..auth import get_current_user
+from ..billing import require_credits
 from ..db import get_db
+from ..engines.safe_office import check_upload
 from ..engines.product_dedup import mark_keep_both, merge_features, sha256_bytes
 from ..engines.product_extract import _delete_product_feature
 from ..engines.qualification_extract import looks_like_qualification
@@ -22,7 +25,7 @@ from ..models import (
     ProductSourceDoc,
     User,
 )
-from ..permissions import PERM_WRITER, require_perm
+from ..permissions import PERM_WRITER, is_admin, require_library_read, require_perm
 from ..schemas import (
     ProductExtractJobOut,
     ProductFeatureIn,
@@ -213,8 +216,11 @@ def list_product_libraries(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[ProductLibraryOut]:
-    _ = current_user
+    require_library_read(current_user)
     libs = db.query(ProductLibrary).order_by(ProductLibrary.updated_at.desc()).all()
+    dept = getattr(current_user, "department_id", None)
+    if not is_admin(current_user):
+        libs = [lib for lib in libs if (lib.visibility or "企业") != "部门" or (dept and lib.department_id == dept)]
     return [_library_to_out(db, lib) for lib in libs]
 
 
@@ -235,6 +241,7 @@ def create_product_library(
         category=payload.category,
         description=(payload.description or "").strip(),
         owner=(payload.owner or current_user.name or "").strip(),
+        department_id=getattr(current_user, "department_id", None),
     )
     db.add(lib)
     write_audit(
@@ -255,7 +262,7 @@ def get_product_library(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ProductLibraryOut:
-    _ = current_user
+    require_library_read(current_user)
     return _library_to_out(db, _require_library(db, library_id))
 
 
@@ -314,7 +321,7 @@ def list_features(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[ProductFeatureOut]:
-    _ = current_user
+    require_library_read(current_user)
     _require_library(db, library_id)
     rows = (
         db.query(ProductFeature)
@@ -564,7 +571,7 @@ def get_product_image_file(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _ = current_user
+    require_library_read(current_user)
     img = db.get(ProductFeatureImage, image_id)
     if not img or not img.storage_path or not storage.exists(img.storage_path):
         raise HTTPException(404, "附图不存在")
@@ -582,7 +589,7 @@ def list_source_docs(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[ProductParseJobOut]:
-    _ = current_user
+    require_library_read(current_user)
     _require_library(db, library_id)
     rows = (
         db.query(ProductSourceDoc)
@@ -600,44 +607,69 @@ async def upload_source_docs(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[ProductParseJobOut]:
+    require_credits("product_extract")
     require_perm(current_user, PERM_WRITER)
     lib = _require_library(db, library_id)
     if not files:
         raise HTTPException(400, "请先选择技术标文件")
     created: list[ProductSourceDoc] = []
+    skipped: list[ProductParseJobOut] = []
+    batch_hashes: set[str] = set()
     for upload in files:
         filename = upload.filename or ""
         ext = os.path.splitext(filename)[1].lower()
         if ext not in ALLOWED_EXTS:
             raise HTTPException(400, "仅支持 .doc / .docx / .pdf 格式")
         content = await upload.read()
+        check_upload(content, ext)
+        digest = hashlib.sha256(content).hexdigest()
+        if digest in batch_hashes:
+            continue
+        batch_hashes.add(digest)
+        same = (
+            db.query(ProductSourceDoc)
+            .filter(
+                ProductSourceDoc.library_id == library_id,
+                ProductSourceDoc.content_sha256 == digest,
+                ProductSourceDoc.status != "failed",
+            )
+            .first()
+        )
+        if same:
+            out = _job_to_out(same)
+            out.duplicate = True
+            out.note = f"与已上传的《{same.filename}》内容完全相同，未重复抽取"
+            skipped.append(out)
+            continue
         key = storage.put_bytes(f"product-docs/{library_id}", content, ext)
         doc = ProductSourceDoc(
             library_id=library_id,
             filename=filename,
             storage_path=key,
             size_bytes=len(content),
+            content_sha256=digest,
             status="queued",
             note="排队抽取功能点；证照将同步到资质库…",
         )
         db.add(doc)
         db.flush()
         created.append(doc)
-    _touch_library(lib)
-    write_audit(
-        db,
-        action="引用知识",
-        user_name=current_user.name,
-        target=f"产品库 / {lib.name}",
-        detail=f"上传 {len(created)} 份技术标并启动抽取",
-    )
+    if created:
+        _touch_library(lib)
+        write_audit(
+            db,
+            action="引用知识",
+            user_name=current_user.name,
+            target=f"产品库 / {lib.name}",
+            detail=f"上传 {len(created)} 份技术标并启动抽取",
+        )
     db.commit()
     from ..tasks import run_product_extract_task
 
     for doc in created:
         db.refresh(doc)
         run_product_extract_task.delay(doc.id)
-    return [_job_to_out(d) for d in created]
+    return [_job_to_out(d) for d in created] + skipped
 
 
 @router.get("/product-extract-jobs/{job_id}", response_model=ProductExtractJobOut)
@@ -646,7 +678,7 @@ def get_extract_job(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ProductExtractJobOut:
-    _ = current_user
+    require_library_read(current_user)
     doc = db.get(ProductSourceDoc, job_id)
     if not doc:
         raise HTTPException(404, "抽取任务不存在")

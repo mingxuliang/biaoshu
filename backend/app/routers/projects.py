@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
@@ -37,6 +38,8 @@ from ..schemas import (
     UpdateProjectIn,
 )
 from .documents import _bid_doc_to_summary
+from ..audit import write_audit
+from ..engines.parse_schema import normalize_category
 from ..engines.tender_package import effective_kind
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -94,6 +97,8 @@ def _to_project_out(
         name=project.name,
         type=project.type,
         category=project.category or "软件服务类",
+        specialty=project.specialty or "",
+        workType=project.work_type or "",
         owner=project.owner or "",
         budget=project.budget or "待定",
         deadline=project.deadline or "",
@@ -259,9 +264,12 @@ def create_project(
         code=payload.code.strip(),
         name=payload.name.strip(),
         type=payload.type,
-        category=payload.category or "软件服务类",
+        category=normalize_category(payload.category),
+        specialty=(payload.specialty or "").strip(),
+        work_type=(payload.workType or "").strip(),
         owner=payload.owner or current_user.name,
         owner_id=current_user.id,
+        department_id=getattr(current_user, "department_id", None),
         budget=f"¥ {payload.budget} 万" if payload.budget else "待定",
         deadline=payload.deadline or "2026-12-31",
         progress=0,
@@ -298,6 +306,32 @@ def update_project(
     project = require_project(db, current_user, project_id, PERM_PROJECT_EDIT)
 
     data = payload.model_dump(exclude_unset=True)
+    needs_reparse = False
+    if "category" in data and data["category"]:
+        data["category"] = normalize_category(data["category"])
+        if data["category"] != normalize_category(project.category):
+            # 工程类和软件服务类的解析骨架、规则表都不同，旧尺子不能再当成「已锁定」继续用
+            unlocked = (
+                db.query(EvaluationChecklist)
+                .filter(EvaluationChecklist.project_id == project_id, EvaluationChecklist.locked.is_(True))
+                .update({EvaluationChecklist.locked: False}, synchronize_session=False)
+            )
+            has_parse = (
+                db.query(EvaluationChecklist.id).filter(EvaluationChecklist.project_id == project_id).first()
+                is not None
+            )
+            needs_reparse = has_parse
+            write_audit(
+                db,
+                action="解析",
+                user_name=current_user.name,
+                target=project.name,
+                version="—",
+                detail=f"类别由{normalize_category(project.category)}改为{data['category']}"
+                + ("，已解除评标尺子锁定，需重新解析" if unlocked or has_parse else ""),
+            )
+    if "workType" in data:
+        data["work_type"] = data.pop("workType")
     for field, value in data.items():
         setattr(project, field, value)
 
@@ -305,7 +339,9 @@ def update_project(
     db.refresh(project)
     team = _teams_for_projects(db, [project_id]).get(project_id, [])
     progress, light = _live_metrics(db, [project_id]).get(project_id, (0, None))
-    return _to_project_out(project, team, _latest_tender_doc(db, project_id), progress, light)
+    out = _to_project_out(project, team, _latest_tender_doc(db, project_id), progress, light)
+    out.needsReparse = needs_reparse
+    return out
 
 
 @router.delete("/{project_id}", status_code=204)
@@ -365,7 +401,7 @@ def set_project_members(
 def list_project_tender_documents(
     project_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ) -> list[TenderDocumentSummaryOut]:
-    require_project(db, current_user, project_id)
+    project = require_project(db, current_user, project_id)
     docs = (
         db.query(TenderDocument)
         .filter(TenderDocument.project_id == project_id)
@@ -378,7 +414,7 @@ def list_project_tender_documents(
             filename=d.filename,
             sizeBytes=d.size_bytes,
             uploadedAt=d.uploaded_at.isoformat(),
-            kind=effective_kind(d.kind, d.filename),
+            kind=effective_kind(d.kind, d.filename, project.category),
         )
         for d in docs
     ]
@@ -393,7 +429,7 @@ def list_project_tender_documents(
 def get_project_documents(
     project_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ) -> ProjectDocumentsOut:
-    require_project(db, current_user, project_id)
+    project = require_project(db, current_user, project_id)
     tender_docs = (
         db.query(TenderDocument)
         .filter(TenderDocument.project_id == project_id)
@@ -403,6 +439,7 @@ def get_project_documents(
     bid_docs = (
         db.query(BidDocument)
         .filter(BidDocument.project_id == project_id)
+        .filter(or_(BidDocument.source.is_(None), BidDocument.source != "revision-working"))  # 修改闭环工作稿不对外展示
         .order_by(BidDocument.uploaded_at.desc())
         .all()
     )
@@ -413,7 +450,7 @@ def get_project_documents(
                 filename=d.filename,
                 sizeBytes=d.size_bytes,
                 uploadedAt=d.uploaded_at.isoformat(),
-                kind=effective_kind(d.kind, d.filename),
+                kind=effective_kind(d.kind, d.filename, project.category),
             )
             for d in tender_docs
         ],

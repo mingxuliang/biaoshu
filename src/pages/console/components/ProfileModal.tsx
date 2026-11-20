@@ -16,6 +16,7 @@ export default function ProfileModal({ open, onClose }: ProfileModalProps) {
   const [company, setCompany] = useState("");
   const [position, setPosition] = useState("");
   const [password, setPassword] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
   const [showPwd, setShowPwd] = useState(false);
   const [toast, setToast] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -29,12 +30,17 @@ export default function ProfileModal({ open, onClose }: ProfileModalProps) {
       setCompany(user.company);
       setPosition(user.position);
       setPassword("");
+      setCurrentPassword("");
       setError("");
     }
   }, [open, user]);
 
   const handleSave = async () => {
     if (!name.trim() || !email.trim()) return;
+    if (password.trim() && !currentPassword) {
+      setError("修改密码需要先输入当前密码");
+      return;
+    }
     setSaving(true);
     setError("");
     try {
@@ -44,7 +50,7 @@ export default function ProfileModal({ open, onClose }: ProfileModalProps) {
         phone: phone.trim(),
         company: company.trim(),
         position: position.trim(),
-        ...(password.trim() ? { password: password.trim() } : {}),
+        ...(password.trim() ? { password: password.trim(), currentPassword } : {}),
       });
       setToast(true);
       setTimeout(() => {
@@ -134,7 +140,7 @@ export default function ProfileModal({ open, onClose }: ProfileModalProps) {
                   name="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="留空则不修改密码"
+                  placeholder="留空则不修改；至少 8 位，含字母和数字"
                   className={`${inputCls} pr-9`}
                 />
                 <button
@@ -147,6 +153,22 @@ export default function ProfileModal({ open, onClose }: ProfileModalProps) {
                 </button>
               </div>
             </div>
+            {password.trim() && (
+              <div>
+                <label className="font-label mb-1.5 block text-[13px] font-medium text-foreground-800">
+                  当前密码
+                </label>
+                <input
+                  type="password"
+                  name="current-password"
+                  autoComplete="current-password"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  placeholder="修改密码需验证当前密码"
+                  className={inputCls}
+                />
+              </div>
+            )}
           </div>
 
           <div className="flex items-center justify-end gap-3 pt-2">

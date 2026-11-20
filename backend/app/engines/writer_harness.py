@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import time
 import uuid
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
@@ -142,8 +145,9 @@ def _last_index_of_subtree(outline: list[dict], node_id: str) -> int:
     return last
 
 
-def _new_outline_node(title: str, parent_id: str | None, idea: str = "") -> dict:
+def _new_outline_node(title: str, parent_id: str | None, idea: str = "", part: str = "tech") -> dict:
     body = (idea or "").strip() or "请描述本章编写思路…"
+    volume = part if part in ("tech", "business", "form") else "tech"
     return {
         "id": f"p-{uuid.uuid4().hex[:12]}",
         "num": "",
@@ -158,7 +162,7 @@ def _new_outline_node(title: str, parent_id: str | None, idea: str = "") -> dict
         "status": "待生成",
         "words": 0,
         "aiRounds": 0,
-        "part": "tech",
+        "part": volume,
     }
 
 
@@ -169,6 +173,7 @@ def outline_add(
     parent_id: str = "",
     after_id: str = "",
     idea: str = "",
+    part: str = "tech",
 ) -> tuple[list[dict], list[dict]]:
     names = [item.strip() for item in titles if (item or "").strip()]
     if not names:
@@ -190,7 +195,7 @@ def outline_add(
         insert_at = _last_index_of_subtree(nodes, parent) + 1
     else:
         insert_at = len(nodes)
-    created = [_new_outline_node(name, parent, idea) for name in names]
+    created = [_new_outline_node(name, parent, idea, part) for name in names]
     nodes[insert_at:insert_at] = created
     return renumber_outline(nodes), created
 
@@ -234,6 +239,14 @@ def _extract_json_object(text: str) -> dict:
     return data
 
 
+def _outline_has_heading(markdown: str) -> bool:
+    """多行目录里只要有一行 Markdown 标题就算有。整段 search 会把换行后的标题漏掉。"""
+    for line in (markdown or "").splitlines():
+        if _HEADING.match(line.strip()):
+            return True
+    return False
+
+
 def _bad_outline_headings(markdown: str) -> list[str]:
     bad: list[str] = []
     for line in (markdown or "").splitlines():
@@ -251,9 +264,37 @@ def _bad_outline_headings(markdown: str) -> list[str]:
     return bad
 
 
-def _coverage_problems(obligations: list[dict], solution: str, product_names: list[str], require_gap: bool) -> list[str]:
+def _min_solution_chars(requirement: str) -> int:
+    """正文不能只复述标题：下限随条款长度增长，封顶 1200 字。"""
+    size = len(re.sub(r"\s+", "", requirement or ""))
+    if size < 20:
+        return 0
+    return min(max(200, int(size * 0.8)), 1200)
+
+
+def _coverage_problems(
+    obligations: list[dict],
+    solution: str,
+    product_names: list[str],
+    require_gap: bool,
+    facts: list[str] | None = None,
+    min_chars: int = 0,
+    response_marks: list[str] | None = None,
+    evidence: str = "",
+) -> list[str]:
+    from .writer_tool_runtime import missing_hard_facts
+
     compact = re.sub(r"\s+", "", solution or "")
     problems: list[str] = []
+    if facts:
+        absent = missing_hard_facts(facts, solution)
+        if absent:
+            problems.append(
+                "正文缺少招标条款里的指标，必须原样写出并说明如何满足："
+                + "、".join(f"「{item}」" for item in absent[:12])
+            )
+    if min_chars and len(compact) < min_chars:
+        problems.append(f"正文只有 {len(compact)} 字，不足以逐条应答本章条款，至少需要约 {min_chars} 字")
     for item in obligations:
         title = re.sub(r"\s+", "", str(item.get("title") or ""))
         if title and title not in compact:
@@ -264,7 +305,35 @@ def _coverage_problems(obligations: list[dict], solution: str, product_names: li
             problems.append("未引用已绑定的产品功能名称")
     elif require_gap and "能力缺口" not in (solution or ""):
         problems.append("没有产品功能时必须写明能力缺口")
+    for phrase in response_marks or []:
+        if phrase and phrase not in compact:
+            problems.append(f"正文没有按本份招标书的应答规定写出「{phrase}」")
+    if evidence:
+        for claim in unsupported_claims(solution, evidence):
+            problems.append(f"正文声称「{claim}」，但给定的招标条款和公司资料里没有依据，请删除或改成「待补充」")
     return problems
+
+
+_CLAIM_PATTERNS = (
+    re.compile(r"ISO\s?-?\d{4,5}(?::\d{4})?", re.I),
+    re.compile(r"CMMI\s?-?\d?(?:级)?", re.I),
+    re.compile(r"等保\s?[二三四五2345]\s?级|信息安全等级保护[二三四五]级"),
+    re.compile(r"(?:软件著作权|软著)登记证书|专利号\s?[A-Z0-9.]+|ZL\s?\d{4}[0-9X.]+"),
+    re.compile(r"\d+\s?(?:项|个|件)(?:软著|发明专利|专利|成功案例|类似案例)"),
+)
+
+
+def unsupported_claims(solution: str, evidence: str) -> list[str]:
+    """正文里的认证、证书、专利、案例数量等断言，必须能在给定材料里找到原样出处。"""
+    material = re.sub(r"\s+", "", evidence or "").upper()
+    found: list[str] = []
+    for pattern in _CLAIM_PATTERNS:
+        for match in pattern.finditer(solution or ""):
+            claim = match.group(0).strip()
+            key = re.sub(r"\s+", "", claim).upper()
+            if key and key not in material and claim not in found:
+                found.append(claim)
+    return found[:8]
 
 
 def _make_model(model_id: str | None, stream: bool = False):
@@ -298,19 +367,21 @@ def _make_agent(
     tools: list,
     max_iters: int,
     stream: bool = False,
+    track: str = "software",
 ):
     from agentscope.agent import Agent, ReActConfig
     from agentscope.tool import Toolkit
     from agentscope.workspace import LocalWorkspace
 
-    from .writer_tool_runtime import skill_directories, skills_root
+    from .writer_tool_runtime import skill_directories
 
+    dirs = skill_directories(track)
     try:
         from agentscope.skill import LocalSkillLoader
 
-        loaders: list = [LocalSkillLoader(directory=str(skills_root()), scan_subdir=True)]
+        loaders: list = [LocalSkillLoader(directory=item, scan_subdir=False) for item in dirs]
     except Exception:  # noqa: BLE001 —— 旧版没有 LocalSkillLoader 时退回逐个目录
-        loaders = skill_directories()
+        loaders = dirs
     toolkit = Toolkit(tools=tools, skills_or_loaders=loaders or None)
     return Agent(
         name=name,
@@ -577,16 +648,26 @@ def write_outline_markdown(
     doc_kind: str = "tech",
     page: dict | None = None,
     layout: dict | None = None,
+    review_feedback: str = "",
 ) -> str:
     """用隔离工作区里的新 Agent 通读招标书原文、生成目录 Markdown。失败时抛出，不回退套话目录。
 
     不再把招标解析模块预抽出的技术标/商务标摘要当主输入：原文全文落地到工作区，
     由智能体自己调用 read_tender(section="original") 分页通读、自行判断需求边界。
     """
-    from .e_writer import OUTLINE_SYSTEM_PROMPT, _build_outline_user_message
-    from .writer_tool_runtime import materialize_full_tender_text, original_tender_page_count
+    from .e_writer import _build_outline_user_message, outline_system_prompt
+    from .writer_tool_runtime import (
+        load_original_tender_text,
+        load_tender_extracts,
+        materialize_full_tender_text,
+        materialize_tender_extracts,
+        original_tender_page_count,
+    )
 
     workdir = scoped_workspace(user_id, project_id, draft_id, "jobs", job_id)
+    materialize_tender_extracts(workdir, load_tender_extracts(project_id))
+    if not (tender_text or "").strip():
+        tender_text = load_original_tender_text(project_id)
     materialize_full_tender_text(workdir, tender_text)
     total_pages = original_tender_page_count(tender_text)
     prompt = _build_outline_user_message(
@@ -601,37 +682,368 @@ def write_outline_markdown(
         page=page,
         layout=layout,
     )
+    if (review_feedback or "").strip():
+        prompt += "\n\n" + review_feedback.strip()
     _write_text(workdir / "outline-brief.txt", prompt[:80000])
+    _write_text(workdir / "doc_kind.txt", (doc_kind or "tech").strip().lower())
+    from .tender_toc import composition_for_volume, extract_bid_composition
+
+    _write_text(
+        workdir / "composition.txt",
+        "\n".join(c["title"] for c in composition_for_volume(extract_bid_composition(tender_text), doc_kind)),
+    )
 
     async def _run() -> str:
         agent = _make_agent(
             "outline-writer",
-            OUTLINE_SYSTEM_PROMPT
-            + "\n招标书原文已经放进 read_tender(section=\"original\")，按约 8000 字/页分页：不给 query 时按 page 从 1 开始逐页翻页通读，"
-            "给 query 时按关键词检索命中行。必须把全文翻完再动笔，不能只读一两页就下结论。"
-            "编完目录可写入 outline.md 并用 run_skill_script 运行 bid-outline/lint_outline.py。不要打开浏览器，不要导出 Word。",
+            outline_system_prompt(doc_kind)
+            + "\n招标书原文在 read_tender(section=\"original\")。先检索格式节，不要从第 1 页逐页翻到最后。"
+            "一级章只用该节里属于当前分册的文件名。评标办法不进目录。"
+            "依据行写「依据：T5」或「依据：B3」。"
+            "目录可写入 outline.md，再用 run_skill_script 运行 bid-outline/lint_outline.py 检查标题。不要为评审标准补章。不要打开浏览器，不要导出 Word。",
             model_id,
             workdir,
             f"{user_id}-{draft_id}-{job_id}",
             _job_tools(workdir, project_id),
-            36,
+            16,
         )
         markdown = await _reply(agent, prompt)
+        _write_text(workdir / "outline-raw.txt", markdown[:80000])
+        if not re.search(r"^#{1,6}\s+\S", markdown, re.M):
+            markdown = await _reply(
+                agent,
+                "上一次回复没有 Markdown 标题。请只重写目录，不要解释。"
+                "一级标题用 #，必须使用本份组成条目的原文，可以长于12字；小章节用 ##、### 挂在对应一级标题下面。"
+                "依据行保留。",
+            )
+            _write_text(workdir / "outline-raw.txt", markdown[:80000])
         bad = _bad_outline_headings(markdown)
         if bad:
             listed = "\n".join(f"- {item}" for item in bad[:12])
             markdown = await _reply(
                 agent,
                 "下列标题不合格，请只重写目录 Markdown。"
-                "说明句收成不超过12字的短标题，标题不要自带编号，不要输出解释。\n"
+                "说明句收成不超过12字的短标题，标题不要自带编号，不要输出解释；各标题下的「依据：T5」行原样保留。\n"
                 + listed,
             )
-        if not _HEADING.search(markdown):
+        if not re.search(r"^#{1,6}\s+\S", markdown, re.M):
             raise HarnessError("目录结果里没有 Markdown 标题")
         still = _bad_outline_headings(markdown)
         if still:
             raise HarnessError("目录标题仍是说明句，未通过验收：" + "；".join(still[:6]))
         return markdown
+
+    return asyncio.run(_run())
+
+
+ENG_OUTLINE_SYSTEM = """你是房建、市政等工程施工组织设计（技术标）目录编辑。不要按水利、农田、灌区的目录来编。
+
+# 一级章对标
+只取本份招标书技术标评分表里的评审因素，每个因素一个一级章。
+章名用评分项原文，含括号里的「包括但不限于…」，不要改写、不要拆开、不要合并。
+一个评分项把工期质量和安全文明写在同一格时，仍用这一格原文做章名。
+形式评审、资格评审、响应性评审、商务评分、业绩、奖项、企业实力、合同条款、投标人须知不进目录。
+编制说明只作封面，不要占一级章。
+
+# 二级目录是施工理解，不是把一级章名拆开
+先根据工程事实形成本工程的施工理解：有哪些单体、哪些专业、分几段施工、现场有什么约束、有哪些工艺系统。
+再把这些理解挂到最对应的一级评分项下面。禁止用「保障体系」「主要措施」「检查与考核」这类套话当二级标题。
+工程概述、施工总体部署（含分阶段总平面，阶段名用来自事实账的施工阶段）挂在第一个技术评分项下面，不要另起一级章。
+工期、质量、安全、文明只在对应评分项下出现，标题对着本工程的管理目标写，不要空对空展开章名。
+人材机拆成劳动力、主要物资、施工机械。招标写了智慧工地、绿色建筑等级的，挂在对应保障章下。
+
+# 包括但不限于和重难点
+评分项括号里点名的内容必须单独成节，放在该章最前面，节名用点名原文。
+招标点名的重点难点各自成节。其余重难点只从现场约束、工艺系统、专业交叉、单体和工程量里取，必须能在事实账里找到出处。
+每条下面只用两节：重难点分析、重难点解决措施。
+分析只写一段：现场约束、工程量和影响，不写措施。
+措施写（1）（2）（3），每条先给短措施名，再写做法、数量、机械和责任岗位。
+危大工程单独一节：先清单，再保证措施。招标没写危大就不要编。
+招标要求的附表按原文放在「附件」下。国家及地方工法规范里已有的内容不要重复编成章节。
+
+# 输出
+只输出 Markdown 标题：# 一级、## 二级、### 三级、#### 四级。标题不要自带编号。
+每个末级节点下一行「思路：…」，不超过 200 字。除此之外不要解释。
+不要写知识库、产品功能、公司业绩、获奖、人员姓名。同一内容只出现在最对应的那一章。
+"""
+
+WATER_OUTLINE_SYSTEM = """你是水利工程施工组织设计（技术标）目录编辑。只编水利、灌区、高标准农田、河道、堤防、泵站涵闸、水库塘坝。不要套房建、市政的目录。
+
+# 一级章
+只取本份招标书「施工组织设计」或技术标评分表里的评审因素，每个因素一个一级章。
+章名用评分项原文，含括号里的「包括但不限于…」，不要改写、不要合并。
+形式评审、资格评审、响应性评审、商务评分、合同条款、投标人须知不进目录。
+不要把第一章写成「编制说明」。编制依据、工程概况、水文地质、主要工程数量放在「主要施工方案」章的第一节，不要单独成一级章。
+
+# 二级目录是施工理解，不是把一级章名拆开
+先根据工程事实形成本工程的施工理解：区段、构筑物、清单分项、工程量、汛期、灌排约束。禁止用「保障体系」「主要措施」当二级标题。
+评分项是施工方案、技术措施或主要施工方法时，按工程量清单的分项工程展开，一项一节。
+节名用分项名称，并写上清单里的数量，例如「农用井工程（180 眼）」「沟渠疏浚工程（80.13km）」「梁板桥工程（30 座）」。没有数量就写【待核实】。
+每一分项下面按工序排：施工工艺流程、分步施工、质量控制要点。不要把所有分项揉成一节「主要施工方法」。
+测量放线、施工排水与降排水、季节性施工（含农忙、灌溉期）按招标范围单列。
+拦河、筑坝、沟渠截流的，必须有施工导流或围堰。跨汛或招标要求度汛的，必须有度汛。水土保持与环境保护按招标范围该有就要有。
+
+# 重难点章
+评分项是工程重难点或保证措施时，先写「工程特点与重难点识别」：用表格归纳作业面、构筑物数量、土方量、工期、灌排交叉、地质、既有设施。
+然后按本工程清单自己识别 5～8 条重难点，节名写成「重难点：数量＋问题」，例如「180 眼农用井分布施工组织与成井质量」。招标点名的必须保留，其余从工程量大、点位分散、灌溉不能中断、季节窗口、交叉施工里取。节名不要用口语化问句。
+每条重难点下面固定三节：重难点分析、重难点解决措施、保证措施汇总。
+分析要分条，写清工程量、点位分布、地质水文、工期窗口、对灌排或度汛的影响，数字来自清单和招标原文。
+解决措施用（1）（2）（3）（4），每条先给短措施名，再写时限、数量、机械、施工顺序。
+保证措施汇总写成表：措施、对应难点、责任岗位、实施时间。
+高标准农田、灌区还要有：施工期不得中断灌排、分段施工与临时导流、农忙保障、少占耕地、临时用地复垦。
+
+# 资源、进度、平面
+物资、机械、劳动力若评分表分列，就分章，不要合成一章人材机。进度章保留横道图或网络图节点。总平面和临时用地按招标附表名称放在「附件」下。
+
+# 输出
+只输出 Markdown 标题：# 一级、## 二级、### 三级、#### 四级。标题不要自带编号。
+每个末级节点下一行「思路：…」，不超过 200 字。除此之外不要解释。
+不要写知识库、产品功能、公司业绩、获奖、人员姓名。同一内容只出现在最对应的那一章。
+可参考 water-bid skill。
+"""
+
+
+def write_engineering_outline_markdown(
+    *,
+    user_id: str,
+    project_id: str,
+    draft_id: str,
+    job_id: str,
+    model_id: str | None,
+    project_name: str,
+    tender_text: str,
+    facts: dict,
+    specialty: str = "",
+    track: str = "engineering",
+    review_feedback: str = "",
+) -> str:
+    """让智能体通读招标原文编施工组织设计目录。失败时抛 HarnessError，由调用方决定是否回退骨架。"""
+    from .engineering_writer import facts_brief
+    from .writer_tool_runtime import (
+        load_original_tender_text,
+        materialize_full_tender_text,
+        original_tender_page_count,
+    )
+
+    workdir = scoped_workspace(user_id, project_id, draft_id, "jobs", job_id)
+    if not (tender_text or "").strip():
+        tender_text = load_original_tender_text(project_id)
+    materialize_full_tender_text(workdir, tender_text)
+    total_pages = original_tender_page_count(tender_text)
+    brief = facts_brief(facts, specialty=specialty)
+    _write_text(workdir / "eng_facts.txt", brief)
+
+    lines = [
+        f"项目名称：{project_name or '（未命名项目）'}",
+        f"专业：{specialty or '未标明'}",
+        "",
+        "请先通读本份招标文件原文，形成对本工程怎么施工的理解，再编目录。"
+        "一级章只对技术评分项。二级目录不要把章名拆成套话，要用下面的施工理解（单体、专业、阶段、现场约束、工艺系统、清单分项）挂到对应评分项下。",
+        "",
+        "已经从本份招标文件抽出的工程事实（作为核对用，不要据此编造原文没有的内容）：",
+        brief or "（没有抽出工程事实，请完全以招标原文为准）",
+        "",
+    ]
+    if tender_text and len(tender_text) <= 16000:
+        lines.append("----------招标文件原文（全文已贴在下面）----------")
+        lines.append(tender_text)
+    else:
+        lines.append(
+            f"招标文件原文较长（约 {len(tender_text or '')} 字），已存入 read_tender(section=\"original\")，共约 {total_pages} 页。"
+            "不要从第 1 页逐页翻到最后。"
+            + (
+                "用 query 检索「评分」「施工组织设计」「工程量」「沟渠」「灌溉」「度汛」「导流」「附表」，读中后再编目录。"
+                if track == "water"
+                else "用 query 检索「评分」「技术标」「重点难点」「附表」「危险性较大」，读中后再编目录。"
+            )
+        )
+    prompt = "\n".join(lines)
+    if (review_feedback or "").strip():
+        prompt += "\n\n" + review_feedback.strip()
+    _write_text(workdir / "outline-brief.txt", prompt[:80000])
+    _write_text(workdir / "doc_kind.txt", "tech")
+
+    async def _run() -> str:
+        system = (WATER_OUTLINE_SYSTEM if track == "water" else ENG_OUTLINE_SYSTEM) + (
+            "\n招标原文在 read_tender(section=\"original\")，工程事实在工作区 eng_facts.txt。"
+            "不要打开浏览器，不要导出 Word，不要检索知识库和产品库。"
+        )
+        agent = _make_agent(
+            "water-outline-writer" if track == "water" else "eng-outline-writer",
+            system,
+            model_id,
+            workdir,
+            f"{user_id}-{draft_id}-{job_id}",
+            _job_tools(workdir, project_id),
+            16,
+            track=track,
+        )
+        markdown = await _reply(agent, prompt)
+        _write_text(workdir / "outline-raw.txt", markdown[:80000])
+        if not _outline_has_heading(markdown):
+            markdown = await _reply(
+                agent,
+                "上一次回复没有 Markdown 标题。请只重写目录，不要解释。"
+                "一级标题用 #，章名用评分项原文，可以长于 12 字；下级用 ##、###、####；"
+                "每个末级节点下保留一行「思路：…」。",
+            )
+            _write_text(workdir / "outline-raw.txt", markdown[:80000])
+        return markdown
+
+    return asyncio.run(_run())
+
+
+UNGROUNDED_REWRITE_MIN = 3
+
+
+def write_engineering_chapter(
+    *,
+    user_id: str,
+    project_id: str,
+    draft_id: str,
+    job_id: str,
+    model_id: str | None,
+    node: dict,
+    outline: list[dict],
+    facts: dict,
+    layout: dict | None = None,
+    specialty: str = "",
+    plan: dict | None = None,
+) -> str:
+    """施工组织设计的一节正文由智能体撰写，可翻招标原文核对。
+
+    写完查一遍数字出处，水利再过校核闸，有问题发回重写一轮。智能体失败时退回原来的单次生成，不让这一节空着。
+    """
+    from .engineering_check import edit_block_reason
+    from .engineering_writer import (
+        ENG_CHAPTER_SYSTEM,
+        WATER_CHAPTER_SYSTEM,
+        chapter_prompt_for,
+        normalize_table_markdown,
+        ungrounded_numbers,
+        write_chapter,
+    )
+
+    def fallback() -> str:
+        return write_chapter(
+            node, outline, facts, model_id=model_id, project_id=project_id, layout=layout, specialty=specialty, plan=plan
+        )
+
+    prompt = chapter_prompt_for(
+        node, outline, facts, project_id=project_id, layout=layout, specialty=specialty, plan=plan
+    )
+    workdir = scoped_workspace(user_id, project_id, draft_id, "jobs", job_id)
+    _write_text(workdir / "chapter-brief.txt", prompt[:80000])
+    from .writer_tool_runtime import load_original_tender_text, materialize_full_tender_text
+
+    tender_text = load_original_tender_text(project_id)
+    materialize_full_tender_text(workdir, tender_text)
+    system = WATER_CHAPTER_SYSTEM if specialty == "水利" else ENG_CHAPTER_SYSTEM
+    system += (
+        "\n招标原文在 read_tender(section=\"original\")，写到工期、工程量、规范编号时先核对原文。"
+        "不要检索知识库和产品库，不要编造业绩、证书和人员姓名。只输出 Markdown 表格。"
+    )
+    tools = [tool for tool in _job_tools(workdir, project_id) if getattr(tool, "name", "") == "read_tender"]
+
+    async def _once(agent, ask: str) -> str:
+        raw = await _reply(agent, ask)
+        return normalize_table_markdown(raw)
+
+    async def _run() -> str:
+        agent = _make_agent(
+            "eng-chapter-writer",
+            system,
+            model_id,
+            workdir,
+            f"{user_id}-{draft_id}-{job_id}",
+            tools,
+            16,
+            track="water" if specialty == "水利" else "engineering",
+        )
+        content = await _once(agent, prompt + "\n\n请只输出本节的 Markdown 表格。")
+        if not content.strip():
+            return content
+        advice: list[str] = []
+        loose = ungrounded_numbers(content, prompt + "\n" + (tender_text or ""))
+        if len(loose) >= UNGROUNDED_REWRITE_MIN:
+            advice.append(
+                "下面这些数字在工程事实、本节清单、施工计划账和招标原文里都找不到出处："
+                + "、".join(loose[:12])
+                + "。改成有出处的数字，没有出处的写【待核实】。"
+            )
+        if specialty == "水利":
+            blocked, notes = edit_block_reason(facts, outline, {}, str(node.get("id") or ""), content)
+            if blocked:
+                advice.append(blocked)
+            elif notes:
+                advice.append("本节仍有建议：\n" + "\n".join(f"- {item}" for item in notes))
+        if not advice:
+            return content
+        return await _once(agent, "校核未通过，只重写本节表格，改掉下面的问题，不要解释：\n" + "\n".join(advice))
+
+    try:
+        return asyncio.run(_run())
+    except HarnessError:
+        logger.exception("engineering chapter harness failed")
+        return fallback()
+    except Exception:  # noqa: BLE001 —— 智能体异常不让这一节空着
+        logger.exception("engineering chapter harness crashed")
+        return fallback()
+
+
+def review_outline_markdown(
+    *,
+    user_id: str,
+    project_id: str,
+    draft_id: str,
+    job_id: str,
+    model_id: str | None,
+    outline_text: str,
+    composition: list[dict],
+    ledger: list[dict],
+) -> list[str]:
+    """第二个智能体评审目录：只对照招标原文和台账找问题，不改目录。返回问题清单，空表示通过。"""
+    from .writer_tool_runtime import (
+        load_original_tender_text,
+        load_tender_extracts,
+        materialize_full_tender_text,
+        materialize_tender_extracts,
+    )
+
+    workdir = scoped_workspace(user_id, project_id, draft_id, "jobs", job_id)
+    materialize_tender_extracts(workdir, load_tender_extracts(project_id))
+    materialize_full_tender_text(workdir, load_original_tender_text(project_id))
+    wanted = "\n".join(f"- {c.get('title')}" for c in composition) or "（本份招标书没有写明组成清单）"
+    musts = "\n".join(
+        f"- {e['id']} {str(e.get('text') or '')[:60]} → "
+        + ("、".join(e.get("chapters") or []) or "没有章节")
+        for e in ledger
+        if e.get("mandatory")
+    )[:6000]
+    prompt = (
+        "请评审下面这份投标目录是否完全应标。对照招标原文（read_tender）检查：\n"
+        "1. 大章是否与本份招标书列出的投标文件或响应文件一致、顺序一致；\n"
+        "2. 采购需求、技术标准、发包人要求里的必须条款是否写在对应文件下；评标办法、合同条款、投标人须知里的否决情形出现在目录里则是问题；\n"
+        "3. 小章标题是否来自格式节或需求部分，有没有把评审因素、合同条款写成章节；\n"
+        "4. 各章是否放在含义对应的大章下。\n"
+        f"组成清单：\n{wanted}\n\n必须项与其章节：\n{musts or '（无）'}\n\n待评审目录：\n{outline_text}\n\n"
+        '只返回 JSON：{"pass":true或false,"issues":["问题，说明哪个章节怎么改"]}。没有明确问题时 pass 为 true，issues 为空。'
+    )
+
+    async def _run() -> list[str]:
+        agent = _make_agent(
+            "outline-reviewer",
+            "你是投标目录评审员，只评审、不改写。以招标原文为准，问题要具体到章节名。不要打开浏览器，不要导出 Word。",
+            model_id,
+            workdir,
+            f"{user_id}-{draft_id}-{job_id}",
+            _job_tools(workdir, project_id),
+            12,
+        )
+        data = _extract_json_object(await _reply(agent, prompt))
+        if data.get("pass") is True and not data.get("issues"):
+            return []
+        return [str(x).strip() for x in (data.get("issues") or []) if str(x).strip()][:12]
 
     return asyncio.run(_run())
 
@@ -651,13 +1063,42 @@ def write_tech_chapter(
     chapter_idea: str = "",
     requirement: str = "",
     enable_figures: bool = True,
+    fact_text: str = "",
 ) -> str:
-    """拆义务、写解决方案、对照标题验收，最多重写两轮；验收后由智能体判断是否配结构图。"""
+    """拆义务、写解决方案，按标题、条款里的数字指标和篇幅下限验收，最多重写两轮；
+    验收后由智能体判断是否配结构图。fact_text 是必须逐项应答的条款原文，为空则不查数字指标。"""
     workdir = scoped_workspace(user_id, project_id, draft_id, "jobs", job_id)
     _write_text(workdir / "chapter-brief.txt", prompt[:80000])
-    from .writer_tool_runtime import load_tender_extracts, materialize_tender_extracts
+    from .writer_tool_runtime import (
+        extract_hard_facts,
+        load_original_tender_text,
+        load_tender_extracts,
+        materialize_full_tender_text,
+        materialize_tender_extracts,
+    )
 
     materialize_tender_extracts(workdir, load_tender_extracts(project_id))
+    original_text = load_original_tender_text(project_id)
+    materialize_full_tender_text(workdir, original_text)
+    from .e_writer import chapter_follows_response_rule
+    from .tender_toc import extract_response_rules, response_checks
+
+    response_rule = "\n".join(extract_response_rules(original_text)).strip()
+    response_marks = response_checks(response_rule) if chapter_follows_response_rule(chapter_title) else []
+    _write_text(workdir / "response_rule.txt", response_rule)
+    _write_text(workdir / "response_checks.txt", "\n".join(response_marks))
+    if response_rule and response_marks:
+        prompt += (
+            "\n\n本份招标书对应答写法的规定如下，解决方案必须照这些原句写，"
+            "不要改成另一套格式，也不要只写自由段落：\n"
+            + response_rule
+        )
+        _write_text(workdir / "chapter-brief.txt", prompt[:80000])
+    facts = extract_hard_facts(fact_text) if fact_text.strip() else []
+    min_chars = _min_solution_chars(fact_text)
+    _write_text(workdir / "requirement.txt", (requirement or fact_text or "")[:20000])
+    _write_text(workdir / "facts.txt", "\n".join(facts))
+    _write_text(workdir / "min_chars.txt", str(min_chars))
     binding = DraftBinding(user_id, draft_id, chapter_id)
     figure_state: dict = {
         "title": chapter_title,
@@ -669,7 +1110,7 @@ def write_tech_chapter(
     figures_on = bool(enable_figures and chapter_id and _wants_figure(hint))
     illustration_on = bool(figures_on and _ILLUSTRATION_HINT.search(f"{hint}\n{requirement}"))
     tools = [
-        *_job_tools(workdir, project_id),
+        *_job_tools(workdir, project_id, draft_id),
         *_extra_tools(binding, state=figure_state, chat=False, allow_illustration=illustration_on),
     ]
     if not figures_on:
@@ -683,6 +1124,8 @@ def write_tech_chapter(
             "必要时 read_knowledge_section，知识库没有的内容不要编。"
             "可把义务写成 obligations.json、正文写成 chapter.md，"
             "再用 run_skill_script 运行 bid-chapter/check_coverage.py。不要打开浏览器，不要导出 Word。"
+            "本章招标条款在工作区 requirement.txt，招标书原文可用 read_tender(section=\"original\") 核对；"
+            "条款里的数字、期限、数量、版本必须在正文里逐项写出，并说明本方案如何满足，不能只复述标题。"
             "make_diagram 和 generate_illustration 只在被要求配图时才调用，写正文阶段不要调用。",
             model_id,
             workdir,
@@ -701,23 +1144,39 @@ def write_tech_chapter(
         obligations = [item for item in (data.get("obligations") or []) if isinstance(item, dict) and item.get("title")]
         if not obligations:
             raise HarnessError("没有拆出可验收的义务标题")
-        obligations = obligations[:16]
+        obligations = obligations[:40]
         titles = "\n".join(f"- {item.get('title')}" for item in obligations)
+        fact_note = ""
+        if facts:
+            fact_note = (
+                "\n招标条款里的下列指标必须原样出现在正文，每项都要写明本方案如何满足：\n"
+                + "\n".join(f"- {item}" for item in facts)
+            )
+        if response_marks:
+            fact_note += "\n正文还必须按本份招标书的应答规定写出这些字样：" + "、".join(
+                f"「{item}」" for item in response_marks
+            )
         solution = await _reply(
             agent,
             "现在只写解决方案 Markdown。每个义务标题必须原样出现在正文中。"
             "不要输出「原始需求」标题，不要解释。\n义务标题：\n"
-            + titles,
+            + titles
+            + fact_note,
         )
-        problems = _coverage_problems(obligations, solution, product_names, require_gap)
-        for _ in range(2):
+        evidence_text = prompt + "\n" + (requirement or "") + "\n" + (fact_text or "")
+        problems = _coverage_problems(
+            obligations, solution, product_names, require_gap, facts, min_chars, response_marks, evidence_text
+        )
+        for _ in range(3):
             if not problems:
                 break
             solution = await _reply(
                 agent,
                 "验收未通过，只重写解决方案 Markdown，补上这些问题，不要解释：\n" + "\n".join(f"- {item}" for item in problems),
             )
-            problems = _coverage_problems(obligations, solution, product_names, require_gap)
+            problems = _coverage_problems(
+                obligations, solution, product_names, require_gap, facts, min_chars, response_marks, evidence_text
+            )
         if problems:
             raise HarnessError("技术章验收未通过：" + "；".join(problems[:8]))
         if figures_on and _wants_figure(f"{hint}\n{solution}"):
@@ -833,6 +1292,33 @@ class DraftBinding:
             if reason:
                 raise HarnessError(reason)
             contents = dict(draft.chapter_contents_json or {})
+            water_notes: list[str] = []
+            from ..models import Project
+            from .engineering_writer import TRACK_WATER, writer_track
+
+            project = db.get(Project, draft.project_id)
+            if (
+                writer_track(
+                    project.category if project else "",
+                    project.specialty if project else "",
+                    draft.doc_kind,
+                )
+                == TRACK_WATER
+            ):
+                from .engineering_check import check_inputs, edit_block_reason
+
+                settings = draft.settings_json if isinstance(draft.settings_json, dict) else {}
+                extra = check_inputs(db, draft.project_id, contents)
+                blocked, water_notes = edit_block_reason(
+                    settings.get("engFacts"),
+                    draft.outline_json or [],
+                    contents,
+                    target,
+                    body,
+                    extra,
+                )
+                if blocked:
+                    raise HarnessError(blocked)
             contents[target] = body
             draft.chapter_contents_json = contents
             flag_modified(draft, "chapter_contents_json")
@@ -846,6 +1332,10 @@ class DraftBinding:
             db.commit()
             edit = {"chapterId": target, "content": body}
             self.edits.append(edit)
+            if water_notes:
+                return f"已更新章节 {target}\n本节仍有建议，请继续改到符合水利施组规则：\n" + "\n".join(
+                    f"- {note}" for note in water_notes
+                )
             return f"已更新章节 {target}"
         finally:
             db.close()
@@ -902,6 +1392,7 @@ class DraftBinding:
                 parent_id=parent_id,
                 after_id=after_id,
                 idea=idea,
+                part=(draft.doc_kind or "tech"),
             )
             draft.outline_json = outline
             flag_modified(draft, "outline_json")
@@ -1370,12 +1861,112 @@ async def _offload(func, *args):
     return await asyncio.to_thread(func, *args)
 
 
-def _job_tools(workdir: Path, project_id: str) -> list:
-    """目录/章节生成：只读招标摘录 + Skill 脚本，不上网、不导出。"""
+def _job_tools(workdir: Path, project_id: str, draft_id: str = "") -> list:
+    """目录/章节生成：只读招标摘录 + Skill 脚本，不上网、不导出。draft_id 给出时，应答结论同时落库。"""
     from agentscope.permission import PermissionBehavior, PermissionContext, PermissionDecision
     from agentscope.tool import ToolBase
 
-    from .writer_tool_runtime import read_tender_text, run_skill_script
+    from .writer_tool_runtime import (
+        match_product_text,
+        match_qualification_text,
+        persist_response,
+        read_form_registry_text,
+        read_ledger_text,
+        read_tender_text,
+        record_response_text,
+        run_skill_script,
+    )
+
+    class _ReadOnly(ToolBase):
+        is_read_only = True
+        is_concurrency_safe = True
+
+        async def check_permissions(self, tool_input: dict, context: PermissionContext) -> PermissionDecision:
+            return PermissionDecision(behavior=PermissionBehavior.ALLOW, message="只读项目资料")
+
+    class ReadLedger(_ReadOnly):
+        name = "read_ledger"
+        description = (
+            "读取需求台账：每条应答要求的编号、类型（资格性/实质性/评分性/格式/应答）、是否必须（★、否决、必须）、"
+            "招标书出处和逐字原文。query 可填编号（如 T5）或关键词，不填则分页列出。"
+        )
+        input_schema = {
+            "type": "object",
+            "properties": {"query": {"type": "string"}, "page": {"type": "integer"}},
+            "required": [],
+        }
+
+        async def call(self, query: str = "", page: int = 1) -> object:
+            return _text_chunk(await _offload(read_ledger_text, project_id, query, page))
+
+    class ReadFormRegistry(_ReadOnly):
+        name = "read_form_registry"
+        description = (
+            "列出招标书附录里已给出格式的文件（承诺书、授权书、偏离表、报价表、团队表等）。"
+            "给 index 时返回该份格式的原文。这些章节由系统原样拷贝，不要重写。"
+        )
+        input_schema = {"type": "object", "properties": {"index": {"type": "integer"}}, "required": []}
+
+        async def call(self, index: int = -1) -> object:
+            return _text_chunk(await _offload(read_form_registry_text, project_id, index))
+
+    class MatchStandardProduct(_ReadOnly):
+        name = "match_standard_product"
+        description = (
+            "查询产品库里与一条招标要求最接近的标准功能点和应标原文摘要。有对应功能时必须以库内原文为准，"
+            "没有时才自己撰写，并如实说明没有标品支撑。"
+        )
+        input_schema = {
+            "type": "object",
+            "properties": {"requirement": {"type": "string"}},
+            "required": ["requirement"],
+        }
+
+        async def call(self, requirement: str) -> object:
+            return _text_chunk(await _offload(match_product_text, project_id, requirement))
+
+    class MatchQualification(_ReadOnly):
+        name = "match_qualification"
+        description = (
+            "查询企业资质证照库里是否有满足一条招标要求的材料（证照、同类项目业绩、拟派人员等，只含已入库条目）。"
+            "返回命中的条目和库内缺失的数量。库里没有的材料不得编造，须在正文空出并用红字提示用户补充。"
+        )
+        input_schema = {
+            "type": "object",
+            "properties": {"requirement": {"type": "string"}},
+            "required": ["requirement"],
+        }
+
+        async def call(self, requirement: str) -> object:
+            return _text_chunk(await _offload(match_qualification_text, project_id, requirement))
+
+    class RecordResponse(ToolBase):
+        name = "record_response"
+        description = (
+            "记录某条台账要求的应答结论（满足/部分满足/不满足）、实现方式和偏离说明，"
+            "系统据此核对偏离表和追溯矩阵。"
+        )
+        input_schema = {
+            "type": "object",
+            "properties": {
+                "item_id": {"type": "string", "description": "台账编号，如 T5"},
+                "status": {"type": "string", "description": "满足 / 部分满足 / 不满足"},
+                "how": {"type": "string"},
+                "deviation": {"type": "string"},
+            },
+            "required": ["item_id", "status"],
+        }
+        is_read_only = False
+        is_concurrency_safe = False
+
+        async def check_permissions(self, tool_input: dict, context: PermissionContext) -> PermissionDecision:
+            return PermissionDecision(behavior=PermissionBehavior.ALLOW, message="只写本任务工作区")
+
+        async def call(self, item_id: str, status: str, how: str = "", deviation: str = "") -> object:
+            text = await _offload(record_response_text, workdir, item_id, status, how, deviation)
+            if draft_id and text.startswith("已记录"):
+                await _offload(persist_response, draft_id, item_id, status, how, deviation)
+            return _text_chunk(text)
 
     class ReadTender(ToolBase):
         name = "read_tender"
@@ -1427,7 +2018,15 @@ def _job_tools(workdir: Path, project_id: str) -> list:
         async def call(self, skill: str, script: str, args: list[str] | None = None) -> object:
             return _text_chunk(await _offload(run_skill_script, workdir, skill, script, args or []))
 
-    return [ReadTender(), RunSkillScript()]
+    return [
+        ReadTender(),
+        ReadLedger(),
+        ReadFormRegistry(),
+        MatchStandardProduct(),
+        MatchQualification(),
+        RecordResponse(),
+        RunSkillScript(),
+    ]
 
 
 def _extra_tools(
@@ -1770,7 +2369,7 @@ def _chat_tools(
         ReadUpload(),
         ExportDraftDocx(),
         CollectMaterial(),
-        *_job_tools(workdir, project_id),
+        *_job_tools(workdir, project_id, binding.draft_id),
         *_extra_tools(binding, state=None, chat=True),
     ]
 
@@ -1791,12 +2390,32 @@ def run_chat(
     """在该用户自己的 chat 工作区里对话。工具写回的是同一份项目草稿。"""
     workdir = scoped_workspace(user_id, project_id, draft_id, "chat")
     binding = DraftBinding(user_id, draft_id, chapter_id)
-    from .writer_tool_runtime import load_tender_extracts, materialize_outline_snapshot, materialize_tender_extracts
+    from .writer_tool_runtime import (
+        load_original_tender_text,
+        load_tender_extracts,
+        materialize_full_tender_text,
+        materialize_outline_snapshot,
+        materialize_tender_extracts,
+    )
 
     materialize_tender_extracts(workdir, load_tender_extracts(project_id))
+    materialize_full_tender_text(workdir, load_original_tender_text(project_id))
+    from ..models import Project
+    from .engineering_writer import TRACK_WATER, facts_brief, writer_track
+
     db, draft, _flag = binding._open()
+    track = "software"
     try:
         materialize_outline_snapshot(workdir, draft.outline_json)
+        project = db.get(Project, draft.project_id)
+        track = writer_track(
+            project.category if project else "",
+            project.specialty if project else "",
+            draft.doc_kind,
+        )
+        if track == TRACK_WATER:
+            settings = draft.settings_json if isinstance(draft.settings_json, dict) else {}
+            _write_text(workdir / "water_facts.txt", facts_brief(settings.get("engFacts") or {}, specialty="水利"))
     finally:
         db.close()
     attached = prepare_uploads(uploads)
@@ -1818,15 +2437,21 @@ def run_chat(
         names = "\n".join(f"- {item['filename']}" for item in documents)
         focus += "\n本次上传的文档，需要内容时调用 read_upload：\n" + names
     prompt_text = focus + "\n\n" + "\n".join(transcript)
+    skill_line = (
+        "先用 Skill 查看器阅读 water-bid，再看 bid-export。数字以工作区 water_facts.txt 为准，不要编造。"
+        "改正文必须 replace_chapter；被拒绝时按返回原因改正文再提交，不要调用 run_skill_script 做校核。"
+        if track == TRACK_WATER
+        else "先用 Skill 查看器阅读 bid-outline / bid-chapter / bid-research / bid-export，再按说明书调用工具或 run_skill_script。"
+    )
 
     async def _run() -> tuple[str, list[dict]]:
         agent = _make_agent(
             "writer-chat",
             "你是慧投标撰写助手。可以读取当前草稿和招标摘录，修改技术章正文，修改目录，导出 Word，"
-            "并在用户要求时用浏览器搜集白名单素材。先用 Skill 查看器阅读 bid-outline / bid-chapter / "
-            "bid-research / bid-export，再按说明书调用工具或 run_skill_script。"
+            "并在用户要求时用浏览器搜集白名单素材。" + skill_line +
             "用户上传了 Word/PDF/TXT/Markdown 时，先调用 read_upload 阅读。"
             "用户发送了图片时，直接根据画面内容回答，不要把图片当文本文件打开。"
+            "修改目录时不要把评标办法、合同条款、投标人须知、形式评审写成章节。"
             "用户要求新增、删除或修改目录时，必须先 read_chapter 核对 id，再调用 "
             "add_outline_node / delete_outline_node / update_outline 写回。"
             "不要让用户自己在左侧目录树增删，也不要只给操作建议。"
@@ -1846,6 +2471,7 @@ def run_chat(
             _chat_tools(binding, workdir, project_id, attached),
             20,
             stream=True,
+            track=track,
         )
         return await _reply_with_trace(
             agent,

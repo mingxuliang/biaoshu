@@ -1,9 +1,13 @@
+# 本地开发：所有端口只绑定 127.0.0.1，局域网其他机器访问不到数据库、Redis 和 MinIO。
+# Redis 口令取自 .env 的 REDIS_PASSWORD，设置后 REDIS_URL 要写成 redis://:口令@redis:6379/0。
+# MinIO 账号取自 .env 的 MINIO_ROOT_USER / MINIO_ROOT_PASSWORD，需与 MINIO_ACCESS_KEY / MINIO_SECRET_KEY 一致。
+# MinerU 解析服务是可选的：docker compose --profile mineru up -d，然后在 .env 设置 MINERU_URL=http://mineru:8000。
 services:
   postgres:
     image: postgres:16-alpine
     env_file: .env
     ports:
-      - "5434:5432"
+      - "127.0.0.1:5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -14,10 +18,12 @@ services:
 
   redis:
     image: redis:7-alpine
+    env_file: .env
+    command: ["sh", "-c", "if [ -n \"$$REDIS_PASSWORD\" ]; then exec redis-server --requirepass \"$$REDIS_PASSWORD\"; else exec redis-server; fi"]
     ports:
-      - "6380:6379"
+      - "127.0.0.1:6380:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli $${REDIS_PASSWORD:+-a \"$$REDIS_PASSWORD\"} --no-auth-warning ping | grep -q PONG"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -25,12 +31,10 @@ services:
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+    env_file: .env
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes:
       - minio_data:/data
     healthcheck:
@@ -44,7 +48,7 @@ services:
     build: .
     env_file: .env
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./uploads:/app/uploads
       - ./sample_data:/app/sample_data
@@ -73,13 +77,23 @@ services:
       minio:
         condition: service_started
 
+  # 只给 worker 调用，靠 WRITER_BROWSER_TOKEN 鉴权；宿主机只在本机回环可达
   writer-browser:
     build:
       context: .
       dockerfile: writer_browser/Dockerfile
     env_file: .env
     ports:
-      - "8010:8010"
+      - "127.0.0.1:8010:8010"
+    restart: unless-stopped
+
+  # 扫描件 / 复杂版式 PDF 解析。镜像按 MinerU 官方 Dockerfile 自建，名称可用 MINERU_IMAGE 覆盖
+  mineru:
+    image: ${MINERU_IMAGE:-mineru-api:latest}
+    profiles: ["mineru"]
+    command: mineru-api --host 0.0.0.0 --port 8000
+    environment:
+      MINERU_MODEL_SOURCE: ${MINERU_MODEL_SOURCE:-modelscope}
     restart: unless-stopped
 
 volumes:

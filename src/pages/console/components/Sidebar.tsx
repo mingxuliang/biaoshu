@@ -1,11 +1,15 @@
-import { NavLink } from "react-router-dom";
+import AppSidebar, { type SidebarNavGroup } from "@/components/shell/AppSidebar";
 import { useAuth } from "@/context/AuthContext";
+import { isPersonal } from "@/lib/api";
 import { hideWriter } from "@/lib/flags";
 import { hasAnyPerm, type RolePerm } from "@/lib/permissions";
 
+type NavItem = { to: string; label: string; icon: string; anyOf?: RolePerm[]; orgOnly?: boolean; personalOnly?: boolean };
+
 const navGroups: {
   label: string;
-  items: { to: string; label: string; icon: string; anyOf?: RolePerm[] }[];
+  personalLabel?: string;
+  items: NavItem[];
 }[] = [
   {
     label: "业务模块",
@@ -22,9 +26,19 @@ const navGroups: {
   {
     label: "资源模块",
     items: [
-      { to: "/console/qualifications", label: "资质证照库", icon: "ri-vip-crown-2-line" },
+      {
+        to: "/console/qualifications",
+        label: "资质证照库",
+        icon: "ri-vip-crown-2-line",
+        anyOf: ["project_edit", "writer", "review", "qual_edit"],
+      },
       { to: "/console/knowledge", label: "文档知识库", icon: "ri-book-3-line" },
-      { to: "/console/products", label: "产品功能库", icon: "ri-box-3-line" },
+      {
+        to: "/console/products",
+        label: "产品功能库",
+        icon: "ri-box-3-line",
+        anyOf: ["project_edit", "writer", "review", "qual_edit"],
+      },
     ],
   },
   {
@@ -32,8 +46,17 @@ const navGroups: {
     items: [
       { to: "/console/rules", label: "预审规则", icon: "ri-tools-line", anyOf: ["settings"] },
       { to: "/console/models", label: "模型配置", icon: "ri-cpu-line", anyOf: ["settings"] },
-      { to: "/console/team", label: "团队管理", icon: "ri-team-line", anyOf: ["members"] },
+      { to: "/console/team", label: "团队管理", icon: "ri-team-line", anyOf: ["members"], orgOnly: true },
       { to: "/console/auditlog", label: "审计日志", icon: "ri-file-history-line", anyOf: ["settings"] },
+    ],
+  },
+  {
+    label: "企业管理",
+    personalLabel: "我的账号",
+    items: [
+      { to: "/console/org", label: "企业与组织", icon: "ri-building-2-line", anyOf: ["org"], orgOnly: true },
+      { to: "/console/org", label: "升级为企业", icon: "ri-building-2-line", anyOf: ["org"], personalOnly: true },
+      { to: "/console/billing", label: "费用中心", icon: "ri-wallet-3-line" },
     ],
   },
 ];
@@ -45,99 +68,24 @@ interface SidebarProps {
 
 export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
   const { user } = useAuth();
-  const avatarText = (user?.name || "用").trim().charAt(0) || "用";
+  const personal = isPersonal(user);
+  const groups: SidebarNavGroup[] = navGroups.map((group) => ({
+    label: personal && group.personalLabel ? group.personalLabel : group.label,
+    items: group.items.filter((item) => {
+      if (hideWriter && item.to === "/console/writer") return false;
+      if (item.personalOnly && !personal) return false;
+      if (item.orgOnly && personal) return false;
+      return !item.anyOf || hasAnyPerm(user, item.anyOf);
+    }),
+  }));
+
   return (
-    <>
-      {mobileOpen && (
-        <div
-          className="fixed inset-0 z-40 bg-foreground-950/40 lg:hidden animate-fade-in"
-          onClick={onClose}
-        />
-      )}
-      <aside
-        className={`fixed inset-y-0 left-0 z-50 flex w-[220px] flex-col border-r border-background-300 bg-background-100 transition-transform duration-300 lg:translate-x-0 ${
-          mobileOpen ? "translate-x-0" : "-translate-x-full"
-        }`}
-      >
-        {/* Logo */}
-        <div className="flex items-center gap-2.5 px-4 py-5 border-b border-background-300">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-primary-400 to-primary-600 text-background-50">
-            <i className="ri-sparkling-2-line text-lg"></i>
-          </div>
-          <div>
-            <div className="font-heading text-[15px] font-bold tracking-wider text-foreground-950">
-              慧投标
-            </div>
-            <div className="font-label text-[10px] text-foreground-500">
-              AI 标书系统
-            </div>
-          </div>
-        </div>
-
-        {/* Nav */}
-        <nav className="flex-1 overflow-y-auto px-3 py-3">
-          {navGroups.map((group) => {
-            const items = group.items.filter((item) => {
-              if (hideWriter && item.to === "/console/writer") return false;
-              return !item.anyOf || hasAnyPerm(user?.role, item.anyOf);
-            });
-            if (items.length === 0) return null;
-            return (
-            <div key={group.label}>
-              <div className="font-label px-3 pb-2 pt-1 text-[11px] font-medium text-foreground-500">
-                {group.label}
-              </div>
-              {items.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  className={({ isActive }) =>
-                    `group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-all duration-150 ${
-                      isActive
-                        ? "bg-primary-50/80 text-primary-500 font-medium"
-                        : "text-foreground-600 hover:bg-background-200 hover:text-foreground-900"
-                    }`
-                  }
-                >
-                  {({ isActive }) => (
-                    <>
-                      <span
-                        className={`absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-primary-500 transition-opacity ${
-                          isActive ? "opacity-100" : "opacity-0"
-                        }`}
-                      />
-                      <span
-                        className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors ${
-                          isActive ? "bg-gradient-to-br from-primary-400 to-primary-600 text-background-50" : "text-foreground-500 group-hover:text-foreground-700"
-                        }`}
-                      >
-                        <i className={`${item.icon} text-base`}></i>
-                      </span>
-                      <span className="font-label flex-1">{item.label}</span>
-                    </>
-                  )}
-                </NavLink>
-              ))}
-            </div>
-            );
-          })}
-        </nav>
-
-        {/* User */}
-        <div className="border-t border-background-300 px-3 py-3">
-          <div className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2">
-            <span className="relative flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-primary-400 to-primary-600 text-xs font-medium text-background-50 ring-2 ring-background-100">
-              {avatarText}
-            </span>
-            <span className="flex-1 min-w-0">
-              <span className="font-label block truncate text-[13px] font-medium text-foreground-900">
-                {user?.name || "未登录"}
-              </span>
-              <span className="font-label block text-[11px] text-foreground-500">{user?.role || ""}</span>
-            </span>
-          </div>
-        </div>
-      </aside>
-    </>
+    <AppSidebar
+      groups={groups}
+      brandSubtitle={user?.tenant?.name || "AI 标书系统"}
+      user={{ name: user?.name || "", subtitle: user?.role || "" }}
+      mobileOpen={mobileOpen}
+      onClose={onClose}
+    />
   );
 }

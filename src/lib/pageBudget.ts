@@ -43,7 +43,7 @@ export function resolveBodyPages(page?: Partial<PageConfig> | null): number {
 
 function isTechLeaf(nodes: OutlineNode[], node: OutlineNode): boolean {
   if (nodes.some((item) => item.parentId === node.id)) return false;
-  if (node.part === "form" || isOriginalFormTitle(node.title, node.num)) return false;
+  if (node.part === "form" || node.part === "business" || isOriginalFormTitle(node.title, node.num)) return false;
   if (isBusinessSkipChapter(node)) return false;
   return true;
 }

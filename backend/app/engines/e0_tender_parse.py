@@ -113,7 +113,7 @@ def run(
     extra_fills: dict | None = None,
     addendum_text: str | None = None,
 ) -> dict:
-    category = category if category in BATCHES_BY_CATEGORY else parse_schema.DEFAULT_CATEGORY
+    category = parse_schema.normalize_category(category)
     tree = parse_schema.empty_tree(category)
     errors: list[str] = []
     skip_item_ids: set[str] = {"qty-drawing"}
@@ -260,10 +260,10 @@ def _extract_batch(
             f"{chunk}"
         )
         system = SYSTEM_PROMPT
+    engineering = parse_schema.is_engineering_category(category)
     if "evalMethod" in dim_keys or "envelope" in dim_keys:
-        user_content = (
-            "本批次抽取评标/详细评审规则。"
-            + (
+        if engineering:
+            score_hint = (
                 "技术标评分表进 eval-tech：摘要按「评分项目 + 分值」逐条列出，"
                 "优/良/中/一般/差（或 A/B/C）及对应分数写入分档/赋分规则，一条不漏；"
                 "技术标暗标编制要点、评分门槛一并抽取。"
@@ -271,14 +271,34 @@ def _extract_batch(
                 if "evalMethod" in dim_keys
                 else ""
             )
-            + (
-                "商务评分进 eval-business（因素+分值与分档分开写）；"
-                "报价公式、K 值、偏差率、E 系数、有效报价区间写入 env-price。"
-                if "envelope" in dim_keys
+        else:
+            score_hint = (
+                "技术评分方案进 eval-tech 的「评分因素与标准」：摘要按「评分因素 + 分值」逐条列出，原文保留对应条款。"
+                "不要填写分档/赋分规则、暗标要点或评分门槛，这些字段不在软件服务类骨架里。"
+                "商务评分进 eval-business 的「评分因素与标准」，同样按因素和分值逐条列出。"
+                if "evalMethod" in dim_keys
                 else ""
             )
+        price_hint = (
+            "商务评分进 eval-business（因素+分值与分档分开写）；"
+            "报价公式、K 值、偏差率、E 系数、有效报价区间写入 env-price。"
+            if engineering and "envelope" in dim_keys
+            else ""
+        )
+        user_content = (
+            "本批次抽取评标/详细评审规则。"
+            + score_hint
+            + price_hint
             + "禁止用「详见招标文件详细评审标准」代替表格，也禁止把整章投标人须知粘进评分因素字段。"
             + ("答疑补遗若改了评分表，以答疑最新表为准。\n\n" if addendum else "\n\n")
+            + user_content
+        )
+    if "review" in dim_keys and not engineering:
+        user_content = (
+            "本批次抽取软件服务类评审要求里的技术评分细则。"
+            "review-tech、review-service、review-after 每个板块的「评分细则」"
+            "写入该章节的评分因素、分值、档次和响应要求，一条不漏。"
+            "不要把整章投标人须知粘进评分细则。\n\n"
             + user_content
         )
     if "reject" in dim_keys:

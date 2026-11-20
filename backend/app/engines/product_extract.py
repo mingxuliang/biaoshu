@@ -14,11 +14,13 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..models import ProductFeature, ProductSourceDoc, QualificationSourceDoc
 from .. import storage
+from .doc_parse import scan_page_text
 from .legacy_doc import as_docx
 from .docx_extract import extract_paragraphs
 from .knowledge_extract import _is_heading
 from .llm import LlmError, chat_complete
 from .product_dedup import apply_to_library, merge_candidates_in_doc, sha256_bytes
+from .table_md import docx_table_rows, rows_to_markdown
 from .qualification_extract import looks_like_qualification
 
 logger = logging.getLogger(__name__)
@@ -36,7 +38,7 @@ WRAPPER_HEADING = re.compile(r"响应演示|核心功能演示|功能清单|建�
 JUNK_FEATURE_NAME = re.compile(
     r"合计|小计|总计|序号|金额|备注|数量|工作量|人天|通过时光|基本全部|应当满足"
 )
-CHUNK_CHARS = 2400
+CHUNK_CHARS = 6000  # 给模型判断用的上限；原文全文另存在 source_text，不受此限
 JUDGE_SYSTEM = """你在阅读本公司过往技术标，只为「产品功能库」收录真正的产品能力。
 
 算作功能点：软件/平台可投标的功能菜单或子功能，例如培训管理、签到方式、证书颁发、学习档案、任务推送。
@@ -188,15 +190,10 @@ def extract_docx_product_blocks(path: str) -> tuple[list[dict], list[dict], list
                 )
         elif child.tag == qn("w:tbl"):
             table = Table(child, document)
-            rows: list[list[str]] = []
-            for row in table.rows:
-                cells = [" ".join(cell.text.split()) for cell in row.cells]
-                cells = [c for c in cells if c]
-                if cells:
-                    rows.append(cells)
+            rows = [r for r in docx_table_rows(table) if any(c for c in r)]
             if not rows:
                 continue
-            table_text = "\n".join(" | ".join(r) for r in rows)
+            table_text = rows_to_markdown(rows)
             heading = current_heading
             current_texts.append(table_text)
             for blob, ext in _blip_blobs(child, document):
@@ -229,6 +226,11 @@ def extract_pdf_product_blocks(path: str) -> tuple[list[dict], list[dict], list[
         for i, page in enumerate(doc, start=1):
             heading = f"第 {i} 页"
             text = page.get_text("text").strip()
+            if len(text) < 20:
+                # 截图页照常当界面图收录；能识别出文字时同时作为正文块交给大模型
+                scan_text, _source = scan_page_text(doc, i - 1)
+                if len(scan_text) >= 40 and not _looks_boilerplate(scan_text[:40]):
+                    blocks.append({"heading": heading, "text": scan_text[:CHUNK_CHARS]})
             if len(text) >= 20 and not _looks_boilerplate(text[:40]):
                 blocks.append({"heading": heading, "text": text[:CHUNK_CHARS]})
                 for line in text.splitlines():
@@ -340,7 +342,8 @@ def _llm_judge_section(node: dict, parent_name: str) -> dict | None:
         return None
     if _bad_feature_name(name) and not (node.get("children") or []):
         return None
-    text = (node.get("text") or "").strip()[:CHUNK_CHARS]
+    full_text = (node.get("text") or "").strip()
+    text = full_text[:CHUNK_CHARS]
     child_titles = "、".join(
         (c.get("name") or _clean_heading(c.get("heading") or ""))[:16]
         for c in (node.get("children") or [])[:20]
@@ -384,6 +387,7 @@ def _llm_judge_section(node: dict, parent_name: str) -> dict | None:
         "params": (row.get("params") or "").strip()[:800],
         "intro": intro,
         "bidCopy": bid,
+        "sourceText": full_text,
         "brand": "",
         "model": "",
         "unit": "",
@@ -756,36 +760,17 @@ def divert_qualification_features(db: Session, library_id: str) -> int:
 
 
 def run_extract_for_source_doc(db: Session, source_doc_id: str) -> None:
-    from .qualification_dedup import apply_to_library as apply_qual
-    from .qualification_extract import extract_candidates as extract_qual_candidates
-
     doc = db.get(ProductSourceDoc, source_doc_id)
     if not doc:
         return
     doc.status = "running"
-    doc.note = "正在抽取功能点，证照将同步到资质库…"
+    doc.note = "正在抽取功能点…"
     db.commit()
     try:
         if not doc.storage_path or not storage.exists(doc.storage_path):
             raise RuntimeError("源文件不存在")
         with storage.as_local(doc.storage_path) as path:
             candidates = extract_candidates(path)
-            qual_cands = extract_qual_candidates(path)
-        qstats = {"extracted": 0, "merged": 0, "suspected": 0, "conflicts": 0}
-        if qual_cands:
-            qdoc = _ensure_qual_source_from_product(db, doc)
-            qstats = apply_qual(db, qdoc, qual_cands)
-            qdoc.status = "done"
-            qdoc.extracted = qstats["extracted"]
-            qdoc.merged = qstats["merged"]
-            qdoc.suspected = qstats["suspected"]
-            qdoc.conflicts = qstats["conflicts"]
-            qdoc.error = None
-            qdoc.finished_at = datetime.utcnow()
-            qdoc.note = (
-                f"由产品库同步：新增 {qstats['extracted']}，并入 {qstats['merged']}，"
-                f"疑似 {qstats['suspected']}，请审核"
-            )
         stats = apply_to_library(db, doc, candidates)
         nest_features_by_module(db, doc.library_id)
         swept = divert_qualification_features(db, doc.library_id)
@@ -798,9 +783,6 @@ def run_extract_for_source_doc(db: Session, source_doc_id: str) -> None:
             f"新增 {stats['extracted']}，并入 {stats['merged']}，"
             f"疑似 {stats['suspected']}，参数冲突 {stats['conflicts']}"
         )
-        qual_n = qstats["extracted"] + qstats["merged"]
-        if qual_n:
-            note += f"；同步资质 新增{qstats['extracted']} 并入{qstats['merged']}"
         if swept:
             note += f"；迁出证照 {swept} 条"
         note += "，请审核"

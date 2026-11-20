@@ -1,9 +1,10 @@
-"""招标解析固定指标骨架：与前端 src/mocks/parse.ts（软件服务类）/ parseEngineering.ts（工程类）
-的一级维度 / 二级分析项目完全对齐。
+"""招标解析固定指标骨架：与前端 src/mocks/parse.ts（软件服务类）/
+parseEngineering.ts（工程类）的一级维度 / 二级分析项目完全对齐。
 
 按项目 category（软件服务类 | 工程类）选用不同的固定骨架文件；同一 category 内部
 禁止增删 key、id、label、section id/title、row label。抽取结果填充 rows.content（页面摘要）
 和 rows.original（招标原文，供 AI 预审）；找不到时保持空字符串，指标项仍然出现在结果里。
+历史值「产品标」「工程标」只在读取骨架时当作别名，不覆盖用户保存的标书类别。
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import re
 from pathlib import Path
 
 DEFAULT_CATEGORY = "软件服务类"
+ENGINEERING_CATEGORY = "工程类"
 
 _SCHEMA_FILES = {
     "软件服务类": "parse_dimension_schema.json",
@@ -89,15 +91,29 @@ FORMAT_ITEM_IDS_BY_CATEGORY: dict[str, set[str]] = {
     },
 }
 
-# 兼容旧调用方：未传 category 时按软件服务类走（历史行为不变）。
+# 兼容旧调用方：未传 category 时按软件服务类走。
 SCORE_ITEM_IDS = SCORE_ITEM_IDS_BY_CATEGORY[DEFAULT_CATEGORY]
 MUST_ITEM_TYPES = MUST_ITEM_TYPES_BY_CATEGORY[DEFAULT_CATEGORY]
 QUAL_ITEM_IDS = QUAL_ITEM_IDS_BY_CATEGORY[DEFAULT_CATEGORY]
 FORMAT_ITEM_IDS = FORMAT_ITEM_IDS_BY_CATEGORY[DEFAULT_CATEGORY]
 
 
+def normalize_category(category: str | None) -> str:
+    """读取骨架时的别名。工程标视为工程类；产品标视为软件服务类。空值不是工程类。"""
+    text = (category or "").strip()
+    if text in ("工程类", "工程标"):
+        return ENGINEERING_CATEGORY
+    if text in ("软件服务类", "产品标", ""):
+        return DEFAULT_CATEGORY
+    return DEFAULT_CATEGORY
+
+
+def is_engineering_category(category: str | None) -> bool:
+    return (category or "").strip() in ("工程类", "工程标")
+
+
 def _normalize_category(category: str | None) -> str:
-    return category if category in _SCHEMA_FILES else DEFAULT_CATEGORY
+    return normalize_category(category)
 
 
 def load_schema(category: str | None = DEFAULT_CATEGORY) -> list[dict]:
@@ -695,7 +711,7 @@ def derive_engine_fields(tree: list[dict], category: str | None = DEFAULT_CATEGO
     # 软件服务类里"review-"前缀代表技术/服务/售后主观评审项；
     # 工程类：技术标评分、商务机构评分、合同技术指标为主观项，报价公式为客观项。
     subject_prefixes = (
-        ("review-", "eval-tech") if key == "软件服务类" else ("eval-tech", "eval-business", "contract-tech")
+        ("review-", "eval-tech") if key == DEFAULT_CATEGORY else ("eval-tech", "eval-business", "contract-tech")
     )
 
     score_rules = []
@@ -913,6 +929,8 @@ def derive_engine_fields(tree: list[dict], category: str | None = DEFAULT_CATEGO
 def derive_veto_params(tree: list[dict], full_text: str) -> dict:
     import re
 
+    from .performance_scope import exclusions_from_text
+
     blob = collect_text(tree) + "\n" + (full_text or "")[:20000]
     days = None
     m = re.search(r"有效期[^。；\n]{0,20}?(\d+)\s*日历天", blob)
@@ -983,4 +1001,5 @@ def derive_veto_params(tree: list[dict], full_text: str) -> dict:
         "safety_fee_ratio_pct": safety_fee_ratio_pct,
         "personnel_required": personnel_required,
         "equipment_required": equipment_required,
+        "performance_excluded": exclusions_from_text(blob),
     }

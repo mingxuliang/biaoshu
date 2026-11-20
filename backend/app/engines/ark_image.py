@@ -62,10 +62,10 @@ def resolve_image_endpoint() -> tuple[str, str, str]:
     base_url = (settings.ark_base_url or "https://ark.cn-beijing.volces.com/api/v3").strip()
     api_model = (settings.ark_image_model or "doubao-seedream-4-0-250828").strip()
     try:
-        from ..db import SessionLocal
+        from ..db import platform_session
         from ..models import LlmModel, LlmProvider
 
-        db = SessionLocal()
+        db = platform_session()
         try:
             provider = (
                 db.query(LlmProvider)
@@ -101,6 +101,9 @@ def resolve_image_endpoint() -> tuple[str, str, str]:
 
 def generate_and_save(project_id: str, prompt: str, mode: str, style: str | None = None) -> tuple[str, str]:
     """调用方舟生图并落盘。返回 (storage_path, filename)。"""
+    from ..billing import record_usage, require_credits
+
+    require_credits("image")
     api_key, base_url, api_model = resolve_image_endpoint()
 
     mode = mode if mode in VALID_MODES else "normal"
@@ -131,6 +134,7 @@ def generate_and_save(project_id: str, prompt: str, mode: str, style: str | None
             raise
 
     image_bytes, ext = _extract_image_bytes(data)
+    record_usage(api_model=api_model, calls=1, feature="image")
     key = storage.put_bytes(f"writer-images/{project_id}", image_bytes, ext)
     filename = os.path.basename(key)
     return key, filename

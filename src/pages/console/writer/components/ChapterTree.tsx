@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { OutlineNode } from "@/lib/api";
-import { displayOutlineTitle, isSkipAiWrite, renumberOutline } from "@/lib/outlineNum";
+import { nodeDisplayTitle, isSkipAiWrite, renumberOutline } from "@/lib/outlineNum";
 
 interface ChapterTreeProps {
   nodes: OutlineNode[];
@@ -134,7 +134,7 @@ export default function ChapterTree({
       switch (action) {
         case "rename": {
           setEditingId(nodeId);
-          setEditValue(displayOutlineTitle(node.title, node.num));
+          setEditValue(nodeDisplayTitle(node));
           break;
         }
         case "moveUp": {
@@ -348,7 +348,7 @@ export default function ChapterTree({
                     active ? "font-medium text-primary-700" : "text-foreground-700"
                   }`}
                 >
-                  {displayOutlineTitle(node.title, node.num)}
+                  {nodeDisplayTitle(node)}
                 </span>
               )}
 

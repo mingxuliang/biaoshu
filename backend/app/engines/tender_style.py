@@ -116,11 +116,14 @@ def extract_bid_typography(path: str) -> dict:
 
 def extract_tender_typography_from_storage(storage_path: str) -> dict:
     from .. import storage
-    from .legacy_doc import as_docx
+    from .legacy_doc import DocConvertError, as_docx
 
-    with storage.as_local(storage_path) as local:
-        with as_docx(local) as word_path:
-            return extract_tender_typography(word_path)
+    try:
+        with storage.as_local(storage_path) as local:
+            with as_docx(local) as word_path:
+                return extract_tender_typography(word_path)
+    except DocConvertError:
+        return {}
 
 
 def apply_tech_markdown_style(md: str, layout: dict | None) -> str:

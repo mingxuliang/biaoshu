@@ -70,22 +70,46 @@ export interface LayoutConfig {
   headingBold?: boolean;
   indentPt?: number;
   indentChars?: number;
+  hangingIndentPt?: number;
+  leftIndentPt?: number;
   lineSpacingMul?: number | null;
   lineSpacingExactPt?: number | null;
+  lineSpacingAtLeastPt?: number | null;
   fromTender?: boolean;
   preset?: string;
   bodyLatinFont?: string;
   justify?: boolean;
   paragraphBefore?: number;
   paragraphAfter?: number;
-  headings?: Partial<Record<"h1" | "h2" | "h3", LayoutHeading>>;
+  headings?: Partial<Record<"h1" | "h2" | "h3" | "h4", LayoutHeading>>;
   header?: string;
+  headerFont?: string;
+  headerSizePt?: number;
+  headerBorder?: boolean;
+  headerDistanceCm?: number;
+  footerFont?: string;
+  footerSizePt?: number;
+  footerDistanceCm?: number;
+  differentFirstPage?: boolean;
   pageNumber?: "none" | "simple" | "full";
   orientation?: "portrait" | "landscape";
-  cover?: { enabled?: boolean; title?: string; subtitle?: string; company?: string; date?: string };
+  cover?: {
+    enabled?: boolean;
+    title?: string;
+    subtitle?: string;
+    company?: string;
+    date?: string;
+    titleFont?: string;
+    titleSizePt?: number;
+    subtitleFont?: string;
+    subtitleSizePt?: number;
+    infoFont?: string;
+    infoSizePt?: number;
+    infoSpaceAfter?: number;
+  };
   toc?: { enabled?: boolean; levels?: number };
-  table?: { headerFill?: string; fontSizePt?: number; headerBold?: boolean };
-  caption?: { font?: string; sizePt?: number };
+  table?: { headerFill?: string; fontSizePt?: number; headerBold?: boolean; borderColor?: string; borderSizePt?: number };
+  caption?: { font?: string; sizePt?: number; spaceAfter?: number };
 }
 
 export interface LayoutHeading {
@@ -98,17 +122,104 @@ export interface LayoutHeading {
   color?: string;
 }
 
-export const layoutFontFamilies = ["宋体", "仿宋", "黑体", "楷体", "微软雅黑", "Times New Roman", "Arial"];
+export const layoutFontFamilies = [
+  "宋体",
+  "仿宋",
+  "仿宋_GB2312",
+  "黑体",
+  "楷体",
+  "楷体_GB2312",
+  "方正小标宋简体",
+  "华文中宋",
+  "微软雅黑",
+  "等线",
+  "Times New Roman",
+  "Arial",
+  "Calibri",
+  "Cambria",
+  "Courier New",
+];
 
+/** 与《自然资源…技术投标书_配图优化版V4-1》一致，也是撰写默认版式。 */
 export const defaultLayout: LayoutConfig = {
-  margins: { top: 2, bottom: 2, left: 2, right: 2 },
+  preset: "技术标标准",
+  margins: { top: 3.7, bottom: 3.5, left: 2.8, right: 2.6 },
   fontSize: "小四",
+  bodyFont: "仿宋",
+  bodyLatinFont: "Times New Roman",
+  bodySizePt: 12,
   lineSpacing: "1.5倍行距",
+  lineSpacingMul: 1.5,
+  indentChars: 2,
+  indentPt: 24,
+  justify: false,
+  headingFont: "黑体",
+  headings: {
+    h1: { font: "黑体", sizePt: 18, bold: true, align: "left", spaceBefore: 0, spaceAfter: 0 },
+    h2: { font: "黑体", sizePt: 15, bold: true, align: "left", spaceBefore: 0, spaceAfter: 0 },
+    h3: { font: "黑体", sizePt: 13, bold: true, align: "left", spaceBefore: 0, spaceAfter: 0 },
+    h4: { font: "黑体", sizePt: 12, bold: true, align: "left", spaceBefore: 0, spaceAfter: 0 },
+  },
+  pageNumber: "full",
+  header: "{project}  技术投标书",
+  headerFont: "仿宋",
+  headerSizePt: 9,
+  headerBorder: true,
+  headerDistanceCm: 1.5,
+  footerFont: "仿宋",
+  footerSizePt: 10.5,
+  footerDistanceCm: 2.0,
+  differentFirstPage: true,
+  cover: {
+    enabled: false,
+    title: "{project}",
+    subtitle: "技 术 投 标 书",
+    company: "投标单位：（投标人名称）",
+    date: "编制日期：",
+    titleFont: "方正小标宋简体",
+    titleSizePt: 32,
+    subtitleFont: "黑体",
+    subtitleSizePt: 44,
+    infoFont: "仿宋",
+    infoSizePt: 16,
+    infoSpaceAfter: 12,
+  },
+  caption: { font: "黑体", sizePt: 10.5, spaceAfter: 10 },
+  table: { headerFill: "E8E8E8", fontSizePt: 10.5, headerBold: true, borderColor: "808080", borderSizePt: 0.5 },
 };
 
-export const layoutFontSizes = ["二号", "小二", "三号", "小三", "四号", "小四", "五号", "小五"];
-export const layoutLineSpacings = ["1.5倍行距", "2倍行距", "固定值28磅", "固定值30磅"];
+export const layoutFontSizes = [
+  "初号",
+  "小初",
+  "一号",
+  "小一",
+  "二号",
+  "小二",
+  "三号",
+  "小三",
+  "四号",
+  "小四",
+  "五号",
+  "小五",
+  "六号",
+  "小六",
+  "七号",
+  "八号",
+];
+export const layoutLineSpacings = [
+  "单倍行距",
+  "1.15倍行距",
+  "1.5倍行距",
+  "2倍行距",
+  "固定值28磅",
+  "固定值30磅",
+  "最小值28磅",
+];
 export const layoutFontNamePt: Record<string, number> = {
+  初号: 42,
+  小初: 36,
+  一号: 26,
+  小一: 24,
   二号: 22,
   小二: 18,
   三号: 16,
@@ -117,16 +228,28 @@ export const layoutFontNamePt: Record<string, number> = {
   小四: 12,
   五号: 10.5,
   小五: 9,
+  六号: 7.5,
+  小六: 6.5,
+  七号: 5.5,
+  八号: 5,
 };
 
 const FONT_STACK: Record<string, string> = {
   宋体: '"宋体", SimSun, serif',
-  黑体: '"黑体", SimHei, sans-serif',
   仿宋: '"仿宋", FangSong, serif',
+  仿宋_GB2312: '"仿宋_GB2312", "仿宋", FangSong, serif',
+  黑体: '"黑体", SimHei, sans-serif',
   楷体: '"楷体", KaiTi, serif',
+  楷体_GB2312: '"楷体_GB2312", "楷体", KaiTi, serif',
+  方正小标宋简体: '"方正小标宋简体", "黑体", SimHei, serif',
+  华文中宋: '"华文中宋", "宋体", SimSun, serif',
   微软雅黑: '"微软雅黑", "Microsoft YaHei", sans-serif',
+  等线: '"等线", DengXian, "微软雅黑", sans-serif',
   "Times New Roman": '"Times New Roman", Times, serif',
   Arial: "Arial, Helvetica, sans-serif",
+  Calibri: "Calibri, Candara, sans-serif",
+  Cambria: "Cambria, Georgia, serif",
+  "Courier New": '"Courier New", Courier, monospace',
 };
 
 export function writerBodyFontStack(name?: string): string {
@@ -134,27 +257,80 @@ export function writerBodyFontStack(name?: string): string {
   return FONT_STACK[n] || `"${n}", serif`;
 }
 
+function headingLevel(
+  layout: Partial<LayoutConfig> | null | undefined,
+  key: "h1" | "h2" | "h3" | "h4",
+  bodyPt: number,
+  bodyFont: string,
+): { font: string; size: string; weight: string } {
+  const spec = layout?.headings?.[key];
+  const offset = key === "h1" ? 6 : key === "h2" ? 3 : key === "h3" ? 1.5 : 0;
+  const fontName = spec?.font || layout?.headingFont || (key === "h3" || key === "h4" ? bodyFont : "黑体");
+  let pt = spec?.sizePt;
+  if (pt == null && layout?.headingSizePt != null) {
+    pt = key === "h1" ? layout.headingSizePt + 2 : key === "h2" ? layout.headingSizePt : Math.max(layout.headingSizePt - 2, bodyPt);
+  }
+  if (pt == null) pt = bodyPt + offset;
+  return {
+    font: writerBodyFontStack(fontName),
+    size: `${pt}pt`,
+    weight: spec?.bold === false ? "400" : "700",
+  };
+}
+
 export function writerLayoutCssVars(
   layout?: Partial<LayoutConfig> | null,
   applyIndent = false,
+  body?: { font?: string; sizeName?: string },
 ): Record<string, string> {
-  const bodyPt = layout?.bodySizePt ?? layoutFontNamePt[layout?.fontSize || ""] ?? 12;
-  const headingPt = layout?.headingSizePt ?? bodyPt + 4;
-  const bodySize = `${bodyPt}pt`;
-  const headingSize = `${headingPt}pt`;
-  const indent = applyIndent && layout?.indentPt ? `${layout.indentPt}pt` : "0";
-  const lineHeight = layout?.lineSpacingMul ? String(layout.lineSpacingMul) : "1.85";
+  const bodyFont = body?.font || layout?.bodyFont || "宋体";
+  const namedPt = body?.sizeName ? layoutFontNamePt[body.sizeName] : undefined;
+  const bodyPt = namedPt ?? layout?.bodySizePt ?? layoutFontNamePt[layout?.fontSize || ""] ?? 12;
+  const h1 = headingLevel(layout, "h1", bodyPt, bodyFont);
+  const h2 = headingLevel(layout, "h2", bodyPt, bodyFont);
+  const h3 = headingLevel(layout, "h3", bodyPt, bodyFont);
+  const h4 = headingLevel(layout, "h4", bodyPt, bodyFont);
+  let indent = "0";
+  if (applyIndent) {
+    if (layout?.hangingIndentPt) indent = `-${layout.hangingIndentPt}pt`;
+    else if (layout?.indentPt) indent = `${layout.indentPt}pt`;
+    else if (layout?.indentChars) indent = `${layout.indentChars}em`;
+    else indent = "2em";
+  }
+  const lineHeight = layout?.lineSpacingExactPt
+    ? "normal"
+    : layout?.lineSpacingAtLeastPt
+      ? "normal"
+      : layout?.lineSpacingMul
+        ? String(layout.lineSpacingMul)
+        : layout?.lineSpacing === "2倍行距"
+          ? "2"
+          : layout?.lineSpacing === "单倍行距"
+            ? "1"
+            : layout?.lineSpacing === "1.15倍行距"
+              ? "1.15"
+              : "1.75";
   return {
-    "--writer-body-font": writerBodyFontStack(layout?.bodyFont),
-    "--writer-body-size": bodySize,
-    "--writer-heading-font": writerBodyFontStack(layout?.headingFont || layout?.bodyFont),
-    "--writer-heading-size": headingSize,
-    "--writer-heading-weight": layout?.headingBold === false ? "400" : "700",
-    "--writer-h1-size": `${Math.max(headingPt, bodyPt + 6)}pt`,
-    "--writer-h2-size": `${Math.max(headingPt - 2, bodyPt + 3)}pt`,
-    "--writer-h3-size": `${Math.max(bodyPt + 1, 14)}pt`,
+    "--writer-body-font": writerBodyFontStack(bodyFont),
+    "--writer-body-size": `${bodyPt}pt`,
+    "--writer-heading-font": h2.font,
+    "--writer-heading-size": h2.size,
+    "--writer-heading-weight": h2.weight,
+    "--writer-h1-font": h1.font,
+    "--writer-h1-size": h1.size,
+    "--writer-h1-weight": h1.weight,
+    "--writer-h2-font": h2.font,
+    "--writer-h2-size": h2.size,
+    "--writer-h2-weight": h2.weight,
+    "--writer-h3-font": h3.font,
+    "--writer-h3-size": h3.size,
+    "--writer-h3-weight": h3.weight,
+    "--writer-h4-font": h4.font,
+    "--writer-h4-size": h4.size,
+    "--writer-h4-weight": h4.weight,
     "--writer-indent": indent,
     "--writer-line-height": lineHeight,
+    "--writer-left-indent": layout?.leftIndentPt ? `${layout.leftIndentPt}pt` : "0",
   };
 }
 

@@ -1,5 +1,6 @@
 import { parseDimensions, type ParseDimension, type ParseSection, type ParseSubItem } from "@/mocks/parse";
 import { parseDimensionsEngineering } from "@/mocks/parseEngineering";
+import { isEngineeringCategory } from "@/mocks/projects";
 
 export type { ParseDimension, ParseSection, ParseSubItem };
 
@@ -14,7 +15,7 @@ const OLD_QUALDOC_LABEL = "资格审查资料详细清单（资料类别/具体�
 
 /** 按项目标书类别选用对应的固定骨架：软件服务类走 parse.ts，工程类走 parseEngineering.ts。 */
 function baseDimensionsFor(category?: ParseCategory): ParseDimension[] {
-  return category === "工程类" ? parseDimensionsEngineering : parseDimensions;
+  return isEngineeringCategory(category) ? parseDimensionsEngineering : parseDimensions;
 }
 
 /** 早期演示的一级/二级指标骨架，内容一律为空，供解析页始终展示。 */

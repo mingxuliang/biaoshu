@@ -20,6 +20,7 @@ export interface PreReviewIssue {
   rule: string;
   tenderQuote: string;
   suggestion: string;
+  basis?: string;
   resolved?: boolean;
   strategyKey?: string;
   strategyCategory?: string;
@@ -27,6 +28,9 @@ export interface PreReviewIssue {
   strategyClauses?: string[];
   applyText?: string;
   issueClass?: "auto_veto" | "human_check" | "writing" | string;
+  /** 修改闭环：text 可在正文改写；manual 要到清单、图纸、证书等材料里处理，不提供「写入原文」 */
+  fixMode?: "text" | "manual" | string;
+  fixHint?: string;
   /** 修改闭环目录章节 id，来自投标书正文标题树 */
   sectionId?: string;
   /** 投标书章节标题，供清单按章分类 */

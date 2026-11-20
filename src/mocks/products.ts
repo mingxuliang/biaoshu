@@ -70,6 +70,7 @@ export interface ProductParseJob {
   uploadedAt: string;
   note: string;
   error?: string | null;
+  duplicate?: boolean;
 }
 
 export const PRODUCT_LIBRARY_CATEGORIES: ProductLibraryCategory[] = ["软件系统", "货物设备", "综合方案"];

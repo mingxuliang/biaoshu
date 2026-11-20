@@ -26,6 +26,7 @@ _PLACEHOLDER_MARKERS = (
     "商务标本章无需撰写应标正文",
     "请直接使用招标书原文填写后打印签字",
     "无需 AI 撰写",
+    "招标书未提供本文件的固定格式",
 )
 
 _LOCATE_SYSTEM = """你是投标文件编制助手。任务：在招标书正文清单中，为每个商务标章节标出应「原样拷贝」的起止行号。
@@ -44,6 +45,7 @@ class _Block:
     text: str
     md: str
     heading: bool
+    el: object = None  # 原文 OOXML 元素，登记附录格式时取原样 XML
 
 
 def is_placeholder_markdown(md: str) -> bool:
@@ -107,11 +109,14 @@ def extract_forms_from_storage(
     storage_path: str, titles: list[str], model_id: str | None = None
 ) -> dict[str, str]:
     from .. import storage
-    from .legacy_doc import as_docx
+    from .legacy_doc import DocConvertError, as_docx
 
-    with storage.as_local(storage_path) as local:
-        with as_docx(local) as word_path:
-            return extract_forms_markdown(word_path, titles, model_id)
+    try:
+        with storage.as_local(storage_path) as local:
+            with as_docx(local) as word_path:
+                return extract_forms_markdown(word_path, titles, model_id)
+    except DocConvertError:
+        return {}
 
 
 def _core(title: str) -> str:
@@ -438,13 +443,13 @@ def _body_blocks(document) -> list[_Block]:
                     out.append(_Block("p", "", "", False))
                 continue
             blanks = 0
-            out.append(_Block("p", text, md, _is_heading(para, text)))
+            out.append(_Block("p", text, md, _is_heading(para, text), child))
         elif child.tag == qn("w:tbl"):
             blanks = 0
             table = Table(child, document)
             md = _table_md(table)
             if md:
-                out.append(_Block("tbl", _table_plain(table), md, False))
+                out.append(_Block("tbl", _table_plain(table), md, False, child))
     while out and not out[-1].md and not out[-1].text:
         out.pop()
     return out

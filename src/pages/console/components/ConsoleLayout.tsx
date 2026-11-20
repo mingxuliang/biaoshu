@@ -2,10 +2,14 @@ import { useEffect, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import Topbar from "./Topbar";
+import BillingGuard from "./BillingGuard";
 import { ProjectProvider } from "@/context/ProjectContext";
+import { useAuth } from "@/context/AuthContext";
+import { isPersonal } from "@/lib/api";
 import { ProductCatalogProvider } from "@/context/ProductCatalogContext";
 
-function getTitle(pathname: string): string {
+function getTitle(pathname: string, personal: boolean): string {
+  if (personal && pathname.startsWith("/console/org")) return "升级为企业";
   if (pathname.startsWith("/console/projects")) {
     return pathname.includes("/projects/") ? "项目详情" : "项目中心";
   }
@@ -25,12 +29,15 @@ function getTitle(pathname: string): string {
   if (pathname.startsWith("/console/models")) return "模型配置";
   if (pathname.startsWith("/console/team")) return "团队管理";
   if (pathname.startsWith("/console/auditlog")) return "审计日志";
+  if (pathname.startsWith("/console/billing")) return "费用中心";
+  if (pathname.startsWith("/console/org")) return "企业与组织";
   return "工作台";
 }
 
 export default function ConsoleLayout() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const location = useLocation();
+  const { user } = useAuth();
 
   const lockViewport = location.pathname.startsWith("/console/review");
 
@@ -56,7 +63,7 @@ export default function ConsoleLayout() {
       <Sidebar mobileOpen={mobileOpen} onClose={() => setMobileOpen(false)} />
 
       <div className={`relative lg:pl-[220px] ${lockViewport ? "h-full" : ""}`}>
-        <Topbar title={getTitle(location.pathname)} onMenuOpen={() => setMobileOpen(true)} />
+        <Topbar title={getTitle(location.pathname, isPersonal(user))} onMenuOpen={() => setMobileOpen(true)} />
         <main
           className={
             lockViewport
@@ -77,6 +84,7 @@ export default function ConsoleLayout() {
           </ProjectProvider>
         </main>
       </div>
+      <BillingGuard />
     </div>
   );
 }

@@ -14,17 +14,20 @@ import {
   formatFileSize,
   formatOf,
   isAllowedTenderFile,
+  tenderKindSlotsFor,
   type TenderKind,
 } from "@/lib/tenderPackage";
+import { isEngineeringCategory } from "@/mocks/projects";
 
 interface TenderPackagePanelProps {
   projectId: string;
   docs: TenderDocumentSummary[];
   loading: boolean;
   onDocsChange: (docs: TenderDocumentSummary[]) => void;
+  category?: string;
 }
 
-export default function TenderPackagePanel({ projectId, docs, loading, onDocsChange }: TenderPackagePanelProps) {
+export default function TenderPackagePanel({ projectId, docs, loading, onDocsChange, category }: TenderPackagePanelProps) {
   const { token } = useAuth();
   const inputRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const [uploadingKind, setUploadingKind] = useState<TenderKind | null>(null);
@@ -38,7 +41,7 @@ export default function TenderPackagePanel({ projectId, docs, loading, onDocsCha
   };
 
   const filesOf = (kind: TenderKind) =>
-    docs.filter((d) => effectiveTenderKind(d.kind, d.filename) === kind);
+    docs.filter((d) => effectiveTenderKind(d.kind, d.filename, category) === kind);
 
   const handlePick = async (kind: TenderKind, files: FileList | null) => {
     if (!files?.length) return;
@@ -82,21 +85,25 @@ export default function TenderPackagePanel({ projectId, docs, loading, onDocsCha
     setErr(null);
   }, [projectId]);
 
-  const uploadedCount = TENDER_KIND_SLOTS.filter((s) => filesOf(s.key).length > 0).length;
+  const slots = tenderKindSlotsFor(category);
+  const uploadedCount = slots.filter((s) => filesOf(s.key).length > 0).length;
+  const engineering = isEngineeringCategory(category);
 
   return (
     <div className="overflow-hidden">
       <div className="mb-3 flex items-center justify-between">
         <p className="text-[11px] text-foreground-500">
-          工程标可将正文、施工图纸、答疑补遗、工程量清单与其他材料一并上传并一同解析。其他槽支持任意格式。未上传的类型将标明「{TENDER_MISSING_HINT}」。
+          {engineering
+            ? `工程类可将正文、施工图纸、答疑补遗、工程量清单与其他材料一并上传并一同解析。其他槽支持任意格式。未上传的类型将标明「${TENDER_MISSING_HINT}」。`
+            : `软件服务类上传招标文件正文、答疑补遗与其他材料一并解析，不识别施工图纸和工程量清单。未上传的类型将标明「${TENDER_MISSING_HINT}」。`}
         </p>
         <span className="font-label ml-3 shrink-0 rounded bg-secondary-100 px-1.5 py-0.5 text-[10px] text-secondary-700">
-          {loading ? "加载中" : `已上传 ${uploadedCount}/${TENDER_KIND_SLOTS.length} 类`}
+          {loading ? "加载中" : `已上传 ${uploadedCount}/${slots.length} 类`}
         </span>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
-        {TENDER_KIND_SLOTS.map((slot) => {
+      <div className={`grid grid-cols-1 gap-3 sm:grid-cols-2 ${engineering ? "xl:grid-cols-5" : "xl:grid-cols-3"}`}>
+        {slots.map((slot) => {
           const files = filesOf(slot.key);
           const busy = uploadingKind === slot.key;
           return (

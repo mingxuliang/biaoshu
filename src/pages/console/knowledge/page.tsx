@@ -12,12 +12,15 @@ import {
   KNOWLEDGE_TYPES,
   deleteKnowledgeDocument,
   listKnowledgeDocuments,
+  looksLikeStandardFilename,
+  pollKnowledgeDocumentUntilDone,
   uploadKnowledgeDocument,
   type KnowledgeDoc,
 } from "@/lib/api";
 
 const scopeStyle: Record<string, string> = {
   企业库: "bg-primary-50 text-primary-600 border-primary-200",
+  部门库: "bg-sky-50 text-sky-700 border-sky-200",
   项目库: "bg-accent-50 text-accent-600 border-accent-200",
   个人库: "bg-secondary-100 text-secondary-600 border-secondary-200",
 };
@@ -42,7 +45,7 @@ const PAGE_SIZE = 9;
 export default function KnowledgePage() {
   const navigate = useNavigate();
   const { token, user } = useAuth();
-  const canUpload = hasPerm(user?.role, "writer");
+  const canUpload = hasPerm(user, "writer");
   const [docs, setDocs] = useState<KnowledgeDoc[]>([]);
   const [loading, setLoading] = useState(true);
   const [scope, setScope] = useState("全部");
@@ -80,6 +83,15 @@ export default function KnowledgePage() {
   useEffect(() => {
     loadDocs();
   }, [loadDocs]);
+
+  const parsing = docs.some((d) => d.status === "queued" || d.status === "running");
+  useEffect(() => {
+    if (!parsing) return;
+    const timer = window.setInterval(() => {
+      listKnowledgeDocuments().then(setDocs).catch(() => undefined);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [parsing]);
 
   const filtered = useMemo(() => {
     let list = docs;
@@ -124,7 +136,7 @@ export default function KnowledgePage() {
 
     setUploading(true);
     try {
-      await uploadKnowledgeDocument(token, {
+      const created = await uploadKnowledgeDocument(token, {
         scope: uploadScope,
         type: uploadType,
         title: uploadTitle.trim() || undefined,
@@ -136,10 +148,25 @@ export default function KnowledgePage() {
       });
       setUploadOpen(false);
       resetUploadForm();
-      showToast("文档已入库，已按章节切片并保留配图", "success");
+      if (created.duplicate) {
+        showToast(created.duplicateHint || "库中已有内容完全相同的文档，未重复入库", "info");
+        return;
+      }
+      showToast("文档已上传，正在后台解析…", "info");
+      loadDocs();
+      const done = await pollKnowledgeDocumentUntilDone(created.id);
+      showToast(
+        done.duplicateHint ? `已入库。${done.duplicateHint}` : done.type === "规范条文" ? "规范已按条入库" : "文档已入库，已按章节切片并保留配图",
+        done.duplicateHint ? "info" : "success",
+      );
       loadDocs();
     } catch (err) {
-      showToast(err instanceof ApiError ? err.message : "上传失败，请稍后重试", "error");
+      loadDocs();
+      const timedOut = err instanceof ApiError && err.status === 504;
+      showToast(
+        timedOut ? "仍在后台解析，完成后列表会自动更新" : err instanceof ApiError ? err.message : "上传失败，请稍后重试",
+        timedOut ? "info" : "error",
+      );
     } finally {
       setUploading(false);
     }
@@ -281,9 +308,31 @@ export default function KnowledgePage() {
                   {doc.reviewFlag}
                 </div>
               )}
+              {(doc.status === "queued" || doc.status === "running") && (
+                <div className="mt-2.5 flex items-center gap-1.5 rounded-md bg-primary-50 px-2.5 py-1.5 text-xs text-primary-700">
+                  <i className="ri-loader-4-line animate-spin"></i>
+                  {doc.progress && doc.progress.total > 0
+                    ? `正在识别第 ${doc.progress.done} / ${doc.progress.total} 页`
+                    : doc.progress
+                      ? "正在识别整本"
+                      : "后台解析中，完成后可查看"}
+                </div>
+              )}
+              {doc.status === "failed" && (
+                <div className="mt-2.5 flex items-center gap-1.5 rounded-md bg-red-50 px-2.5 py-1.5 text-xs text-red-600">
+                  <i className="ri-error-warning-line"></i>
+                  {doc.error || "解析失败，请重新上传"}
+                </div>
+              )}
+              {doc.duplicateHint && (
+                <div className="mt-2.5 flex items-center gap-1.5 rounded-md bg-accent-50 px-2.5 py-1.5 text-xs text-accent-700">
+                  <i className="ri-file-copy-2-line"></i>
+                  {doc.duplicateHint}
+                </div>
+              )}
               <div className="mt-auto flex items-center justify-between border-t border-background-200 pt-3" style={{ marginTop: "auto" }}>
                 <span className="font-label text-xs text-foreground-500">
-                  {doc.sliceCount} 个章节切片 · {doc.source}
+                  {doc.type === "规范条文" ? `${doc.sliceCount} 条规范` : `${doc.sliceCount} 个章节切片`} · {doc.source}
                 </span>
                 <div className="flex items-center gap-1">
                   {canUpload && (
@@ -350,6 +399,7 @@ export default function KnowledgePage() {
                 className={`${inputCls} cursor-pointer`}
               >
                 <option>企业库</option>
+                {user?.departmentId && <option>部门库</option>}
                 <option>项目库</option>
                 <option>个人库</option>
               </select>
@@ -368,6 +418,9 @@ export default function KnowledgePage() {
                   <option key={t}>{t}</option>
                 ))}
               </select>
+              {uploadType === "规范条文" && (
+                <p className="mt-1 text-[11px] text-foreground-500">按条号入库，只给预审检索，不按目录切章节</p>
+              )}
             </div>
           </div>
           <div>
@@ -391,7 +444,14 @@ export default function KnowledgePage() {
               ref={fileInputRef}
               type="file"
               accept=".doc,.docx,.pdf"
-              onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
+              onChange={(e) => {
+                const picked = e.target.files?.[0] ?? null;
+                setUploadFile(picked);
+                if (picked && looksLikeStandardFilename(picked.name) && uploadType !== "规范条文") {
+                  setUploadType("规范条文");
+                  showToast("文件名像规范编号，已自动选择「规范条文」，按条入库只给预审检索", "info");
+                }
+              }}
               className="hidden"
               id="k-file"
             />

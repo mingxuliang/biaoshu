@@ -46,7 +46,7 @@ const emptyForm = {
 export default function ProductsPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const canEdit = hasPerm(user?.role, "writer");
+  const canEdit = hasPerm(user, "writer");
   const { libraries, addLibrary, updateLibrary, deleteLibrary } = useProductCatalog();
 
   const [keyword, setKeyword] = useState("");

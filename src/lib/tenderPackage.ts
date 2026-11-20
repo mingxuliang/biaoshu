@@ -1,3 +1,5 @@
+import { isEngineeringCategory } from "@/mocks/projects";
+
 export const TENDER_MISSING_HINT = "未能上传该类型文件";
 
 export type TenderKind = "main" | "addendum" | "boq" | "quote" | "drawing";
@@ -54,6 +56,18 @@ export const TENDER_KIND_SLOTS: TenderKindSlot[] = [
   },
 ];
 
+const ENGINEERING_ONLY_KINDS: TenderKind[] = ["boq", "drawing"];
+
+export function tenderKindSlotsFor(category?: string): TenderKindSlot[] {
+  if (isEngineeringCategory(category)) return TENDER_KIND_SLOTS;
+  return TENDER_KIND_SLOTS.filter((slot) => !ENGINEERING_ONLY_KINDS.includes(slot.key));
+}
+
+export function coerceTenderKind(kind: TenderKind, category?: string): TenderKind {
+  if (!isEngineeringCategory(category) && ENGINEERING_ONLY_KINDS.includes(kind)) return "quote";
+  return kind;
+}
+
 export const TENDER_KIND_LABELS: Record<string, string> = Object.fromEntries(
   TENDER_KIND_SLOTS.map((s) => [s.key, s.label]),
 );
@@ -87,7 +101,7 @@ export function parseTargetForKind(kind: string, category?: string): { dimKey: s
   if (kind === "boq") return { dimKey: "quantity", itemId: "qty-boq" };
   if (kind === "drawing") return { dimKey: "quantity", itemId: "qty-drawing" };
   if (kind === "quote") {
-    if (category === "工程类") return { dimKey: "quantity", itemId: "misc-other" };
+    if (isEngineeringCategory(category)) return { dimKey: "quantity", itemId: "misc-other" };
     return { dimKey: "bidReq", itemId: "misc-other" };
   }
   return { dimKey: "basic", itemId: "" };
@@ -95,24 +109,26 @@ export function parseTargetForKind(kind: string, category?: string): { dimKey: s
 
 const SLOT_ACCEPT = new Map(TENDER_KIND_SLOTS.map((s) => [s.key, s.accept]));
 
-export function guessTenderKind(filename: string): TenderKind {
+export function guessTenderKind(filename: string, category?: string): TenderKind {
   const name = (filename || "").toLowerCase();
   if (/答疑|补遗|澄清|addendum|clarif/.test(name)) return "addendum";
   if (/报价|投标报价|quote/.test(name)) return "quote";
-  if (/图纸|图册|施工图|drawing|dwg/.test(name)) return "drawing";
-  if (/清单|工程量|boq|控制价/.test(name)) return "boq";
+  if (/图纸|图册|施工图|drawing|dwg/.test(name)) return coerceTenderKind("drawing", category);
+  if (/清单|工程量|boq|控制价/.test(name)) return coerceTenderKind("boq", category);
   const ext = fileExt(filename);
-  if ([".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif"].includes(ext)) return "drawing";
-  if ([".xlsx", ".xls"].includes(ext)) return "boq";
+  if ([".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif"].includes(ext)) {
+    return coerceTenderKind("drawing", category);
+  }
+  if ([".xlsx", ".xls"].includes(ext)) return coerceTenderKind("boq", category);
   return "main";
 }
 
-export function effectiveTenderKind(stored: string | undefined, filename: string): TenderKind {
+export function effectiveTenderKind(stored: string | undefined, filename: string, category?: string): TenderKind {
   const raw = (stored || "").trim();
-  if (raw && raw !== "main" && TENDER_KIND_LABELS[raw]) return raw as TenderKind;
-  const guessed = guessTenderKind(filename);
+  if (raw && raw !== "main" && TENDER_KIND_LABELS[raw]) return coerceTenderKind(raw as TenderKind, category);
+  const guessed = guessTenderKind(filename, category);
   if (raw === "main" && guessed !== "main") return guessed;
-  if (TENDER_KIND_LABELS[raw]) return raw as TenderKind;
+  if (TENDER_KIND_LABELS[raw]) return coerceTenderKind(raw as TenderKind, category);
   return guessed;
 }
 

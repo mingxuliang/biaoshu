@@ -31,7 +31,19 @@ SENTENCE_SPLIT = re.compile(r"[。！？；\n]")
 HONOR_KEYS = ("ISO", "iso", "荣誉", "奖项", "体系认证")
 HONOR_PROOF = ("证书", "证书编号", "有效期", "认证证书", "扫描件")
 STAFF_KEYS = ("拟派项目经理", "人员表", "持证上岗", "拟派人员")
-STAFF_PROOF = ("证书编号", "注册证书", "执业资格", "身份证", "职称证", "建造师证")
+# 建造师证等是工程类凭证，PMP/信息系统项目管理师/软考是软件服务类常见凭证；两类标书共用
+# 同一个判定列表，天然不会在对方标书正文里出现，无需按 category 再拆一份。
+STAFF_PROOF = (
+    "证书编号",
+    "注册证书",
+    "执业资格",
+    "身份证",
+    "职称证",
+    "建造师证",
+    "PMP",
+    "信息系统项目管理师",
+    "软考",
+)
 EQUIP_KEYS = ("机械", "盾构", "塔吊", "挖掘机", "泵车")
 EQUIP_PROOF = ("设备清单", "型号", "台账", "购置发票", "租赁协议", "租赁合同")
 LOCAL_KEYS = ("本地分支", "分支机构", "售后网点", "售后服务网点")
@@ -95,6 +107,7 @@ def run(
     veto_keys: set[str] | None = None,
     strategy_keys: set[str] | None = None,
     dup_keys: set[str] | None = None,
+    local_item_checks: list[dict] | None = None,
 ) -> list[dict]:
     findings: list[dict] = []
     text_blocks = [p["text"] for p in paragraphs]
@@ -145,6 +158,33 @@ def run(
                         excerpt=_hit_excerpt(text, [{"text": text}], PERFORMANCE_KEYWORDS),
                         rule="F03.05 业绩数量/规模/时间须量化",
                         suggestion="该业绩缺少可核验的数量、规模或时间数据（如合同金额、建筑面积、完工年月），请补充具体数字",
+                    )
+                )
+
+    excluded_types = checklist_params.get("performance_excluded") or []
+    if performance_enabled and excluded_types:
+        from .performance_scope import hits as scope_hits
+
+        reported: set[str] = set()
+        for idx, p in enumerate(paragraphs):
+            text = p["text"]
+            if not any(k in text for k in PERFORMANCE_KEYWORDS):
+                continue
+            window = "\n".join(text_blocks[idx : idx + 3])
+            if re.search(r"排除|不含|不包括|不属于", window):
+                continue  # 这是在声明排除，不是在列业绩
+            for term in scope_hits(window, excluded_types):
+                if term in reported:
+                    continue
+                reported.add(term)
+                findings.append(
+                    _finding(
+                        severity="降档",
+                        location=f"商务标 / 业绩证明 / 段落 {p['index']}",
+                        excerpt=_hit_excerpt(text, [{"text": text}], PERFORMANCE_KEYWORDS),
+                        rule="业绩类型与招标排除项冲突",
+                        suggestion=f"招标明确不计入「{term}」类业绩，该业绩可能不予认可，请换用口径内的类似业绩",
+                        tender_quote="招标排除：" + "、".join(excluded_types),
                     )
                 )
 
@@ -216,7 +256,7 @@ def run(
                         )
                     )
 
-    for spec in LOCAL_ITEM_CHECKS:
+    for spec in local_item_checks if local_item_checks is not None else LOCAL_ITEM_CHECKS:
         if not _item_enabled(local_items, spec["hint"]):
             continue
         if not any(topic in full_text for topic in spec["topic"]):

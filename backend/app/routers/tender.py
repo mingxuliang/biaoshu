@@ -4,6 +4,8 @@ import os
 import urllib.parse
 import zipfile
 
+from sqlalchemy.orm.attributes import flag_modified
+
 import docx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
@@ -12,9 +14,11 @@ from sqlalchemy.orm import Session
 
 from ..audit import actor_from_request, project_label, write_audit
 from ..auth import get_current_user
+from ..billing import require_credits
 from ..db import get_db
+from ..engines.safe_office import check_upload
 from ..engines.parse_export import checklist_to_docx
-from ..engines.parse_schema import derive_engine_fields, merge_tree
+from ..engines.parse_schema import derive_engine_fields, is_engineering_category, merge_tree, normalize_category
 from ..engines.tender_package import (
     ALLOWED_EXTS,
     BLOCKED_EXTS,
@@ -31,8 +35,11 @@ from ..schemas import (
     CreateTenderParseJobIn,
     CustomRuleIn,
     CustomRuleOut,
+    DrawingFactOut,
     DrawingReviewRuleOut,
+    ProjectRuleOut,
     ProjectStandardRulesOut,
+    ToggleProjectRuleIn,
     TenderLeafRuleOut,
     TenderLocateOut,
     TenderParseJobOut,
@@ -61,7 +68,7 @@ def _checklist_to_out(checklist: EvaluationChecklist, db: Session) -> ChecklistO
     category = (project.category if project else None) or "软件服务类"
     pkg = data.get("package")
     if not pkg:
-        pkg = package_slots(_project_tender_docs(db, checklist.project_id))
+        pkg = package_slots(_project_tender_docs(db, checklist.project_id), category)
     return ChecklistOut(
         id=checklist.id,
         project_id=checklist.project_id,
@@ -81,7 +88,41 @@ def _checklist_to_out(checklist: EvaluationChecklist, db: Session) -> ChecklistO
         omittedCount=data.get("omittedCount") or {},
         techBidResponseRequirements=data.get("techBidResponseRequirements") or "",
         businessBidResponse=data.get("businessBidResponse") or "",
+        projectRules=_project_rule_outs(data.get("projectRules")),
+        drawingFacts=_drawing_fact_outs(data.get("drawingFacts")),
     )
+
+
+def _project_rule_outs(rows) -> list:
+    return [
+        ProjectRuleOut(
+            id=str(row.get("id") or ""),
+            source=str(row.get("source") or ""),
+            title=str(row.get("title") or ""),
+            requirement=str(row.get("requirement") or ""),
+            checkType=str(row.get("checkType") or ""),
+            severity=str(row.get("severity") or ""),
+            evidence=str(row.get("evidence") or ""),
+            enabled=row.get("enabled") is not False,
+        )
+        for row in rows or []
+        if isinstance(row, dict) and str(row.get("title") or "").strip()
+    ]
+
+
+def _drawing_fact_outs(rows) -> list:
+    return [
+        DrawingFactOut(
+            object=str(row.get("object") or ""),
+            field=str(row.get("field") or ""),
+            value=str(row.get("value") or ""),
+            drawingNo=str(row.get("drawingNo") or ""),
+            page=row.get("page") if isinstance(row.get("page"), int) else None,
+            evidence=str(row.get("evidence") or ""),
+        )
+        for row in rows or []
+        if isinstance(row, dict)
+    ]
 
 
 def _validate_upload(ext: str, content: bytes) -> None:
@@ -144,12 +185,12 @@ async def upload_tender_document(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> TenderUploadOut:
-    require_project(db, current_user, project_id)
+    project = require_project(db, current_user, project_id)
     require_any_perm(current_user, PERM_PROJECT_EDIT, PERM_WRITER)
     filename = file.filename or ""
     ext = os.path.splitext(filename)[1].lower()
 
-    resolved_kind = normalize_kind(kind, filename)
+    resolved_kind = normalize_kind(kind, filename, project.category)
 
     if ext in BLOCKED_EXTS:
         raise HTTPException(400, "不支持可执行或脚本文件")
@@ -162,6 +203,7 @@ async def upload_tender_document(
         raise HTTPException(400, "支持 Word、PDF、Excel 与常见图片格式（.docx / .pdf / .xlsx / .png / .jpg 等）")
 
     content = await file.read()
+    check_upload(content, ext)
     if resolved_kind == "quote":
         if len(content) < 8:
             raise HTTPException(400, "文件过小或已损坏，请重新上传")
@@ -354,6 +396,7 @@ def create_tender_parse_job(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> TenderParseJobOut:
+    require_credits("tender_parse")
     require_project(db, current_user, project_id)
     require_any_perm(current_user, PERM_PROJECT_EDIT, PERM_WRITER)
 
@@ -381,7 +424,11 @@ def create_tender_parse_job(
     if not docs:
         raise HTTPException(400, "请先上传招标文件包中的至少一份文件")
 
-    primary = next((d for d in docs if effective_kind(d.kind, d.filename) == "main"), docs[0])
+    project = db.get(Project, project_id)
+    primary = next(
+        (d for d in docs if effective_kind(d.kind, d.filename, project.category if project else None) == "main"),
+        docs[0],
+    )
 
     last_version = (
         db.query(func.max(EvaluationChecklist.version))
@@ -394,7 +441,10 @@ def create_tender_parse_job(
         tender_document_id=primary.id,
         version=last_version + 1,
         status="queued",
-        checklist_json={"packageDocIds": [d.id for d in docs], "package": package_slots(docs)},
+        checklist_json={
+            "packageDocIds": [d.id for d in docs],
+            "package": package_slots(docs, project.category if project else None),
+        },
     )
     db.add(checklist)
     names = "、".join(d.filename for d in docs[:6])
@@ -457,26 +507,60 @@ def get_project_standard_rules(
         for row in checklist.tech_rules
         if isinstance(row, dict) and str(row.get("factor") or row.get("name") or "").strip()
     ]
-    drawing = [
-        DrawingReviewRuleOut(
-            drawingNo=str(row.get("drawingNo") or ""),
-            title=str(row.get("title") or row.get("name") or ""),
-            parameters=str(row.get("parameters") or ""),
-            notes=str(row.get("notes") or row.get("mustWrite") or ""),
-            standards=_as_text_list(row.get("standards")),
-            chapter=str(row.get("chapter") or ""),
-            axis=str(row.get("axis") or ""),
-        )
-        for row in checklist.drawing_rules
-        if isinstance(row, dict) and str(row.get("title") or row.get("name") or "").strip()
-    ]
+    project = db.get(Project, project_id)
+    engineering = is_engineering_category(project.category if project else None)
+    drawing = []
+    if engineering:
+        drawing = [
+            DrawingReviewRuleOut(
+                drawingNo=str(row.get("drawingNo") or ""),
+                title=str(row.get("title") or row.get("name") or ""),
+                parameters=str(row.get("parameters") or ""),
+                notes=str(row.get("notes") or row.get("mustWrite") or ""),
+                standards=_as_text_list(row.get("standards")),
+                chapter=str(row.get("chapter") or ""),
+                axis=str(row.get("axis") or ""),
+            )
+            for row in checklist.drawing_rules
+            if isinstance(row, dict) and str(row.get("title") or row.get("name") or "").strip()
+        ]
     if checklist.version is None:
         note = "该项目还没有完成招标解析，解析并锁定后这里才会出现规范对标规则。"
     elif not tender and not drawing:
-        note = "这一版解析没有抽出招标书规则或图纸规则。请重新解析招标书后再看。"
+        note = (
+            "这一版解析没有抽出招标书规则或图纸规则。请重新解析招标书后再看。"
+            if engineering
+            else "这一版解析没有抽出招标书规则。请重新解析招标书后再看。"
+        )
     else:
         state = "已锁定" if checklist.locked else "最新完成、尚未锁定"
         note = f"来自{state}的解析 v{checklist.version}。预审规范对标使用的就是这批规则。"
+    project_rules = [
+        ProjectRuleOut(
+            id=str(row.get("id") or ""),
+            source=str(row.get("source") or ""),
+            title=str(row.get("title") or ""),
+            requirement=str(row.get("requirement") or ""),
+            checkType=str(row.get("checkType") or ""),
+            severity=str(row.get("severity") or ""),
+            evidence=str(row.get("evidence") or ""),
+            enabled=row.get("enabled") is not False,
+        )
+        for row in checklist.project_rules
+        if isinstance(row, dict) and str(row.get("title") or "").strip()
+    ]
+    facts = [
+        DrawingFactOut(
+            object=str(row.get("object") or ""),
+            field=str(row.get("field") or ""),
+            value=str(row.get("value") or ""),
+            drawingNo=str(row.get("drawingNo") or ""),
+            page=row.get("page") if isinstance(row.get("page"), int) else None,
+            evidence=str(row.get("evidence") or ""),
+        )
+        for row in checklist.drawing_facts
+        if isinstance(row, dict)
+    ]
     return ProjectStandardRulesOut(
         projectId=project_id,
         version=checklist.version,
@@ -484,7 +568,42 @@ def get_project_standard_rules(
         note=note,
         tenderRules=tender,
         drawingRules=drawing,
+        projectRules=project_rules,
+        drawingFacts=facts,
     )
+
+
+@router.patch("/projects/{project_id}/project-rules/{rule_id}", response_model=ChecklistOut)
+def toggle_project_rule(
+    project_id: str,
+    rule_id: str,
+    payload: ToggleProjectRuleIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ChecklistOut:
+    """关闭或打开本项目规则。改的是预审正在用的那一版，锁定后仍可调。"""
+    require_project(db, current_user, project_id)
+    require_any_perm(current_user, PERM_PROJECT_EDIT, PERM_WRITER, PERM_REVIEW)
+    row = rules_config.select_checklist(db, project_id)
+    if row is None:
+        raise HTTPException(404, "还没有可调整的解析结果")
+    data = dict(row.checklist_json or {})
+    found = False
+    updated = []
+    for item in data.get("projectRules") or []:
+        if isinstance(item, dict) and str(item.get("id") or "") == rule_id:
+            item = dict(item)
+            item["enabled"] = payload.enabled
+            found = True
+        updated.append(item)
+    if not found:
+        raise HTTPException(404, "规则不存在")
+    data["projectRules"] = updated
+    row.checklist_json = data
+    flag_modified(row, "checklist_json")
+    db.commit()
+    db.refresh(row)
+    return _checklist_to_out(row, db)
 
 
 @router.get("/projects/{project_id}/checklist/latest", response_model=ChecklistOut)
@@ -562,6 +681,36 @@ def lock_checklist(
     return _checklist_to_out(checklist, db)
 
 
+@router.post("/projects/{project_id}/checklist/{checklist_id}/unlock", response_model=ChecklistOut)
+def unlock_checklist(
+    project_id: str,
+    checklist_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ChecklistOut:
+    """解除锁定：招标补遗、改类别后要换尺子时用。解除后预审回到「最新一份解析结果」。"""
+    require_project(db, current_user, project_id)
+    require_any_perm(current_user, PERM_PROJECT_EDIT, PERM_WRITER)
+    checklist = db.get(EvaluationChecklist, checklist_id)
+    if not checklist or checklist.project_id != project_id:
+        raise HTTPException(404, "评标尺子不存在")
+    if not checklist.locked:
+        return _checklist_to_out(checklist, db)
+    checklist.locked = False
+    write_audit(
+        db,
+        action="确认对标",
+        user_name=actor_from_request(db, request),
+        target=f"{project_label(db, project_id)} 对标清单",
+        version=f"v{checklist.version}",
+        detail="解除评标尺子锁定",
+    )
+    db.commit()
+    db.refresh(checklist)
+    return _checklist_to_out(checklist, db)
+
+
 @router.get("/projects/{project_id}/checklist/{checklist_id}/export")
 def export_checklist_report(
     project_id: str,
@@ -583,7 +732,7 @@ def export_checklist_report(
         version=checklist.version,
         locked=bool(checklist.locked),
         data=checklist.checklist_json or {},
-        category=(project.category if project else None) or "软件服务类",
+        category=normalize_category(project.category if project else None),
     )
     encoded_name = urllib.parse.quote(f"{(project.code if project else 'parse')}-解析报告-v{checklist.version}.docx")
     return Response(
@@ -619,10 +768,18 @@ def _clean_custom_content(text: str) -> str:
     return (text or "").strip()
 
 
-def _clean_custom_sources(source: str, sources: list | None) -> list[str]:
+def _clean_custom_sources(source: str, sources: list | None, category: str | None = None) -> list[str]:
     if source != "mixed":
         return []
-    return [s for s in (sources or []) if s in _CUSTOM_SLOTS]
+    allowed = _CUSTOM_SLOTS if is_engineering_category(category) else _CUSTOM_SLOTS - {"boq", "drawing"}
+    return [s for s in (sources or []) if s in allowed]
+
+
+def _clean_custom_source(source: str, category: str | None = None) -> str:
+    value = source if source in _CUSTOM_SOURCES else "tender"
+    if value == "drawing" and not is_engineering_category(category):
+        return "tender"
+    return value
 
 
 @router.get("/projects/{project_id}/custom-rules", response_model=list[CustomRuleOut])
@@ -648,7 +805,7 @@ def create_custom_rule(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> CustomRuleOut:
-    require_project(db, current_user, project_id)
+    project = require_project(db, current_user, project_id)
     require_any_perm(current_user, PERM_PROJECT_EDIT, PERM_WRITER, PERM_REVIEW)
     content = _clean_custom_content(payload.content)
     if len(content) < 2:
@@ -656,10 +813,11 @@ def create_custom_rule(
     if len(content) > 4000:
         raise HTTPException(400, "规则内容请控制在 4000 字以内")
     title = (payload.title or "").strip()[:80]
+    source = _clean_custom_source(payload.source, project.category)
     row = ProjectCustomRule(
         project_id=project_id,
-        source=payload.source,
-        sources_json=_clean_custom_sources(payload.source, payload.sources),
+        source=source,
+        sources_json=_clean_custom_sources(source, payload.sources, project.category),
         title=title,
         content=content,
         severity=payload.severity,
@@ -679,7 +837,7 @@ def update_custom_rule(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> CustomRuleOut:
-    require_project(db, current_user, project_id)
+    project = require_project(db, current_user, project_id)
     require_any_perm(current_user, PERM_PROJECT_EDIT, PERM_WRITER, PERM_REVIEW)
     row = db.get(ProjectCustomRule, rule_id)
     if not row or row.project_id != project_id:
@@ -695,9 +853,11 @@ def update_custom_rule(
     if "title" in data:
         row.title = (data["title"] or "").strip()[:80]
     if "source" in data:
-        row.source = data["source"]
+        row.source = _clean_custom_source(data["source"], project.category)
     if "sources" in data or "source" in data:
-        row.sources_json = _clean_custom_sources(row.source, data.get("sources", row.sources_json))
+        row.sources_json = _clean_custom_sources(
+            row.source, data.get("sources", row.sources_json), project.category
+        )
     if "severity" in data:
         row.severity = data["severity"]
     if "enabled" in data:

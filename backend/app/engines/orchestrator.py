@@ -6,19 +6,21 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from ..models import BidDocument, ReviewFinding, ReviewRun
+from ..models import BidDocument, Project, ReviewFinding, ReviewRun
 from .. import storage
-from . import e1_veto, e2_business, e3_semantic, e3_tech_modules, e4_duplicate_filler, e5_layout, e_business_vision, e_custom_rules, e_parse_match, e_tender_score, rules_config, standard_review
+from . import e1_veto, e2_business, e3_semantic, e3_tech_modules, e4_duplicate_filler, e5_layout, e_business_vision, e_custom_rules, e_tender_score, rules_config, standard_review
+from .parse_schema import is_engineering_category
+from .category_profile import load_rule_bundle
 from .bid_kind import (
     KIND_COMBINED,
     SCOPE_BUSINESS,
     SCOPE_FULL,
     SCOPE_TECH,
     filter_tender_rules,
-    format_requirements_for_scope,
     normalize_kind,
     normalize_scope,
     score_rules_for_scope,
+    severity_counts,
     split_paragraphs_for_scope,
     tree_for_scope,
 )
@@ -26,7 +28,7 @@ from .bid_media import extract_review_pack, filter_pack_for_paragraphs
 from .docx_extract import extract_full_text, extract_paragraphs
 from .excerpt_guard import snap_bid_excerpt, split_bid_and_tender
 from .review_context import load_review_context
-from .rules_data import DIMENSION_LABELS, grade_from_findings
+from .rules_data import DIMENSION_LABELS, catalog_bundle, grade_from_findings
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +170,7 @@ def _finding_row(run_id: str, f: dict, *blobs: str) -> ReviewFinding:
             "strategyKey": str(f.get("strategyKey") or extra.get("strategyKey") or ""),
             "applyText": str(f.get("applyText") or extra.get("applyText") or "")[:4000],
             "issueClass": str(f.get("issueClass") or "writing"),
+            "basis": str(f.get("basis") or extra.get("basis") or "")[:300],
         },
         confidence=float(f.get("confidence") or 1.0),
     )
@@ -196,18 +199,32 @@ def run_prereview(db: Session, run_id: str) -> None:
     full_text = ""
     checklist = rules_config.load_project_checklist(db, run.project_id)
     checklist_params, must_respond = checklist.params, checklist.must_respond
-    weights = rules_config.load_active_weights(db)
-    word_rules = rules_config.load_enabled_filler_words(db)
-    thresholds = rules_config.load_thresholds(db)
-    local_items = rules_config.load_enabled_package_items(db)
     custom_rules = rules_config.load_project_custom_rules(db, run.project_id)
 
+    # 标书类别只认 Project.category 原样保存的值（工程类/工程标 才算工程类，其余一律软件服务类）；
+    # 预审规则目录彻底按类别分流：工程类走原有四个 load_enabled_* 函数，软件服务类走并列的
+    # load_enabled_sw_* 函数（读 sw_ 系列独立表，回退 rules_data.SW_* 常量）。
+    project_row = db.get(Project, run.project_id)
+    weights = rules_config.load_active_weights(db, (project_row.category if project_row else None) or "")
+    is_engineering = is_engineering_category(project_row.category if project_row else None)
+    bundle = catalog_bundle(is_engineering)
+
     # 管理员规则页开关：关闭的条目在对应引擎里直接跳过检查，不再产生 Finding。
-    veto_keys = rules_config.load_enabled_veto_keys(db)
-    biz_keys = rules_config.load_enabled_catalog_keys(db, "business")
-    tech_keys = rules_config.load_enabled_catalog_keys(db, "tech")
-    dup_keys = rules_config.load_enabled_catalog_keys(db, "dup_check")
-    strategy_keys = rules_config.load_enabled_catalog_keys(db, "strategy")
+    # 规则表按类别分流统一收在 category_profile.load_rule_bundle，导出复检读同一份。
+    rule_bundle = load_rule_bundle(
+        db,
+        project_row.category if project_row else None,
+        project_row.specialty if project_row else None,
+    )
+    veto_keys = rule_bundle.veto_keys
+    biz_keys = rule_bundle.biz_keys
+    tech_keys = rule_bundle.tech_keys
+    strategy_keys = rule_bundle.strategy_keys
+    local_items = rule_bundle.local_items
+    word_rules = rule_bundle.word_rules
+    thresholds = rule_bundle.thresholds
+    dup_keys = rule_bundle.dup_keys
+    anon_keys = rule_bundle.anon_keys
     scope = normalize_scope(getattr(run, "scope", None) or SCOPE_FULL)
 
     def _empty_e3() -> dict:
@@ -261,7 +278,18 @@ def run_prereview(db: Session, run_id: str) -> None:
             if vis_paras:
                 biz_paras = list(paras) + vis_paras
             e1 = e1_veto.run(biz_paras, checklist_params, must_respond, thresholds, ctx, veto_keys, dup_keys)
-            e2 = e2_business.run(biz_paras, checklist_params, thresholds, local_items, ctx, biz_keys, veto_keys, strategy_keys, dup_keys)
+            e2 = e2_business.run(
+                biz_paras,
+                checklist_params,
+                thresholds,
+                local_items,
+                ctx,
+                biz_keys,
+                veto_keys,
+                strategy_keys,
+                dup_keys,
+                local_item_checks=bundle.get("local_item_checks"),
+            )
             if "file_form" in (veto_keys or {"file_form"}):
                 from .e5_layout import file_form_findings
 
@@ -273,8 +301,34 @@ def run_prereview(db: Session, run_id: str) -> None:
                     e1.append(item)
         if scope in (SCOPE_TECH, SCOPE_FULL):
             e4 = e4_duplicate_filler.run(paras, word_rules, thresholds, ctx, dup_keys)
-            e5 = e5_layout.run(path, paras, ctx, veto_keys, dup_keys, strategy_keys) if path else []
-            e3 = e3_semantic.run(text, weights, tech_keys, strategy_keys, dup_keys, scoped_score_rules, images=images)
+            e5 = (
+                e5_layout.run(
+                    path,
+                    paras,
+                    ctx,
+                    veto_keys,
+                    dup_keys,
+                    strategy_keys,
+                    anon_keys,
+                    bool(checklist_params.get("anonymity_required")),
+                    not is_engineering,
+                )
+                if path
+                else []
+            )
+            e3 = e3_semantic.run(
+                text,
+                weights,
+                tech_keys,
+                strategy_keys,
+                dup_keys,
+                scoped_score_rules,
+                images=images,
+                dimension_rubric=bundle.get("dimension_rubric"),
+                tech_modules=rule_bundle.catalog.get("tech"),
+                high_score_strategies=bundle.get("strategy"),
+                is_engineering=is_engineering,
+            )
             tech_findings, tech_modules = e3_tech_modules.evaluate(
                 text,
                 paras,
@@ -283,26 +337,12 @@ def run_prereview(db: Session, run_id: str) -> None:
                 images=images,
                 dimensions=checklist.dimensions,
                 thresholds=thresholds,
+                is_engineering=is_engineering,
             )
         parse_paras = biz_paras if scope in (SCOPE_BUSINESS, SCOPE_FULL) else paras
         parse_text = "\n".join((p.get("text") or "") for p in parse_paras) if parse_paras else text
-        parse_findings = e_parse_match.run(
-            parse_text,
-            scoped_score_rules,
-            checklist.qualification,
-            format_requirements_for_scope(checklist.format_requirements, scope),
-            must_respond,
-            tech_keys,
-            veto_keys,
-            strategy_keys,
-            headings=[(p.get("text") or "") for p in parse_paras],
-            paragraphs=parse_paras,
-            include_veto=scope == SCOPE_TECH,
-        )
-        if scope == SCOPE_TECH:
-            for finding in parse_findings:
-                if finding.get("level") in ("L1", "L2"):
-                    finding["level"] = "L3"
+        # 旧版「招标解析约定」不再参与预审。规范对标已经按招标书原文和技术评分逐条核对，
+        # 工程标、软件服务标都走这一条，不再把解析字段当成另一套规则重判一遍。
         custom_pack = e_custom_rules.run(parse_text, parse_paras, custom_rules, scope=scope)
         if isinstance(custom_pack, dict):
             custom_findings = custom_pack.get("findings") or []
@@ -334,6 +374,7 @@ def run_prereview(db: Session, run_id: str) -> None:
             headings=[(p.get("text") or "") for p in parse_paras],
             strategy_keys=strategy_keys,
             paragraphs=parse_paras,
+            strategy_catalog=bundle.get("strategy"),
         )
         tender_rules = filter_tender_rules(tender_rules, scope)
         if isinstance(tender_rules, dict):
@@ -360,6 +401,8 @@ def run_prereview(db: Session, run_id: str) -> None:
                     scope=scope,
                     tech_rules=checklist.tech_rules,
                     drawing_rules=checklist.drawing_rules,
+                    project_rules=checklist.project_rules,
+                    category=ctx.category,
                 )
             except Exception:
                 logger.exception("standard review failed")
@@ -444,26 +487,16 @@ def run_prereview(db: Session, run_id: str) -> None:
     dimensions_out = []
     if scope in (SCOPE_TECH, SCOPE_FULL):
         dimensions_out = [
-            {"name": DIMENSION_LABELS[k], "weight": weights[k], "grade": dims[k]["grade"]}
+            {"name": DIMENSION_LABELS[k], "weight": weights[k], "grade": (dims[k] or {}).get("grade") or "C"}
             for k in weights
-            if k in dims
+            if k in dims and isinstance(dims[k], dict)
         ]
     if scope == SCOPE_BUSINESS:
         tech_modules = []
 
     # 总评风险灯改成纯计数规则（不再靠总分数字阈值判定，与 bid_kind.project_booklet_payload
     # 拆分商务/技术分册时用的判定口径统一）：存在废标→红；存在降档或扣分→橙；否则→绿。
-    auto_waste = [f for f in all_findings if f["severity"] == "废标" and f.get("issueClass") == "auto_veto"]
-    waste = len(auto_waste)
-    risk = sum(1 for f in all_findings if f["severity"] in ("降档", "扣分"))
-    suggest = sum(1 for f in all_findings if f["severity"] == "建议")
-
-    if waste > 0:
-        light = "红"
-    elif risk > 0:
-        light = "橙"
-    else:
-        light = "绿"
+    waste, risk, suggest, light = severity_counts(all_findings)
 
     run.status = "done"
     run.waste = waste

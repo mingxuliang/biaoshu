@@ -25,6 +25,8 @@ interface BidSettingsProps {
   selectedProductLibraryId: string;
   onProductLibraryChange: (id: string) => void;
   initialSettings?: Partial<WriterSettingsPayload>;
+  /** 工程类技术标：按招标要求和施工逻辑撰写，不选知识库和产品库 */
+  engineering?: boolean;
   onNext: (settings: WriterSettingsPayload) => void;
 }
 
@@ -37,6 +39,7 @@ export default function BidSettings({
   selectedProductLibraryId,
   onProductLibraryChange,
   initialSettings,
+  engineering = false,
   onNext,
 }: BidSettingsProps) {
   const [style, setStyle] = useState<StyleConfig>(initialSettings?.style ?? defaultStyle);
@@ -133,7 +136,13 @@ export default function BidSettings({
           <div className="text-xs text-foreground-500">选择撰写大模型，目录生成与正文生成均使用该模型</div>
         </div>
         <span className="ml-auto rounded-md bg-secondary-100 px-2 py-1 text-[11px] font-medium text-secondary-700">
-          {selectedProductLibraryId ? "已选产品库" : `${selectedKnowledge.length} 份知识库资料已选中`}
+          {engineering
+            ? "工程标 · 施工组织设计"
+            : selectedProductLibraryId
+              ? "已选产品库"
+              : selectedKnowledge.length
+                ? `${selectedKnowledge.length} 份知识库资料已选中`
+                : "知识库可选，不选也能继续"}
         </span>
       </div>
 
@@ -187,14 +196,29 @@ export default function BidSettings({
           </div>
         </section>
 
+        {engineering ? (
+          <section className="rounded-lg border border-accent-200/70 bg-accent-50/40 p-3.5">
+            <div className="mb-1.5 flex items-center gap-2">
+              <span className="flex h-5 w-5 items-center justify-center rounded bg-primary-500 text-[10px] font-bold text-background-50">2</span>
+              <h4 className="text-sm font-semibold text-foreground-900">撰写依据</h4>
+            </div>
+            <p className="text-xs leading-relaxed text-foreground-700">
+              工程技术标按招标要求和施工逻辑撰写，不使用知识库和产品库。目录生成时会从招标文件提取工程概况、工期、质量目标、
+              技术评分项、点名的重点难点和危大工程，按施工组织设计骨架编排，正文以表格形式写出；提取结果可在第三步修订。
+              商务标仍从资质证照库取材。
+            </p>
+          </section>
+        ) : (
+        <>
         <section className="rounded-lg border border-background-300 bg-background-50 p-3.5">
           <div className="mb-2.5 flex flex-wrap items-center gap-2">
             <span className="flex h-5 w-5 items-center justify-center rounded bg-primary-500 text-[10px] font-bold text-background-50">2</span>
             <h4 className="text-sm font-semibold text-foreground-900">投标产品</h4>
-            <span className="text-[11px] text-foreground-500">一个项目只选一个产品库，正文按已入库功能点组句插图</span>
+            <span className="rounded bg-background-200 px-1.5 py-0.5 text-[10px] text-foreground-600">可选</span>
+            <span className="text-[11px] text-foreground-500">可不选。选定后一个项目只用一个产品库，正文按已入库功能点组句插图</span>
           </div>
           {productLibraries.length === 0 ? (
-            <p className="text-xs text-foreground-500">暂无产品库。请先在「产品功能库」上传技术标并审核入库，或改用下方知识库切片。</p>
+            <p className="text-xs text-foreground-500">暂无产品库。可以不选，直接进入下一步；需要按功能点写正文时，再到「产品功能库」上传并审核入库。</p>
           ) : (
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               {productLibraries.map((lib) => {
@@ -226,7 +250,8 @@ export default function BidSettings({
           <div className="mb-2.5 flex flex-wrap items-center gap-2">
             <span className="flex h-5 w-5 items-center justify-center rounded bg-primary-500 text-[10px] font-bold text-background-50">2</span>
             <h4 className="text-sm font-semibold text-foreground-900">知识库引用配置</h4>
-            <span className="text-[11px] text-foreground-500">勾选后，AI 撰写正文时会自动检索并引用这些资料切片</span>
+            <span className="rounded bg-background-200 px-1.5 py-0.5 text-[10px] text-foreground-600">可选</span>
+            <span className="text-[11px] text-foreground-500">不选也能进入下一步。勾选后，AI 撰写正文时会检索并引用这些资料切片</span>
             <span className="ml-auto text-[11px] text-primary-600">
               已选 <span className="font-label font-semibold">{selectedKnowledge.length}</span> 份
             </span>
@@ -299,6 +324,8 @@ export default function BidSettings({
             )}
           </div>
         </section>
+        </>
+        )}
 
         {/* 3. 页数设置 — 滑块 */}
         <section className="rounded-lg border border-background-300 bg-background-50 p-3.5">
@@ -549,13 +576,36 @@ export default function BidSettings({
                 value={layout.lineSpacing}
                 onChange={(e) => {
                   const lineSpacing = e.target.value;
-                  const fixed = /固定值\s*(\d+(?:\.\d+)?)/.exec(lineSpacing);
-                  if (fixed) {
-                    setLayout({ ...layout, lineSpacing, lineSpacingMul: null, lineSpacingExactPt: Number(fixed[1]) });
+                  const atLeast = /最小值\s*(\d+(?:\.\d+)?)/.exec(lineSpacing);
+                  if (atLeast) {
+                    setLayout({
+                      ...layout,
+                      lineSpacing,
+                      lineSpacingMul: null,
+                      lineSpacingExactPt: null,
+                      lineSpacingAtLeastPt: Number(atLeast[1]),
+                    });
                     return;
                   }
-                  const mul = lineSpacing.startsWith("2") ? 2 : 1.5;
-                  setLayout({ ...layout, lineSpacing, lineSpacingMul: mul, lineSpacingExactPt: null });
+                  const fixed = /固定值\s*(\d+(?:\.\d+)?)/.exec(lineSpacing);
+                  if (fixed) {
+                    setLayout({
+                      ...layout,
+                      lineSpacing,
+                      lineSpacingMul: null,
+                      lineSpacingExactPt: Number(fixed[1]),
+                      lineSpacingAtLeastPt: null,
+                    });
+                    return;
+                  }
+                  const mul = lineSpacing.startsWith("2")
+                    ? 2
+                    : lineSpacing.startsWith("1.5")
+                      ? 1.5
+                      : lineSpacing.startsWith("1.15")
+                        ? 1.15
+                        : 1;
+                  setLayout({ ...layout, lineSpacing, lineSpacingMul: mul, lineSpacingExactPt: null, lineSpacingAtLeastPt: null });
                 }}
                 className={`${inputCls} cursor-pointer`}
               >
@@ -748,7 +798,7 @@ export default function BidSettings({
         <button
           type="button"
           onClick={() => onNext({ style, page, layout, image })}
-          disabled={!modelId || (!selectedProductLibraryId && selectedKnowledge.length === 0)}
+          disabled={!modelId}
           className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-4 text-sm font-medium text-background-50 transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-50"
         >
           保存设置，进入下一步

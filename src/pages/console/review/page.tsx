@@ -14,7 +14,6 @@ import {
   ApiError,
   applyBidRevisionSuggestion,
   createBidRevisionVersion,
-  exportBidRevisionDocx,
   getLatestReviewPair,
   getOrCreateBidRevision,
   listBidRevisionVersions,
@@ -62,8 +61,8 @@ export default function ReviewPage() {
   const [revisionError, setRevisionError] = useState<string | null>(null);
   const [versions, setVersions] = useState<BidRevisionVersion[]>([]);
   const [reloadKey, setReloadKey] = useState(0);
+  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [exporting, setExporting] = useState(false);
   const [applyingIssueId, setApplyingIssueId] = useState<string | null>(null);
 
   const viewerRef = useRef<BidDocxViewerHandle>(null);
@@ -125,6 +124,7 @@ export default function ReviewPage() {
     setRevisionError(null);
     setRevision(null);
     setVersions([]);
+    setSelectedVersionId(null);
     setActiveIssueId(null);
     setActiveSectionId(null);
     setViewerAnchoredIds([]);
@@ -227,6 +227,7 @@ export default function ReviewPage() {
         author: user?.name || "未署名",
       });
       setVersions((prev) => [version, ...prev]);
+      setSelectedVersionId(version.id);
       setNote("");
       setSaveOpen(false);
       showToast(`已保存新版本 ${version.label}：${version.note}`);
@@ -282,6 +283,12 @@ export default function ReviewPage() {
     if (!revision) return;
     try {
       await restoreBidRevisionVersion(revision.id, v.id);
+      setSelectedVersionId(v.id);
+      if (currentProject) {
+        const next = await getOrCreateBidRevision(currentProject.id, bookletScope);
+        setRevision(next);
+        setReloadKey((k) => k + 1);
+      }
       setHistoryOpen(false);
       showToast(`已恢复版本 ${v.label}（${v.note}）`, "info");
     } catch (err) {
@@ -289,28 +296,20 @@ export default function ReviewPage() {
     }
   };
 
-  const exportDoc = async () => {
-    if (!revision || !currentProject) return;
-    setExporting(true);
-    try {
-      const blob = await exportBidRevisionDocx(revision.id);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${currentProject.name}-${bookletScope === "tech" ? "技术标" : "商务标"}修改版.docx`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      showToast("导出成功，已开始下载 Word 文档");
-    } catch (err) {
-      showToast(err instanceof ApiError ? err.message : "导出失败，请先保存至少一个版本", "error");
-    } finally {
-      setExporting(false);
+  // 导出统一走导出中心：那里会按分册、按工程标/软件服务标复检，通过才允许导出
+  const goToExportCenter = () => {
+    if (!currentProject) return;
+    if (!versions.length) {
+      showToast("请先「保存版本」，导出中心导出的是已保存的版本", "error");
+      setSaveOpen(true);
+      return;
     }
+    navigate(`/console/export?project=${currentProject.id}&scope=${bookletScope}`);
   };
 
-  const savedVersionId = versions[0]?.bidDocumentId || "";
+  // 二次评审审的是用户当前所在的版本：恢复过旧版本就审那一版，否则审最新保存的一版
+  const currentVersion = versions.find((v) => v.id === selectedVersionId) || versions[0];
+  const savedVersionId = currentVersion?.bidDocumentId || "";
   const unresolvedCount = revision?.issues.filter((i) => !i.resolved).length ?? 0;
   const bookletLabel = bookletScope === "tech" ? "技术标" : "商务标";
   const bookletSwitcher = (
@@ -470,12 +469,12 @@ export default function ReviewPage() {
         actions={
           <button
             type="button"
-            onClick={exportDoc}
-            disabled={exporting}
-            className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-4 text-sm font-medium text-background-50 transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-60"
+            onClick={goToExportCenter}
+            title="导出要先过导出中心的复检，按分册、按工程标/软件服务标取规则"
+            className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-4 text-sm font-medium text-background-50 transition-colors hover:bg-primary-600"
           >
-            {exporting ? <i className="ri-loader-4-line animate-spin text-sm"></i> : <i className="ri-file-word-2-line text-sm"></i>}
-            导出 Word
+            <i className="ri-file-word-2-line text-sm"></i>
+            去导出中心导出
           </button>
         }
       />
@@ -499,9 +498,22 @@ export default function ReviewPage() {
             <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-foreground-500">
               <span>编号 {currentProject.code}</span>
               <span>·</span>
+              {revision.categoryLabel ? (
+                <>
+                  <span className="rounded border border-secondary-200 bg-secondary-50 px-1.5 py-0.5 text-[10px] font-medium text-secondary-600">
+                    {revision.categoryLabel}
+                  </span>
+                  <span>·</span>
+                </>
+              ) : null}
               <span>{bookletLabel}第 {revision.reviewRound ?? "—"} 轮预审</span>
+              {revision.fromFullRun ? (
+                <span title="该册没有单独预审，问题清单取自合订轮次并按分册过滤" className="text-[10px] text-secondary-600">
+                  （取自合订预审）
+                </span>
+              ) : null}
               <span>·</span>
-              <span>问题 {revision.issues.length} 项</span>
+              <span>问题 {revision.issues.length} 项，其中需人工处理 {revision.issues.filter((i) => i.fixMode === "manual").length} 项</span>
               <StatusBadge status="改写中" />
             </div>
           </div>
@@ -568,7 +580,7 @@ export default function ReviewPage() {
         <p className="flex items-start gap-1.5 text-xs text-foreground-500">
           <i className="ri-loop-left-line mt-0.5 text-primary-500"></i>
           {savedVersionId
-            ? `已保存 ${versions.length} 个修改版本，待处理 ${unresolvedCount} 项。二次评审将针对最新保存的投标书。`
+            ? `已保存 ${versions.length} 个修改版本，待处理 ${unresolvedCount} 项。二次评审将审 ${currentVersion?.label || "最新"} 版本。`
             : "请勾选已修复项并「保存版本」后，再进入二次评审；未保存不能审修改稿。"}
         </p>
         <button

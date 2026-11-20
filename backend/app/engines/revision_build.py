@@ -568,14 +568,18 @@ def _iter_body_paragraphs(document):
                     yield para
 
 
-def patch_docx_paragraph(original_path: str, old_text: str, new_text: str) -> bytes:
-    """只替换命中的那一段文字，整份 OOXML（含全部附图）原样保留。"""
+def patch_docx_paragraph(original_path: str, old_text: str, new_text: str) -> tuple[bytes, bool]:
+    """只替换命中的那一段文字，整份 OOXML（含全部附图）原样保留。
+
+    返回 (docx 字节, 是否真的改到了)。没命中时字节是原稿，调用方必须据此判断失败，
+    不能把「没改到」当成「已写回」。
+    """
     from pathlib import Path
 
     old = (old_text or "").strip()
     new = new_text or ""
     if not old or old == new.strip():
-        return Path(original_path).read_bytes()
+        return Path(original_path).read_bytes(), False
     document = docx.Document(original_path)
     hit = False
     for para in _iter_body_paragraphs(document):
@@ -589,10 +593,10 @@ def patch_docx_paragraph(original_path: str, old_text: str, new_text: str) -> by
             hit = True
             break
     if not hit:
-        return Path(original_path).read_bytes()
+        return Path(original_path).read_bytes(), False
     buf = io.BytesIO()
     document.save(buf)
-    return buf.getvalue()
+    return buf.getvalue(), True
 
 
 def writeback_docx(original_path: str, blocks: list[dict]) -> bytes:

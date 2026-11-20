@@ -123,7 +123,7 @@ export default function ProductLibraryDetailPage() {
   const { libraryId = "" } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
-  const canEdit = hasPerm(user?.role, "writer");
+  const canEdit = hasPerm(user, "writer");
   const catalog = useProductCatalog();
   const library = catalog.getLibrary(libraryId);
   const items = catalog.itemsOf(libraryId);
@@ -372,9 +372,16 @@ export default function ProductLibraryDetailPage() {
     setUploadOpen(false);
     setTab("parse");
     try {
-      const created = await uploadProductSourceDocs(libraryId, uploadFiles);
+      const result = await uploadProductSourceDocs(libraryId, uploadFiles);
+      const created = result.filter((job) => !job.duplicate);
+      const dupes = result.length - created.length;
       await catalog.loadLibraryContents(libraryId);
-      showToast(`已上传 ${created.length} 份，正在抽取…`, "info");
+      showToast(
+        dupes
+          ? `已上传 ${created.length} 份；${dupes} 份与库中已有文件内容完全相同，已跳过`
+          : `已上传 ${created.length} 份，正在抽取…`,
+        "info",
+      );
       await Promise.all(
         created.map((job) =>
           pollProductExtractJobUntilDone(job.id).catch((err) => {

@@ -13,8 +13,8 @@ from ..engines import rules_config
 from ..engines.knowledge_extract import chunk_document, detect_review_flag, extract_full_text_any
 from ..engines.standard_ingest import clauses_from_path, replace_document_clauses
 from ..engines.knowledge_retrieval import suggest_docs
-from ..models import KnowledgeDocument, KnowledgeSlice, KnowledgeSliceImage, StandardClause, User
-from ..permissions import PERM_WRITER, require_perm, require_project
+from ..models import KnowledgeDocument, KnowledgeSlice, KnowledgeSliceImage, Project, StandardClause, User
+from ..permissions import PERM_WRITER, can_access_project, is_admin, require_perm, require_project, visible_project_ids
 from ..schemas import (
     KnowledgeChapterDetailOut,
     KnowledgeChapterOut,
@@ -62,6 +62,50 @@ def _img_out(img: KnowledgeSliceImage) -> KnowledgeSliceImageOut:
 
 def _excerpt(text: str) -> str:
     return " ".join((text or "").split())[:120]
+
+
+def can_view_doc(db: Session, user: User, doc: KnowledgeDocument) -> bool:
+    """个人库只给上传者本人；部门库只给本部门；项目库只给能访问该项目的人；企业库全员可见。"""
+    if is_admin(user):
+        return True
+    if doc.scope == "个人库":
+        return bool(doc.owner_id) and doc.owner_id == user.id
+    if doc.scope == "部门库":
+        dept = getattr(user, "department_id", None)
+        return bool(dept) and doc.department_id == dept
+    if doc.scope == "项目库":
+        if not doc.project_id:
+            return False
+        project = db.get(Project, doc.project_id)
+        return bool(project) and can_access_project(db, user, project)
+    return True
+
+
+def _visible_filter(db: Session, user: User, query):
+    """列表查询按同一口径过滤。管理员看全部。"""
+    if is_admin(user):
+        return query
+    clause = KnowledgeDocument.scope == "企业库"
+    clause = clause | ((KnowledgeDocument.scope == "个人库") & (KnowledgeDocument.owner_id == user.id))
+    dept = getattr(user, "department_id", None)
+    if dept:
+        clause = clause | ((KnowledgeDocument.scope == "部门库") & (KnowledgeDocument.department_id == dept))
+    visible = visible_project_ids(db, user)
+    if visible is None:
+        clause = clause | (KnowledgeDocument.scope == "项目库")
+    elif visible:
+        clause = clause | ((KnowledgeDocument.scope == "项目库") & (KnowledgeDocument.project_id.in_(visible)))
+    return query.filter(clause)
+
+
+def _clause_sort_key(clause_no: str) -> tuple:
+    """条文号按数字段比较，避免 3.10 排到 3.9 前面。"""
+    parts: list[tuple[int, int | str]] = []
+    for part in (clause_no or "").replace(" ", ".").split("."):
+        if not part:
+            continue
+        parts.append((0, int(part)) if part.isdigit() else (1, part))
+    return tuple(parts)
 
 
 def _chapter_from_slice(slice_row: KnowledgeSlice, children: list[KnowledgeChapterOut]) -> KnowledgeChapterOut:
@@ -351,8 +395,7 @@ def list_knowledge_documents(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[KnowledgeDocumentOut]:
-    _ = current_user
-    query = db.query(KnowledgeDocument)
+    query = _visible_filter(db, current_user, db.query(KnowledgeDocument))
     if scope and scope != "全部":
         query = query.filter(KnowledgeDocument.scope == scope)
     if type and type != "全部类型":

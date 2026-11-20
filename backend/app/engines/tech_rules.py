@@ -11,11 +11,49 @@ from .qty_boq import rows_from_dimensions
 
 logger = logging.getLogger(__name__)
 
-MAX_LEAVES = 40
+MAX_LEAVES = 200
 AXES = {"完整性", "针对性", "合规性", "可落地性", "规范性"}
 _ITEM_IDS = ("eval-tech", "contract-tech", "qty-techstd")
-_HEADINGS = ("评标办法", "技术标准和要求", "发包人要求", "施工组织设计", "技术标评分", "详细评审")
 _BUSINESS = ("报价", "价格", "商务", "资信", "业绩", "信用", "资格", "投标函")
+# 这些是投标格式或合同义务，不是施工组织设计要写的做法。
+_NOT_TECH_FACTOR = (
+    "评标",
+    "评分分值",
+    "得分",
+    "表决",
+    "澄清",
+    "评委",
+    "法定代表人",
+    "授权委托",
+    "联合体",
+    "投标保证金",
+    "投标保函",
+    "财务状况",
+    "保险",
+    "保函",
+    "违约金",
+    "农民工",
+    "劳务",
+    "劳资",
+    "工资",
+    "以工代赈",
+    "转包",
+    "分包",
+    "内部承包",
+    "档案",
+    "缺陷责任",
+    "质保",
+    "保修",
+    "财务决算",
+    "造价",
+    "征地",
+    "拆迁",
+    "考勤",
+    "签名备案",
+    "驻工地",
+    "名单公示",
+    "撤换",
+)
 _STOP = {"的", "和", "及", "应", "必须", "进行", "施工", "工程", "要求", "方案", "项目", "技术", "相关", "内容"}
 _PARAM_RES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("混凝土强度", re.compile(r"C\d{2}")),
@@ -27,12 +65,14 @@ _STD = re.compile(r"(?:GB/T|GB|JGJ|JTG|CJJ|SL)\s*/?\s*\d+(?:\.\d+)?(?:-\d{4})?",
 _TOKEN = re.compile(r"[\u4e00-\u9fff]{2,}|[A-Za-z]{2,}|\d+(?:\.\d+)?")
 _WS = re.compile(r"\s+")
 
-_SYSTEM = """你从招标文件的技术标材料抽取评审叶子规则。
+_SYSTEM = """你从招标文件里抽取施工组织设计必须写到的施工内容。
+只收施工方案、工艺、质量、安全、进度、平面布置、度汛导流、资源配备、环境保护和水土保持。
+不要收评标程序、评分计算公式、投标文件格式、资格财务、保证金、保函、保险、劳务分包、工资、档案和违约责任。
 不要输出商务、资信、业绩、资格、报价、价格。
 必须写到的内容是规则正文，不能只重复评分因素标题。
 axis 只能是：完整性、针对性、合规性、可落地性、规范性。
 standards 只收录原文写明的标准号。
-只返回 JSON 对象 {"rules":[...]}，最多 40 条，不要 markdown。每项字段：
+只返回 JSON 对象 {"rules":[...]}，不要 markdown。施工组织评审因素逐条列出，不要合并或省略。合同里只有直接约束施工做法的条款才收录。每项字段：
 {"factor","score","grades","mustWrite","parameters","standards","chapter","axis"}
 """
 
@@ -62,21 +102,32 @@ def _item_text(dimensions: list | None, item_id: str) -> str:
     return "\n".join(chunks).strip()
 
 
-def corpus_windows(corpus: str, limit: int = 12000) -> str:
-    text = corpus or ""
-    chunks: list[str] = []
-    used = 0
-    for key in _HEADINGS:
-        start = 0
-        while used < limit:
-            idx = text.find(key, start)
-            if idx < 0:
-                break
-            piece = text[max(0, idx - 80) : idx + 1800]
-            chunks.append(piece)
-            used += len(piece)
-            start = idx + len(key)
-    return "\n\n".join(chunks)[:limit]
+_CHAPTER = re.compile(r"(?m)^[ \t]{0,3}(?:#{1,3}[ \t]*)?(?:第[0-9一二三四五六七八九十百]+[章节篇部])")
+
+
+def chapter_batches(corpus: str, size: int = 8000) -> list[str]:
+    """按章节切开再送给模型。长章节再分段，后面的章节不会因为前面已经写满就被丢掉。"""
+    text = (corpus or "").replace("\r\n", "\n").replace("\r", "\n")
+    if len(re.sub(r"\s+", "", text)) < 12:
+        return []
+    starts = [match.start() for match in _CHAPTER.finditer(text)]
+    if not starts or starts[0] > 0:
+        starts = [0, *starts]
+    pieces: list[str] = []
+    step = max(1000, size - 400)
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(text)
+        piece = text[start:end].strip()
+        if len(re.sub(r"\s+", "", piece)) < 12:
+            continue
+        if len(piece) <= size:
+            pieces.append(piece)
+            continue
+        for offset in range(0, len(piece), step):
+            bit = piece[offset : offset + size].strip()
+            if len(re.sub(r"\s+", "", bit)) >= 12:
+                pieces.append(bit)
+    return pieces
 
 
 def _tokens(text: str) -> list[str]:
@@ -109,6 +160,14 @@ def _is_business(text: str) -> bool:
     return any(word in (text or "") for word in _BUSINESS)
 
 
+def _is_not_tech_bid(factor: str) -> bool:
+    """投标格式和合同义务不进入技术标叶子。安全方案标题里带「方案」的保留。"""
+    title = factor or ""
+    if "安全" in title and any(word in title for word in ("方案", "措施", "防护", "度汛")):
+        return False
+    return any(word in title for word in _NOT_TECH_FACTOR)
+
+
 def normalize_leaves(rows: list | None) -> list[dict]:
     leaves: list[dict] = []
     seen: set[str] = set()
@@ -119,7 +178,7 @@ def normalize_leaves(rows: list | None) -> list[dict]:
         must = _WS.sub(" ", str(raw.get("mustWrite") or raw.get("must_write") or "")).strip()[:400]
         if len(factor) < 2 or len(must) < 4:
             continue
-        if _is_business(f"{factor}{must}"):
+        if _is_business(f"{factor}{must}") or _is_not_tech_bid(factor):
             continue
         key = f"{factor}|{must[:24]}"
         if key in seen:
@@ -268,34 +327,36 @@ def attach_constraints(leaves: list | None, dimensions: list | None) -> list[dic
 
 
 def extract_tech_rules(dimensions: list | None, corpus: str, complete=None) -> dict:
-    """抽出技术标叶子。模型失败时返回空列表和备注，不抛给解析任务。"""
-    parts = [text for item_id in _ITEM_IDS if (text := _item_text(dimensions, item_id))]
-    windows = corpus_windows(corpus)
-    if windows:
-        parts.append(windows)
-    source = "\n\n".join(parts).strip()
-    if len(source) < 40:
+    """按章节分批抽出技术标叶子。模型失败时返回空列表和备注，不抛给解析任务。"""
+    chunks: list[str] = []
+    for item_id in _ITEM_IDS:
+        text = _item_text(dimensions, item_id)
+        chunks.extend(chapter_batches(text))
+    chunks.extend(chapter_batches(corpus))
+    if not chunks:
         return {"rules": [], "note": "技术标相关章节为空"}
-    source = source[:16000]
+    rows: list = []
     try:
-        if complete is None:
-            raw = chat_complete(
-                model_id=get_default_model_id(),
-                messages=[
-                    {"role": "system", "content": _SYSTEM},
-                    {"role": "user", "content": source},
-                ],
-                temperature=0.1,
-                timeout=180,
-                max_tokens=8000,
-                extra={"response_format": {"type": "json_object"}},
-            )
-        else:
-            raw = complete(source)
-        rows = _parse_rows(raw)
+        for chunk in chunks:
+            if complete is None:
+                raw = chat_complete(
+                    model_id=get_default_model_id(),
+                    messages=[
+                        {"role": "system", "content": _SYSTEM},
+                        {"role": "user", "content": chunk},
+                    ],
+                    temperature=0.1,
+                    timeout=180,
+                    max_tokens=8000,
+                    extra={"response_format": {"type": "json_object"}},
+                )
+            else:
+                raw = complete(chunk)
+            rows.extend(_parse_rows(raw))
     except (LlmError, json.JSONDecodeError, TypeError, ValueError):
         logger.exception("tech leaf extract failed")
-        return {"rules": [], "note": "技术标叶子规则未抽出"}
+        if not rows:
+            return {"rules": [], "note": "技术标叶子规则未抽出"}
     leaves = attach_constraints(normalize_leaves(rows if isinstance(rows, list) else []), dimensions)
     if not leaves:
         return {"rules": [], "note": "技术标叶子规则未抽出"}

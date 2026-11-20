@@ -13,10 +13,12 @@ import re
 
 import pymupdf as fitz
 
+from .doc_parse import extract_pdf_pages, extract_pdf_text, page_text
 from .docx_extract import extract_paragraphs
 from .legacy_doc import as_docx
 from .llm import LlmError, chat_complete
 from .rules_data import FILLER_WORDS, THRESHOLDS
+from .table_md import docx_table_rows, rows_to_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -198,33 +200,17 @@ def extract_docx_sections(path: str) -> list[dict]:
 
 
 def extract_pdf_sections(path: str) -> list[dict]:
-    """逐页取文本；无文字层时尝试 OCR，识别失败则跳过该页，不编造正文。"""
+    """逐页取文本；无文字层时走解析路由（MinerU / OCR），识别失败则跳过该页，不编造正文。"""
     slices: list[dict] = []
-    with fitz.open(path) as doc:
-        for i, page in enumerate(doc, start=1):
-            text = page.get_text("text").strip()
-            if len(text) < 20:
-                try:
-                    import pytesseract
-                    from PIL import Image
-
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-                    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-                    ocr_text = pytesseract.image_to_string(img, lang="chi_sim+eng").strip()
-                    if ocr_text:
-                        text = ocr_text
-                except Exception:
-                    pass
-            if not text:
-                continue
-            slices.extend(_split_into_slices(f"第 {i} 页", text))
+    for row in extract_pdf_pages(path):
+        if row["text"]:
+            slices.extend(_split_into_slices(f"第 {row['page']} 页", row["text"]))
     return slices
 
 
 def extract_full_text_any(path: str, ext: str) -> str:
     if ext == ".pdf":
-        with fitz.open(path) as doc:
-            return "\n".join(page.get_text("text") for page in doc)
+        return extract_pdf_text(path)
     from .docx_extract import extract_full_text
 
     if ext == ".doc":
@@ -318,19 +304,16 @@ def extract_docx_knowledge_sections(path: str) -> list[dict]:
                 current_depth = depth
                 current_texts = []
                 current_images = []
+                seen_sha.clear()  # 图片只在同一章节内去重，别的章节要用同一张图时不能丢
             elif text:
                 current_texts.append(text)
             add_images(_blip_blobs(child, document))
         elif child.tag == qn("w:tbl"):
             table = Table(child, document)
-            rows: list[list[str]] = []
-            for row in table.rows:
-                cells = [" ".join(cell.text.split()) for cell in row.cells]
-                cells = [c for c in cells if c]
-                if cells:
-                    rows.append(cells)
-            if rows:
-                current_texts.append("\n".join(" | ".join(r) for r in rows))
+            rows = docx_table_rows(table)
+            md = rows_to_markdown(rows)
+            if md:
+                current_texts.append(md)
             add_images(_blip_blobs(child, document))
 
     flush_section()
@@ -368,19 +351,7 @@ def extract_pdf_knowledge_sections(path: str) -> list[dict]:
     with fitz.open(path) as doc:
         for i, page in enumerate(doc, start=1):
             heading = f"第 {i} 页"
-            text = page.get_text("text").strip()
-            if len(text) < 20:
-                try:
-                    import pytesseract
-                    from PIL import Image
-
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-                    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-                    ocr_text = pytesseract.image_to_string(img, lang="chi_sim+eng").strip()
-                    if ocr_text:
-                        text = ocr_text
-                except Exception:
-                    pass
+            text, _source = page_text(doc, i - 1)
             first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
             depth = _heading_depth("", None, first_line) if first_line else 1
             if first_line and 4 <= len(first_line) <= 80 and depth is not None:

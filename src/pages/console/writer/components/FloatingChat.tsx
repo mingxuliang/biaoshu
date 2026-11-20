@@ -31,6 +31,8 @@ interface FloatingChatProps {
   draftId: string;
   chapterId?: string;
   onApplied?: (edits: WriterChatEdit[]) => void;
+  /** 底部有操作栏时把悬浮球抬高，避免挡住「目录确认」等按钮 */
+  lift?: boolean;
 }
 
 const suggestions = [
@@ -61,7 +63,7 @@ function normalizeChatFile(file: File): File {
   if (file.name && IMAGE_EXT_RE.test(file.name)) return file;
   const ext = IMAGE_MIME[file.type] || (file.type.startsWith("image/") ? "png" : "");
   if (!ext) return file;
-  const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
+  const stamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
   return new File([file], `粘贴图片-${stamp}.${ext}`, { type: file.type || "image/png" });
 }
 
@@ -88,7 +90,7 @@ function defaultPrompt(files: ChatAttach[]) {
   return files.every(isImageFile) ? "请查看图片，并说明要如何修改当前标书" : "请阅读附件，并说明要如何修改当前标书";
 }
 
-export default function FloatingChat({ projectName, draftId, chapterId, onApplied }: FloatingChatProps) {
+export default function FloatingChat({ projectName, draftId, chapterId, onApplied, lift = false }: FloatingChatProps) {
   const { token } = useAuth();
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([
@@ -296,7 +298,9 @@ export default function FloatingChat({ projectName, draftId, chapterId, onApplie
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="fixed bottom-6 right-6 z-40 flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br from-primary-500 to-primary-600 text-background-50 shadow-lg transition-transform hover:scale-105"
+        className={`fixed z-40 flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br from-primary-500 to-primary-600 text-background-50 shadow-lg transition-transform hover:scale-105 ${
+          lift ? "bottom-24 right-6" : "bottom-6 right-6"
+        }`}
         title="AI 撰写助手"
       >
         <i className="ri-robot-2-line text-lg"></i>

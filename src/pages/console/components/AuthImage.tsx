@@ -17,7 +17,7 @@ function loadAuthBlob(src: string, token: string | null): Promise<string> {
   if (cached) return Promise.resolve(cached);
   const pending = inflight.get(src);
   if (pending) return pending;
-  const headers: HeadersInit = {};
+  const headers: Record<string, string> = {};
   if (token) headers.Authorization = `Bearer ${token}`;
   const req = fetch(src, { headers, cache: "force-cache" })
     .then((res) => {

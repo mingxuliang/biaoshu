@@ -9,7 +9,9 @@ import base64
 import json
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
+
+from ..ctx_executor import ContextThreadPoolExecutor as ThreadPoolExecutor
 
 from .bid_media import marker_for, seqs_in_text
 from .clause_scan import CHUNK_CHARS, MAX_CHUNKS, MAX_REVIEW_CHARS, _cap_review_chunks, _split_chunks
@@ -32,7 +34,7 @@ logger = logging.getLogger(__name__)
 # 已迁到 clause_scan.py，供本引擎与 clause_cover 的分块通读扫描共用；这里从那里导入并
 # 重新导出，保持对外名字（包括测试里的导入路径）不变。
 PARALLEL_WORKERS = 4
-VISION_WORKERS = 2
+VISION_WORKERS = 3
 ISSUE_CAP = 12
 CALL_TIMEOUT = 60
 VISION_TIMEOUT = 180
@@ -130,6 +132,10 @@ def _call_once(
     chunk_note: str,
     model_id: str,
     images: list[dict] | None = None,
+    dimension_rubric: dict | None = None,
+    tech_modules: list | None = None,
+    high_score_strategies: list | None = None,
+    is_engineering: bool = True,
 ) -> dict:
     has_img = any((img or {}).get("jpeg") for img in (images or []))
     timeout = VISION_TIMEOUT if has_img else CALL_TIMEOUT
@@ -146,7 +152,15 @@ def _call_once(
                     {
                         "role": "system",
                         "content": _build_system_prompt(
-                            weights, tech_keys, strategy_keys, self_check_enabled, score_rules
+                            weights,
+                            tech_keys,
+                            strategy_keys,
+                            self_check_enabled,
+                            score_rules,
+                            dimension_rubric=dimension_rubric,
+                            tech_modules=tech_modules,
+                            high_score_strategies=high_score_strategies,
+                            is_engineering=is_engineering,
                         ),
                     },
                     {"role": "user", "content": user_content},
@@ -198,6 +212,10 @@ def run(
     dup_keys: set[str] | None = None,
     score_rules: list | None = None,
     images: list[dict] | None = None,
+    dimension_rubric: dict | None = None,
+    tech_modules: list | None = None,
+    high_score_strategies: list | None = None,
+    is_engineering: bool = True,
 ) -> dict:
     weights = weights or DEFAULT_WEIGHTS
     self_check_enabled = dup_keys is None or "self_check_five" in dup_keys
@@ -249,6 +267,10 @@ def run(
             note,
             model_id,
             batch,
+            dimension_rubric=dimension_rubric,
+            tech_modules=tech_modules,
+            high_score_strategies=high_score_strategies,
+            is_engineering=is_engineering,
         )
         if n_text > 1 or len(jobs) > 1:
             for issue in result.get("issues") or []:
@@ -283,19 +305,26 @@ def _build_system_prompt(
     strategy_keys: set[str] | None = None,
     self_check_enabled: bool = True,
     score_rules: list | None = None,
+    dimension_rubric: dict | None = None,
+    tech_modules: list | None = None,
+    high_score_strategies: list | None = None,
+    is_engineering: bool = True,
 ) -> str:
+    rubric_source = dimension_rubric if dimension_rubric is not None else DIMENSION_RUBRIC
+    tech_catalog = tech_modules if tech_modules is not None else TECH_SCORE_MODULES
+    strategy_catalog = high_score_strategies if high_score_strategies is not None else HIGH_SCORE_STRATEGIES
     dim_lines = []
     for key, weight in weights.items():
         label = DIMENSION_LABELS.get(key, key)
-        rubric = DIMENSION_RUBRIC.get(key, {})
+        rubric = rubric_source.get(key, {})
         dim_lines.append(
             f"- {label}({weight}%)：校验重点：{rubric.get('focus', '')}；扣分/否决：{rubric.get('penalty', '')}"
         )
     self_check_rules = FILLER_SELF_CHECK_RULES if self_check_enabled else []
     check_lines = "\n".join(f"{i}. {rule}" for i, rule in enumerate(self_check_rules, 1))
-    strategies = [s for s in HIGH_SCORE_STRATEGIES if strategy_keys is None or s["key"] in strategy_keys]
+    strategies = [s for s in strategy_catalog if strategy_keys is None or s["key"] in strategy_keys]
     strategy_lines = "\n".join(f"- {s['category']}：{s['point']}" for s in strategies[:6])
-    modules = [m for m in TECH_SCORE_MODULES if tech_keys is None or m["key"] in tech_keys]
+    modules = [m for m in tech_catalog if tech_keys is None or m["key"] in tech_keys]
     module_lines = "\n".join(f"- {m['module']}：{m['logic']}" for m in modules)
     rule_block = ""
     if score_rules:
@@ -320,9 +349,9 @@ def _build_system_prompt(
 
 评分时请遵循"虚词自查五规则"（用于可落地性给分；空话原句不要写入 issues，由专项检查虚词语义分析负责）：
 {check_lines}
-
+{"" if not is_engineering else '''
 属地合规细节（合肥/安徽常见）：临边防护高度 1.2m、扫地杆距地 ≤20cm、扬尘六个 100%。若正文涉及对应主题但缺少量化，在合规性或可落地性中扣分。
-
+'''}
 高分策略（改写建议必须点名其中一条，并说明按该条款写可拿高分）：
 {strategy_lines}
 

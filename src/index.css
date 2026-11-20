@@ -238,7 +238,12 @@ input[name="website_alt"] {
   margin: 0 0 0.55em;
 }
 .lex-editor.lex-tech .editor-paragraph {
-  text-indent: var(--writer-indent, 0);
+  font-family: var(--writer-body-font);
+  font-size: var(--writer-body-size);
+  line-height: var(--writer-line-height, 1.75);
+  text-indent: var(--writer-indent, 2em);
+  margin-left: var(--writer-left-indent, 0);
+  text-align: justify;
 }
 .lex-editor .editor-heading-h1,
 .lex-editor .editor-heading-h2,
@@ -277,11 +282,30 @@ input[name="website_alt"] {
 .lex-editor.lex-tech .editor-heading-h2,
 .lex-editor.lex-tech .editor-heading-h3,
 .lex-editor.lex-tech .editor-heading-h4 {
-  font-family: var(--writer-heading-font, var(--writer-body-font, "宋体", SimSun, serif));
-  font-size: var(--writer-heading-size, var(--writer-body-size, 12pt));
-  font-weight: var(--writer-heading-weight, 700);
   color: inherit;
-  margin: 0.8em 0 0.4em;
+  text-indent: 0;
+  text-align: left;
+  margin: 0.9em 0 0.4em;
+}
+.lex-editor.lex-tech .editor-heading-h1 {
+  font-family: var(--writer-h1-font);
+  font-size: var(--writer-h1-size);
+  font-weight: var(--writer-h1-weight, 700);
+}
+.lex-editor.lex-tech .editor-heading-h2 {
+  font-family: var(--writer-h2-font);
+  font-size: var(--writer-h2-size);
+  font-weight: var(--writer-h2-weight, 700);
+}
+.lex-editor.lex-tech .editor-heading-h3 {
+  font-family: var(--writer-h3-font);
+  font-size: var(--writer-h3-size);
+  font-weight: var(--writer-h3-weight, 700);
+}
+.lex-editor.lex-tech .editor-heading-h4 {
+  font-family: var(--writer-h4-font, var(--writer-h3-font));
+  font-size: var(--writer-h4-size, var(--writer-h3-size));
+  font-weight: var(--writer-h4-weight, 700);
 }
 /* 修改闭环改写器：保留一/二/三级标题字号差，不再把所有标题拍成正文字号 */
 .lex-editor.lex-bidrev .editor-paragraph {
@@ -300,13 +324,16 @@ input[name="website_alt"] {
   margin: 0.9em 0 0.4em;
 }
 .lex-editor.lex-bidrev .editor-heading-h1 {
+  font-family: var(--writer-h1-font);
   font-size: var(--writer-h1-size, 18pt);
 }
 .lex-editor.lex-bidrev .editor-heading-h2 {
+  font-family: var(--writer-h2-font);
   font-size: var(--writer-h2-size, 16pt);
 }
 .lex-editor.lex-bidrev .editor-heading-h3,
 .lex-editor.lex-bidrev .editor-heading-h4 {
+  font-family: var(--writer-h3-font);
   font-size: var(--writer-h3-size, 14pt);
 }
 .lex-editor .editor-text-bold { font-weight: 700; }

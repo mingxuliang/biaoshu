@@ -52,6 +52,10 @@ def _hit(text: str, paragraphs: list[dict] | None, keywords: tuple[str, ...]) ->
     return hit_sentence(text, paragraphs, keywords, skip_score_voice=True)
 
 
+def _has_any(text: str, keys: tuple[str, ...]) -> bool:
+    return any(k in (text or "") for k in keys)
+
+
 _CHAPTER_HEAD = re.compile(r"^第[0-9一二三四五六七八九十百零]+[章节篇]")
 _DOTTED_HEAD = re.compile(r"^(\d{1,2}(?:\.\d{1,2})+)")
 _TOC_DOTS = re.compile(r"[.．·…]{3,}")
@@ -338,6 +342,120 @@ def _check_after_sales(text: str, paragraphs=None, _name="", _images=None) -> di
     return None
 
 
+# ---------------------------------------------------------------------------
+# 软件服务类标书专用确定性核验，对应 rules_data.SW_TECH_SCORE_MODULES 的 key。
+# 与上面的工程类函数彻底独立，只用软件/IT 服务语境的关键词与量化规则。
+# ---------------------------------------------------------------------------
+
+SECURITY_PROOF = ("等保三级", "等保二级", "三级等保", "二级等保", "RTO", "RPO")
+SW_QUANT_PATTERN = re.compile(r"\d+(?:\.\d+)?\s*(?:%|ms|毫秒|秒|tps|TPS|qps|QPS|并发)")
+
+
+def _check_architecture(text: str, paragraphs=None, _name="", images=None) -> dict | None:
+    keywords = ("系统架构", "技术架构", "架构图")
+    if not any(k in text for k in keywords):
+        return None
+    if _nearby_has_figure(text, paragraphs, keywords, images):
+        return None
+    return _finding(
+        rule="T02 系统架构-须附架构图",
+        excerpt=_hit(text, paragraphs, keywords),
+        suggestion="正文提到系统架构/技术架构，但附近未抽出可阅读的架构图原图。不得凭字样认定已附图，请插入系统架构图并说明技术栈选型理由",
+        severity="扣分",
+    )
+
+
+def _check_deployment_plan(text: str, paragraphs=None, _name="", images=None) -> dict | None:
+    if not any(k in text for k in ("里程碑", "部署计划", "上线")):
+        return None
+    claimed = any(k in text for k in ("甘特图", "横道图", "进度表"))
+    keywords = ("里程碑", "部署计划", "上线", "甘特图", "横道图", "进度表")
+    if _nearby_has_figure(text, paragraphs, keywords, images):
+        return None
+    if claimed:
+        return _finding(
+            rule="T03 实施部署-声称有图须有原图",
+            excerpt=_hit(text, paragraphs, keywords),
+            suggestion="正文出现「甘特图/横道图/进度表」字样，但附近未抽出可阅读的原图。请插入里程碑计划原图并标注关键节点",
+            severity="扣分",
+        )
+    return _finding(
+        rule="T03 实施部署-须附里程碑计划",
+        excerpt=_hit(text, paragraphs, ("里程碑", "部署计划", "上线")),
+        suggestion="未检出里程碑计划/甘特图原图，纯文字或仅有章节标题不予认可，请补充图示并标注关键节点与上线割接方案",
+        severity="扣分",
+    )
+
+
+def _check_data_security(text: str, paragraphs=None, _name="", _images=None) -> dict | None:
+    if any(k in text for k in ("数据安全", "等保", "等级保护", "灾备")) and not _has_any(text, SECURITY_PROOF):
+        return _finding(
+            rule="T04 数据安全-等保/灾备量化指标",
+            excerpt=_hit(text, paragraphs, ("数据安全", "等保", "等级保护", "灾备")),
+            suggestion="数据安全/灾备部分缺少量化指标（如等保级别、RTO/RPO 数值），请补充具体数字",
+        )
+    return None
+
+
+def _check_testing_acceptance(text: str, paragraphs=None, _name="", _images=None) -> dict | None:
+    if "测试" not in text:
+        return None
+    covered = [k for k in ("单元测试", "集成测试", "性能测试", "安全测试") if k in text]
+    if len(covered) <= 1:
+        return _finding(
+            rule="T05 测试验收-测试类型覆盖",
+            excerpt=_hit(text, paragraphs, ("测试",)),
+            suggestion="测试方案未覆盖多种测试类型（单元/集成/性能/安全），请分别说明测试范围与验收标准",
+        )
+    return None
+
+
+def _check_ip_opensource(text: str, paragraphs=None, _name="", _images=None) -> dict | None:
+    if "开源" in text and not _has_any(text, ("许可证", "License", "license", "LICENSE")):
+        return _finding(
+            rule="T07 知识产权-开源组件许可证",
+            excerpt=_hit(text, paragraphs, ("开源",)),
+            suggestion="正文提到开源组件，但未检出许可证说明。请附开源组件清单及对应许可证类型，明确知识产权归属",
+        )
+    return None
+
+
+def _check_function_response(text: str, paragraphs=None, _name="", _images=None) -> dict | None:
+    if not any(k in text for k in ("功能", "接口")):
+        return None
+    if "接口" in text and any(k in text for k in ("数据流", "调用", "响应")):
+        return None
+    if "功能" in text and "接口" not in text:
+        return _finding(
+            rule="T02 功能接口-须写清接口与数据流",
+            excerpt=_hit(text, paragraphs, ("功能",)),
+            suggestion="功能描述未同时写到接口、调用方或数据流向。请用可核对的链路代替“全面满足”",
+        )
+    return None
+
+
+def _check_xinchuang(text: str, paragraphs=None, _name="", _images=None) -> dict | None:
+    if "信创" not in text and "国产化" not in text:
+        return None
+    if any(k in text for k in ("适配", "兼容", "测试报告")):
+        return None
+    return _finding(
+        rule="T06 信创适配-须附适配证据",
+        excerpt=_hit(text, paragraphs, ("信创", "国产化")),
+        suggestion="正文写到信创或国产化，但未写明适配、兼容或测试报告。请补充适配范围和证据",
+    )
+
+
+def _check_performance_sla(text: str, paragraphs=None, _name="", _images=None) -> dict | None:
+    if any(k in text for k in ("性能指标", "响应时间", "并发", "可用性")) and not SW_QUANT_PATTERN.search(text):
+        return _finding(
+            rule="T08 性能可用性-指标量化",
+            excerpt=_hit(text, paragraphs, ("性能指标", "响应时间", "并发", "可用性")),
+            suggestion="性能/可用性描述缺少量化指标（如响应时间 ms、并发数、可用性 99.9%），请补充具体数值",
+        )
+    return None
+
+
 _CHECKS = {
     "org_outline": _check_org_outline,
     "special_plan": _check_special_plan,
@@ -362,9 +480,38 @@ _ORDER = [
     "qty_logic",
 ]
 
+# 软件服务类标书专用：对应 rules_data.SW_TECH_SCORE_MODULES 的 key，彻底独立于上面的
+# 工程类 _CHECKS/_ORDER，不含任何施工/工程量内容。「after_sales」复用同一个函数——
+# 维修/故障响应时限量化对两类标书都适用。
+_SW_MODULE_META = {m["key"]: m for m in rules_data.SW_TECH_SCORE_MODULES}
 
-def _module_entry(key: str, finding: dict | None) -> dict:
-    meta = _MODULE_META.get(key, {})
+_SW_CHECKS = {
+    "overall_plan": _check_org_outline,
+    "architecture": _check_architecture,
+    "function_response": _check_function_response,
+    "deployment_plan": _check_deployment_plan,
+    "data_security": _check_data_security,
+    "xinchuang": _check_xinchuang,
+    "testing_acceptance": _check_testing_acceptance,
+    "after_sales": _check_after_sales,
+    "ip_opensource": _check_ip_opensource,
+}
+
+_SW_ORDER = [
+    "overall_plan",
+    "architecture",
+    "function_response",
+    "deployment_plan",
+    "data_security",
+    "xinchuang",
+    "testing_acceptance",
+    "after_sales",
+    "ip_opensource",
+]
+
+
+def _module_entry(key: str, finding: dict | None, meta_source: dict | None = None) -> dict:
+    meta = (meta_source if meta_source is not None else _MODULE_META).get(key, {})
     if finding is None:
         return {
             "key": key,
@@ -391,13 +538,22 @@ def evaluate(
     images: list[dict] | None = None,
     dimensions: list | None = None,
     thresholds: dict | None = None,
+    is_engineering: bool = True,
 ) -> tuple[list[dict], list[dict]]:
-    """返回 (findings, module_scores)：findings 供 L3 合并扣分；module_scores 供报告逐模块展示。"""
+    """返回 (findings, module_scores)：findings 供 L3 合并扣分；module_scores 供报告逐模块展示。
+
+    is_engineering=False 时走软件服务类标书专用的 _SW_CHECKS/_SW_ORDER/_SW_MODULE_META，
+    彻底不触发任何施工/工程量模块（包括 qty_logic，软件服务类 order 里本就没有这个 key）。
+    """
     text = full_text or ""
     findings: list[dict] = []
     modules: list[dict] = []
 
-    for key in _ORDER:
+    order = _ORDER if is_engineering else _SW_ORDER
+    checks = _CHECKS if is_engineering else _SW_CHECKS
+    meta_source = _MODULE_META if is_engineering else _SW_MODULE_META
+
+    for key in order:
         if not _enabled(key, tech_keys):
             continue
         if key == "qty_logic":
@@ -407,12 +563,12 @@ def evaluate(
             findings.extend(q_findings)
             modules.append(q_module)
             continue
-        if not text.strip() or key not in _CHECKS:
+        if not text.strip() or key not in checks:
             continue
-        finding = _CHECKS[key](text, paragraphs, project_name, images)
+        finding = checks[key](text, paragraphs, project_name, images)
         if finding is not None:
             findings.append(finding)
-        modules.append(_module_entry(key, finding))
+        modules.append(_module_entry(key, finding, meta_source))
 
     if text.strip():
         findings.extend(_empty_shell_findings(paragraphs))
@@ -427,6 +583,7 @@ def run(
     images: list[dict] | None = None,
     dimensions: list | None = None,
     thresholds: dict | None = None,
+    is_engineering: bool = True,
 ) -> list[dict]:
     """兼容旧调用：只要 Finding 列表。新调用请使用 evaluate() 同时取模块打分明细。"""
     findings, _modules = evaluate(
@@ -437,5 +594,6 @@ def run(
         images=images,
         dimensions=dimensions,
         thresholds=thresholds,
+        is_engineering=is_engineering,
     )
     return findings

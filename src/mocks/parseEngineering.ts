@@ -1,4 +1,4 @@
-// M02 招标文件解析与对标清单 —— 工程类项目专属指标骨架
+// M02 招标文件解析与对标清单 —— 工程标专属指标骨架
 //
 // 与后端 backend/app/engines/parse_dimension_schema_engineering.json 完全对齐：
 // 禁止增删 key、id、label、section id/title、row label，仅允许写入 rows.content。

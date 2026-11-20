@@ -16,6 +16,8 @@ export interface NewProjectInput {
   code: string;
   type: ProjectType;
   category?: ProjectCategory;
+  specialty?: string;
+  workType?: string;
   budget?: string;
   deadline?: string;
   owner?: string;
@@ -70,6 +72,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         code: input.code,
         type: input.type,
         category: input.category,
+        specialty: input.specialty,
+        workType: input.workType,
         budget: input.budget,
         deadline: input.deadline,
         owner: input.owner,

@@ -10,6 +10,16 @@ from .models import LlmModel, LlmProvider, gen_id
 PROVIDER_KINDS = ("deepseek", "doubao", "qwen", "siliconflow", "openai", "custom", "local")
 
 # 硅基流动当前账号可调用、适合写标书的长文模型。已有 DeepSeek V3 / Qwen3 32B 不在此列。
+# 扫描件识图只用这一个便宜的视觉小模型，不作为撰写默认模型。
+SILICONFLOW_SCAN_MODEL = {
+    "id": "sf-qwen3-vl-8b",
+    "name": "Qwen3 VL 8B",
+    "api_model": "Qwen/Qwen3-VL-8B-Instruct",
+    "thinking": False,
+    "ctx": "262K · 识图",
+    "speed": "快",
+}
+
 SILICONFLOW_WRITER_MODELS: list[dict] = [
     {
         "id": "sf-qwen25-72b-128k",
@@ -98,6 +108,7 @@ PRESETS: list[dict] = [
         "sample_models": [
             {"name": "DeepSeek V3", "api_model": "deepseek-ai/DeepSeek-V3", "thinking": False, "ctx": "64K", "speed": "快"},
             {"name": "Qwen3 32B", "api_model": "Qwen/Qwen3-32B", "thinking": True, "ctx": "128K", "speed": "快"},
+            SILICONFLOW_SCAN_MODEL,
             *SILICONFLOW_WRITER_MODELS,
         ],
     },
@@ -280,12 +291,47 @@ def ensure_siliconflow_writer_models(db: Session) -> None:
         db.commit()
 
 
+def ensure_siliconflow_scan_model(db: Session) -> None:
+    """已有硅基密钥时补上扫描件识图用的 8B 视觉模型，不改默认撰写模型。"""
+    provider = db.query(LlmProvider).filter(LlmProvider.kind == "siliconflow").order_by(LlmProvider.created_at.asc()).first()
+    if provider is None:
+        return
+    sample = SILICONFLOW_SCAN_MODEL
+    api_model = sample["api_model"]
+    exists = (
+        db.query(LlmModel)
+        .filter(LlmModel.provider_id == provider.id, LlmModel.api_model == api_model)
+        .first()
+    )
+    if exists is not None or db.get(LlmModel, sample["id"]) is not None:
+        return
+    models = db.query(LlmModel).filter(LlmModel.provider_id == provider.id).all()
+    max_order = max((model.sort_order or 0) for model in models) if models else 0
+    db.add(
+        LlmModel(
+            id=sample["id"],
+            provider_id=provider.id,
+            name=sample["name"],
+            api_model=api_model,
+            thinking=False,
+            enabled=True,
+            is_default=False,
+            ctx=sample["ctx"],
+            speed=sample["speed"],
+            sort_order=max_order + 1,
+            task="chat",
+        )
+    )
+    db.commit()
+
+
 def seed_llm_catalog(db: Session) -> None:
     """空表时写入平台模板，并把 .env 里已有的 DeepSeek / 豆包 Key 带进来。"""
     if db.query(LlmProvider).count() > 0:
         ensure_deepseek_v41_flash(db)
         ensure_doubao_models(db)
         ensure_siliconflow_writer_models(db)
+        ensure_siliconflow_scan_model(db)
         return
     settings = get_settings()
     env_keys = {
@@ -338,6 +384,7 @@ def seed_llm_catalog(db: Session) -> None:
     db.commit()
     ensure_doubao_models(db)
     ensure_siliconflow_writer_models(db)
+    ensure_siliconflow_scan_model(db)
 
 
 def load_providers(db: Session) -> list[LlmProvider]:

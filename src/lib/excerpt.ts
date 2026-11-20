@@ -109,10 +109,15 @@ export function issueChapter(location?: string): string {
 
 export type IssueRuleKind = "tender" | "review";
 
-/** 招标解析约定、自定义规则 → 招标问题；其余 F 码/版式/虚词等 → 预审规则问题。 */
+/** 旧版招标解析约定已退出预审，历史结果里也不再列出。 */
+export function isLegacyTenderParseIssue(issue: { rule?: string; location?: string }): boolean {
+  return /招标解析约定/.test(`${issue.rule || ""}\n${issue.location || ""}`);
+}
+
+/** 自定义规则 → 招标问题；其余 F 码/版式/虚词等 → 预审规则问题。 */
 export function issueRuleKind(issue: { rule?: string; location?: string }): IssueRuleKind {
   const blob = `${issue.rule || ""}\n${issue.location || ""}`;
-  if (/招标解析约定|自定义规则/.test(blob)) return "tender";
+  if (/自定义规则/.test(blob)) return "tender";
   return "review";
 }
 
@@ -152,4 +157,15 @@ export function issueRuleLabel(issue: { rule?: string; suggestion?: string; stra
   const raw = (issue.rule || "").trim();
   if (!raw || /五维语义评审/.test(raw)) return raw.replace(/（AI 生成，供参考）/g, "").trim() || "五维语义评审";
   return raw.replace(/^F\d{2}\.\d{2}\s+/, "").trim() || raw;
+}
+
+const TECH_SCORE_SOURCE_IDS = new Set(["eval-tech", "review-tech", "review-service", "review-after"]);
+
+/** 技术标尺子：工程标看「技术标评分」，软件服务标看来源槽位。商务和报价不进这里。 */
+export function isTechScoreRulerItem(
+  item: { sourceItemId?: string; group?: string },
+  group?: { key?: string; label?: string },
+): boolean {
+  if (item.sourceItemId && TECH_SCORE_SOURCE_IDS.has(item.sourceItemId)) return true;
+  return /技术标评分/.test(`${group?.key || ""}${group?.label || ""}${item.group || ""}`);
 }

@@ -5,6 +5,7 @@ import FloatingChat from "./FloatingChat";
 import Toast from "../../components/Toast";
 import WordViewer, { type WordViewerHandle } from "../../parse/components/WordViewer";
 import {
+  ApiError,
   createOutlineJob,
   createProductMatchJob,
   getLatestChecklist,
@@ -13,13 +14,24 @@ import {
   pollWriterJobUntilDone,
   updateWriterDraft,
   type Checklist,
+  type EngineeringFacts,
   type KnowledgeRef,
   type OutlineNode,
   type ProjectDto,
   type TenderParagraph,
 } from "@/lib/api";
-import { compactOutlineTitles, displayOutlineTitle, isBusinessSkipChapter, isOriginalFormTitle, isSkipAiWrite, renumberOutline } from "@/lib/outlineNum";
+import { compactOutlineTitles, isEngineeringOutline, nodeDisplayTitle, isBusinessSkipChapter, isOriginalFormTitle, isSkipAiWrite, renumberOutline } from "@/lib/outlineNum";
 import { findTenderAnchor } from "@/lib/tenderAnchor";
+import { isEngineeringCategory } from "@/mocks/projects";
+import EngineeringFactsPanel from "./EngineeringFactsPanel";
+
+const ENG_KIND_LABEL: Record<string, string> = {
+  box: "文字框表",
+  pairs: "项目/内容表",
+  grid: "数据表",
+  figure: "图",
+  group: "分组",
+};
 
 interface OutlineStepProps {
   projectId: string;
@@ -37,6 +49,8 @@ interface OutlineStepProps {
   onBack: () => void;
   selectedProductLibraryId?: string;
   docKind?: "tech" | "business";
+  initialEngFacts?: EngineeringFacts | null;
+  onEngFactsChange?: (facts: EngineeringFacts | null) => void;
 }
 
 type RightTab = "outline" | "tenderDoc" | "score" | "overview";
@@ -64,8 +78,16 @@ export default function OutlineStep({
   onBack,
   selectedProductLibraryId = "",
   docKind = "tech",
+  initialEngFacts = null,
+  onEngFactsChange,
 }: OutlineStepProps) {
   const docKindLabel = docKind === "business" ? "商务标" : "技术标";
+  const engineering = docKind === "tech" && (isEngineeringCategory(project?.category) || isEngineeringOutline(outline));
+  const [engFacts, setEngFactsState] = useState<EngineeringFacts | null>(initialEngFacts);
+  const setEngFacts = (next: EngineeringFacts | null) => {
+    setEngFactsState(next);
+    onEngFactsChange?.(next);
+  };
   const [activeId, setActiveId] = useState<string>(outline[0]?.id ?? "");
   const [tab, setTab] = useState<RightTab>("outline");
   const [pickerId, setPickerId] = useState<string | null>(null);
@@ -172,13 +194,45 @@ export default function OutlineStep({
       setKnowledgeMap(refs);
       setActiveId(compacted[0]?.id ?? "");
       onOutlineRegenerated?.({ chapterContents: refreshed.chapterContents || {}, knowledgeRefs: refs });
+      const coverage = result.result?.coverage;
+      if (coverage?.engineering) {
+        setEngFacts((refreshed.settings?.engFacts as EngineeringFacts | undefined) ?? null);
+        const parts = [`技术评分项 ${coverage.scoreItems ?? 0} 章`, `招标点名重难点 ${coverage.difficulties ?? 0} 条`];
+        if (coverage.extraDifficulties) parts.push(`补充重难点 ${coverage.extraDifficulties} 条`);
+        if (coverage.hazards) parts.push(`危大工程 ${coverage.hazards} 项`);
+        if (coverage.water) {
+          parts.push(`区段 ${coverage.regions ?? 0} 段`);
+          if (coverage.subtypes?.length) parts.push(coverage.subtypes.join("、"));
+          if (coverage.spansFlood) parts.push("工期跨汛，已安排度汛导流");
+          if (coverage.siteGaps?.length) parts.push(`勘察待补 ${coverage.siteGaps.length} 项`);
+        }
+        showToast(
+          `已按施工组织设计生成目录，共 ${compacted.length} 个节点：${parts.join("，")}` +
+            (coverage.defaultSkeleton ? "。招标书未识别到技术评分项，已按通用施组骨架编排，请核对工程事实后重新生成" : ""),
+        );
+        return;
+      }
       const matched = Object.values(refs).filter((list) =>
         (list || []).some((r) => (r.source || "knowledge") === "product" && (r.chapters || []).length > 0),
       ).length;
+      const notes: string[] = [];
+      if (coverage?.ledger?.total) {
+        notes.push(`招标应答条目 ${coverage.ledger.total} 条，目录已引用 ${coverage.ledger.cited} 条`);
+      }
+      if (coverage?.formMapped?.length) notes.push(`${coverage.formMapped.length} 章直接拷贝招标书附录格式`);
+      if (coverage?.noSource?.length) notes.push(`${coverage.noSource.length} 个节点未找到对应招标条款，请核对`);
+      if (coverage?.reviewIssues?.length) notes.push(`目录评审仍有 ${coverage.reviewIssues.length} 条提示`);
+      if (coverage?.fallbackOutline) {
+        notes.push("智能体生成目录时出现异常，本次目录按招标书标题树生成，建议检查后重新生成");
+      }
+      if (coverage?.noKnowledgeSource) {
+        notes.push("本草稿没有选择产品库或知识库，技术章全部由模型自行撰写；软件服务标建议先选择产品库");
+      }
+      const coverageText = notes.length ? `。${notes.join("；")}` : "";
       showToast(
-        replaceExisting
+        (replaceExisting
           ? `已重新生成全部目录，共 ${compacted.length} 个节点${matched ? `，已自动匹配 ${matched} 章产品功能` : ""}`
-          : `已生成应标目录。技术标按「原始需求 + 解决方案」撰写；已选产品库时由大模型匹配功能点。`,
+          : `已生成应标目录。技术标按「原始需求 + 解决方案」撰写；已选产品库时由大模型匹配功能点。`) + coverageText,
       );
     } catch {
       showToast("目录生成失败，请检查网络后重试", "error");
@@ -256,8 +310,9 @@ export default function OutlineStep({
   };
 
   const saveOutline = () => {
-    updateWriterDraft(draftId, { outline }).catch(() => {
-      /* 静默失败，用户仍可继续编辑；进入下一步时会再次尝试保存 */
+    updateWriterDraft(draftId, { outline }).catch((err) => {
+      const message = err instanceof ApiError ? err.message : "目录修改保存失败，请检查网络后重试";
+      showToast(message, "error");
     });
   };
 
@@ -271,7 +326,7 @@ export default function OutlineStep({
         knowledgeRefs: next,
         ...(productRef ? { selectedProductLibraryId: productRef.docId } : {}),
       }).catch(() => {
-        /* 静默失败，用户仍可继续编辑；进入下一步时会再次尝试保存 */
+        showToast("参考资料绑定保存失败，请检查网络后重新绑定", "error");
       });
       showToast(refs.length > 0 ? `已为章节绑定 ${refs.length} 项参考资料` : "已清除该章节参考资料", refs.length > 0 ? "success" : "info");
     }
@@ -327,8 +382,17 @@ export default function OutlineStep({
         <div>
           <div className="font-heading text-sm font-semibold tracking-wide text-foreground-900">
             第三步 · {docKindLabel}目录生成
+            {engineering && (
+              <span className="ml-2 rounded bg-accent-100 px-1.5 py-0.5 align-middle text-[10px] font-medium text-accent-700">
+                工程标 · 施工组织设计
+              </span>
+            )}
           </div>
-          <div className="text-xs text-foreground-500">功能需求逐条对应；项目管理等其余需求整理为应标目录并覆盖全文</div>
+          <div className="text-xs text-foreground-500">
+            {engineering
+              ? "章名用技术评分项原文；招标点名的重难点逐条成节；正文按施工逻辑写在表格里，不引用知识库"
+              : "功能需求逐条对应；项目管理等其余需求整理为应标目录并覆盖全文"}
+          </div>
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">
           <span className="rounded-md bg-secondary-100 px-2 py-1 text-[11px] font-medium text-secondary-700">
@@ -345,7 +409,7 @@ export default function OutlineStep({
               {generatingOutline ? "正在重新生成…" : `重新生成${docKindLabel}目录`}
             </button>
           )}
-          {outline.length > 0 && (
+          {outline.length > 0 && !engineering && (
             <button
               type="button"
               onClick={matchProductLibrary}
@@ -430,11 +494,18 @@ export default function OutlineStep({
                     <i className="ri-sparkling-2-line text-2xl"></i>
                   </span>
                   <div className="text-sm font-semibold text-foreground-900">尚未生成{docKindLabel}目录</div>
-                  <p className="max-w-md text-xs text-foreground-500">
-                    将由智能体通读招标文件全文，按招标每一条独立要求编制{docKindLabel}可逐条打勾的应标目录
-                    {docKind === "tech" ? "，并按标书设置里的目标篇幅适度扩展内容深度" : ""}
-                    。若已选产品功能库，生成后会再用大模型把技术标章节对应到功能点。生成约需 1～3 分钟。
-                  </p>
+                  {engineering ? (
+                    <p className="max-w-md text-xs text-foreground-500">
+                      将从招标文件提取工程概况、工期、质量目标、技术评分项、点名的重点难点和危大工程，
+                      按施工组织设计骨架编目录：编制说明、每个技术评分项一章、附件附表。生成约需 1 分钟。
+                    </p>
+                  ) : (
+                    <p className="max-w-md text-xs text-foreground-500">
+                      将由智能体通读招标文件全文，按招标每一条独立要求编制{docKindLabel}可逐条打勾的应标目录
+                      {docKind === "tech" ? "，并按标书设置里的目标篇幅适度扩展内容深度" : ""}
+                      。若已选产品功能库，生成后会再用大模型把技术标章节对应到功能点。生成约需 1～3 分钟。
+                    </p>
+                  )}
                   <button
                     type="button"
                     onClick={() => generateOutline(false)}
@@ -448,6 +519,18 @@ export default function OutlineStep({
               ) : (
                 <>
                   <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
+                    {engineering && engFacts && (
+                      <EngineeringFactsPanel
+                        draftId={draftId}
+                        water={project?.specialty === "水利"}
+                        facts={engFacts}
+                        onSaved={(next) => {
+                          setEngFacts(next);
+                          showToast("工程事实已保存。点「重新生成技术标目录」后按修订后的评分项和重难点编排", "info");
+                        }}
+                        onError={(msg) => showToast(msg, "error")}
+                      />
+                    )}
                     {outline.map((node) => {
                       const isActive = node.id === activeId;
                       const refs = knowledgeMap[node.id] ?? [];
@@ -469,7 +552,21 @@ export default function OutlineStep({
                             <span className="font-label shrink-0 rounded bg-secondary-100 px-2 py-0.5 text-xs font-medium text-secondary-700">
                               {node.num}
                             </span>
-                            <span className="min-w-0 truncate text-sm font-semibold text-foreground-900">{displayOutlineTitle(node.title, node.num)}</span>
+                            <span className="min-w-0 truncate text-sm font-semibold text-foreground-900">{nodeDisplayTitle(node)}</span>
+                            {node.engSource && (
+                              <span
+                                className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                                  node.engSource === "招标点名" ? "bg-primary-100 text-primary-700" : "bg-secondary-100 text-secondary-700"
+                                }`}
+                              >
+                                {node.engSource}
+                              </span>
+                            )}
+                            {node.engKind && node.engKind !== "group" && (
+                              <span className="rounded bg-background-200 px-1.5 py-0.5 text-[10px] text-foreground-600">
+                                {ENG_KIND_LABEL[node.engKind] ?? node.engKind}
+                              </span>
+                            )}
                             {node.optimized && (
                               <span className="flex items-center gap-1 rounded bg-primary-50 px-2 py-0.5 text-[11px] font-medium text-primary-600">
                                 <i className="ri-sparkling-2-line"></i>已 AI 优化
@@ -495,7 +592,9 @@ export default function OutlineStep({
                                 ? "—— 带入招标书原文格式，填写后打印签字"
                                 : isSkipAiWrite(node) || isBusinessSkipChapter(node)
                                   ? "—— 带入招标书对应章节原文，无需 AI 撰写应标"
-                                  : "—— 生成正文时先列出招标原始需求全文，再按勾选产品功能撰写解决方案"}
+                                  : node.engKind
+                                    ? "—— 按招标事实和施工逻辑撰写，正文写在表格里，不引用知识库"
+                                    : "—— 生成正文时先列出招标原始需求全文，再按勾选产品功能撰写解决方案"}
                             </span>
                           </div>
 
@@ -595,6 +694,7 @@ export default function OutlineStep({
 
                           {/* 操作 */}
                           <div className="flex items-center justify-end gap-2">
+                            {!node.engKind && (
                             <button
                               type="button"
                               onClick={() => setPickerId(node.id)}
@@ -607,6 +707,7 @@ export default function OutlineStep({
                               <i className="ri-bookmark-line text-xs"></i>
                               参考资料 {refs.length > 0 ? `(${refs.length})` : ""}
                             </button>
+                            )}
                             <button
                               type="button"
                               onClick={() => optimizeOne(node.id)}
@@ -900,6 +1001,7 @@ export default function OutlineStep({
         projectName={projectName}
         draftId={draftId}
         chapterId={activeId}
+        lift={outline.length > 0}
         onApplied={async () => {
           try {
             const refreshed = await getOrCreateWriterDraft(projectId, docKind);

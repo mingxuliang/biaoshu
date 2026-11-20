@@ -139,6 +139,105 @@ export function findContentAnchor(
   return best && best.score >= 8 ? best : null;
 }
 
+const GENERIC_QUOTE = quoteCompact("贝恩医疗设备广州有限公司广州市黄埔区瑞祥路296号范志月13711662742");
+
+function quoteCompact(text: string): string {
+  return compactText(text)
+    .replace(/[【】[\]（）()《》「」""''/／]/g, "")
+    .replace(/(?<=\D)0+(?=\d)/g, "");
+}
+
+function quoteClauses(item: string): string[][] {
+  const splitAt = item.indexOf("：");
+  const title = splitAt > 0 && splitAt <= 24 ? quoteCompact(item.slice(0, splitAt)) : "";
+  const body = splitAt > 0 && splitAt <= 24 ? item.slice(splitAt + 1) : item;
+  const clauses = body.split(/[；;。]/).map((part) => quoteCompact(part)).filter((part) => part.length >= 4);
+  const groups = clauses.slice(0, 8).map((clause) => {
+    const windows: string[] = [];
+    const size = 6;
+    if (clause.length <= size) {
+      windows.push(clause);
+    } else {
+      const step = Math.max(2, Math.ceil((clause.length - size) / 9));
+      for (let i = 0; i + size <= clause.length && windows.length < 10; i += step) windows.push(clause.slice(i, i + size));
+    }
+    return windows;
+  });
+  if (title.length >= 4) groups.push([title]);
+  return groups.filter((group) => group.length > 0);
+}
+
+export function findRequirementQuote(
+  item: string,
+  paragraphs: TenderParagraph[],
+): { heading: string; text: string; index: number } | null {
+  const groups = quoteClauses(item);
+  const windows = groups.flat();
+  if (!windows.length || !paragraphs.length) return null;
+  let best: { index: number; score: number; span: number } | null = null;
+  const splitAt = item.indexOf("：");
+  const body = splitAt > 0 && splitAt <= 24 ? item.slice(splitAt + 1) : item;
+  const lead = quoteCompact(body.split(/[；;。]/)[0] || "");
+  paragraphs.forEach((paragraph, index) => {
+    const raw = (paragraph.text || "").trim();
+    const compact = quoteCompact(raw);
+    if (compact.length < 8) return;
+    let score = 0;
+    let useful = 0;
+    const title = groups.length > 1 ? groups[groups.length - 1][0] : "";
+    groups.forEach((group, groupIndex) => {
+      const weight = groupIndex === 0 || (title && group[0] === title) ? 3 : 1;
+      let hits = 0;
+      for (const window of group) {
+        if (!compact.includes(window)) continue;
+        hits += 1;
+        if (!GENERIC_QUOTE.includes(window)) useful += 1;
+      }
+      if (hits) score += hits * 8 * weight;
+    });
+    if (!useful) return;
+    let span = 0;
+    for (let size = Math.min(lead.length, 18); size >= 6; size -= 1) {
+      if (compact.includes(lead.slice(0, size))) {
+        span = size;
+        break;
+      }
+    }
+    score += span;
+    if (raw.length < 16 || (tenderHeadingLevel(paragraph) > 0 && raw.length < 28)) score *= 0.25;
+    if (!best || span > best.span || (span === best.span && score > best.score)) best = { index, score, span };
+  });
+  if (!best || best.score < 8) return null;
+  const hit = paragraphs[best.index];
+  let heading = "";
+  for (let i = best.index - 1; i >= 0 && best.index - i <= 4; i -= 1) {
+    const previous = paragraphs[i];
+    const previousText = (previous.text || "").trim();
+    if (tenderHeadingLevel(previous) > 0 && previousText.length <= 40) {
+      heading = previousText;
+      break;
+    }
+  }
+  const lines: string[] = [];
+  for (let i = best.index - 1; i >= 0 && lines.length < 2; i -= 1) {
+    const previous = (paragraphs[i].text || "").trim();
+    if (!/^[•·\-－]/.test(previous)) break;
+    lines.unshift(previous);
+  }
+  lines.push(hit.text.trim());
+  const itemCompact = quoteCompact(item);
+  for (let i = best.index + 1; i < paragraphs.length && lines.length < 4; i += 1) {
+    const next = (paragraphs[i].text || "").trim();
+    if (!next || tenderHeadingLevel(paragraphs[i]) > 0) break;
+    if (!/^[•·\-－]/.test(next) && !/^\d+[.．、]/.test(next)) break;
+    const nextCompact = quoteCompact(next);
+    const shared = windows.some((window) => nextCompact.includes(window) || itemCompact.includes(nextCompact.slice(0, 8)));
+    if (!shared || GENERIC_QUOTE.includes(nextCompact.slice(0, 8))) break;
+    lines.push(next);
+  }
+  return { heading, text: lines.join("\n"), index: hit.index };
+}
+
 export function findTenderAnchor(node: OutlineNode | undefined, paragraphs: TenderParagraph[]): number | null {
   if (!node || !paragraphs.length) return null;
   if (typeof node.sourceIndex === "number") {

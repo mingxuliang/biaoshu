@@ -119,7 +119,16 @@ function IssueCard({
           </div>
         </button>
       </div>
-      {onApplySuggestion && !resolved && (
+      {issue.fixMode === "manual" && !resolved && (
+        <div className="mt-2 flex items-start gap-1.5 rounded-md border border-secondary-200 bg-secondary-50 px-2 py-1.5 text-[11px] leading-relaxed text-secondary-700">
+          <i className="ri-file-search-line mt-0.5 shrink-0"></i>
+          <span>
+            需人工处理，不能在正文里改写。
+            {issue.fixHint ? issue.fixHint : "请到对应文件或证件中处理后，手动勾选「已修复」。"}
+          </span>
+        </div>
+      )}
+      {onApplySuggestion && !resolved && issue.fixMode !== "manual" && (
         <button
           type="button"
           disabled={applying}

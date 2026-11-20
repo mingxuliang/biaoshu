@@ -22,6 +22,8 @@ import ExportPage from "../pages/console/export/page";
 import RulesPage from "../pages/console/rules/page";
 import AuditLogPage from "../pages/console/auditlog/page";
 import ModelsPage from "../pages/console/models/page";
+import BillingPage from "../pages/console/billing/page";
+import OrgPage from "../pages/console/org/page";
 import LoginPage from "../pages/login/page";
 import { hideWriter } from "../lib/flags";
 
@@ -124,6 +126,8 @@ const routes: RouteObject[] = [
           </RequirePerm>
         ),
       },
+      { path: "billing", element: <BillingPage /> },
+      { path: "org", element: <OrgPage /> },
       {
         path: "models",
         element: (

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
 import Toast from "../components/Toast";
@@ -13,7 +14,14 @@ import {
   listExportRecords,
   type ExportChecks,
   type ExportRecord,
+  type ExportScope,
 } from "@/lib/api";
+
+const SCOPE_LABEL: Record<ExportScope, string> = { business: "商务标", tech: "技术标" };
+
+function scopeLabel(scope?: string): string {
+  return scope === "business" || scope === "tech" ? SCOPE_LABEL[scope] : "—";
+}
 
 interface ToastState {
   message: string;
@@ -41,8 +49,12 @@ export default function ExportPage() {
   const { token } = useAuth();
   const { projects, loading: projectsLoading } = useProjects();
 
-  const [projectId, setProjectId] = useState("");
-  const [mode, setMode] = useState<"明标" | "暗标">("明标");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const projectId = searchParams.get("project") || "";
+  const scope: ExportScope = searchParams.get("scope") === "tech" ? "tech" : "business";
+  // null 表示跟随招标文件；用户点了明标/暗标才算手动覆盖
+  const [modeOverride, setModeOverride] = useState<"明标" | "暗标" | null>(null);
   const [checks, setChecks] = useState<ExportChecks | null>(null);
   const [checksError, setChecksError] = useState("");
   const [checksLoading, setChecksLoading] = useState(false);
@@ -52,11 +64,33 @@ export default function ExportPage() {
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>({ message: "", type: "success", visible: false });
 
+  const updateParams = useCallback(
+    (patch: { project?: string; scope?: ExportScope }) => {
+      const next = new URLSearchParams(searchParams);
+      if (patch.project !== undefined) next.set("project", patch.project);
+      if (patch.scope !== undefined) next.set("scope", patch.scope);
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
   useEffect(() => {
-    if (!projectId && projects.length > 0) setProjectId(projects[0].id);
-  }, [projects, projectId]);
+    if (!projectId && projects.length > 0) updateParams({ project: projects[0].id });
+  }, [projects, projectId, updateParams]);
+
+  // 换项目或换分册后，回到「跟随招标文件」
+  useEffect(() => {
+    setModeOverride(null);
+  }, [projectId, scope]);
 
   const currentProject = useMemo(() => projects.find((p) => p.id === projectId), [projects, projectId]);
+
+  // 实际生效的模式：以后端复检结果为准；商务标永远是明标
+  const mode: "明标" | "暗标" = checks?.mode ?? modeOverride ?? "明标";
+  const blindAllowed = checks?.blindAllowed ?? scope === "tech";
+  const categoryText =
+    checks?.categoryLabel ||
+    (currentProject?.category === "工程类" ? "工程标" : currentProject ? "软件服务标" : "");
 
   const showToast = (message: string, type: ToastState["type"] = "success") => {
     setToast({ message, type, visible: true });
@@ -71,7 +105,7 @@ export default function ExportPage() {
     setChecksLoading(true);
     setChecksError("");
     try {
-      const result = await getExportChecks(token, projectId, mode);
+      const result = await getExportChecks(token, projectId, scope, modeOverride ?? undefined);
       setChecks(result);
     } catch (err) {
       setChecks(null);
@@ -79,7 +113,7 @@ export default function ExportPage() {
     } finally {
       setChecksLoading(false);
     }
-  }, [token, projectId, mode]);
+  }, [token, projectId, scope, modeOverride]);
 
   const loadRecords = useCallback(async () => {
     if (!token || !projectId) {
@@ -108,7 +142,8 @@ export default function ExportPage() {
       return;
     }
     if (checks.blocked) {
-      showToast(`导出前校验未通过：${checks.blockReason || "存在阻断项"}，已阻断并返回修改闭环`, "error");
+      showToast(`导出前校验未通过：${checks.blockReason || "存在阻断项"}，请回到修改闭环处理`, "error");
+      window.setTimeout(() => navigate(`/console/review?project=${projectId}&scope=${scope}`), 1200);
       return;
     }
     setExportOpen(true);
@@ -131,11 +166,11 @@ export default function ExportPage() {
     setExportOpen(false);
     setExporting(true);
     try {
-      const record = await createExport(token, projectId, mode);
+      const record = await createExport(token, projectId, scope, mode);
       showToast("导出完成，已生成文件并开始下载");
       try {
         const blob = await downloadExportRecord(token, record.id);
-        triggerDownload(blob, record.filename || `${currentProject?.name || "投标文件"}-${mode}.docx`);
+        triggerDownload(blob, record.filename || `${currentProject?.name || "投标文件"}-${SCOPE_LABEL[scope]}-${mode}.docx`);
       } catch {
         showToast("导出记录已生成，但自动下载失败，请在下方记录表中手动下载", "info");
       }
@@ -153,7 +188,10 @@ export default function ExportPage() {
     setDownloadingId(record.id);
     try {
       const blob = await downloadExportRecord(token, record.id);
-      triggerDownload(blob, record.filename || `${currentProject?.name || "投标文件"}-${record.mode}.docx`);
+      triggerDownload(
+        blob,
+        record.filename || `${currentProject?.name || "投标文件"}-${scopeLabel(record.scope)}-${record.mode}.docx`,
+      );
     } catch (err) {
       showToast(err instanceof ApiError ? err.message : "下载失败", "error");
     } finally {
@@ -170,7 +208,7 @@ export default function ExportPage() {
     <div>
       <PageHeader
         title="Word 导出与交付"
-        description="复用修改闭环产出的投标文件，导出前用真实引擎复检废标 / 虚词 / 查重 / 版式 / 暗标残留，校验通过才可导出。"
+        description="复用修改闭环产出的投标文件，按商务标 / 技术标分别复检（规则按工程标、软件服务标取用），技术标按招标要求决定是否暗标，校验通过才可导出。"
         actions={
           <button
             type="button"
@@ -197,7 +235,7 @@ export default function ExportPage() {
               <label className="mb-1.5 block text-xs font-medium text-foreground-600">投标项目</label>
               <select
                 value={projectId}
-                onChange={(e) => setProjectId(e.target.value)}
+                onChange={(e) => updateParams({ project: e.target.value })}
                 disabled={projectsLoading || projects.length === 0}
                 className={inputCls}
               >
@@ -224,28 +262,82 @@ export default function ExportPage() {
               )}
             </div>
           </div>
+          {checks?.checklistLocked === false && (
+            <div className="mt-3 flex items-start gap-2 rounded-md border border-secondary-200 bg-secondary-50 px-3 py-2 text-xs text-foreground-700">
+              <i className="ri-lock-unlock-line mt-0.5 text-secondary-600"></i>
+              评标尺子还没有锁定，复检用的是最新一份解析结果。建议先到「招标解析」核对并锁定后再导出。
+            </div>
+          )}
           <div className="mt-3">
-            <label className="mb-1.5 block text-xs font-medium text-foreground-600">导出版本</label>
+            <label className="mb-1.5 flex items-center gap-2 text-xs font-medium text-foreground-600">
+              导出分册
+              {categoryText && (
+                <span className="rounded border border-secondary-200 bg-secondary-50 px-1.5 py-0.5 text-[10px] font-medium text-secondary-600">
+                  {categoryText}
+                </span>
+              )}
+            </label>
             <div className="flex gap-1.5">
-              {(["明标", "暗标"] as const).map((m) => (
+              {(["business", "tech"] as const).map((s) => (
                 <button
-                  key={m}
+                  key={s}
                   type="button"
-                  onClick={() => setMode(m)}
+                  onClick={() => updateParams({ scope: s })}
                   className={`flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border px-3 py-1.5 text-xs font-medium transition-all ${
-                    mode === m
+                    scope === s
                       ? "border-primary-200 bg-primary-50 text-primary-600"
                       : "border-background-300 bg-transparent text-foreground-600 hover:border-background-400"
                   }`}
                 >
-                  <i className={`${m === "暗标" ? "ri-eye-off-line" : "ri-eye-line"} text-sm`}></i>
-                  {m}
+                  <i className={`${s === "tech" ? "ri-tools-line" : "ri-briefcase-line"} text-sm`}></i>
+                  {SCOPE_LABEL[s]}
                 </button>
               ))}
               <span className="ml-2 self-center text-[11px] text-foreground-500">
-                暗标自动清空文档属性中的作者 / 修改者 / 标题等身份信息
+                商务标与技术标分别复检、分别导出，各用自己在修改闭环里最新保存的版本
               </span>
             </div>
+          </div>
+          <div className="mt-3">
+            <label className="mb-1.5 block text-xs font-medium text-foreground-600">导出版本</label>
+            <div className="flex flex-wrap gap-1.5">
+              {(["明标", "暗标"] as const).map((m) => {
+                const disabled = m === "暗标" && !blindAllowed;
+                return (
+                  <button
+                    key={m}
+                    type="button"
+                    disabled={disabled}
+                    title={disabled ? "暗标只适用于技术标" : undefined}
+                    onClick={() => setModeOverride(m)}
+                    className={`flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border px-3 py-1.5 text-xs font-medium transition-all disabled:cursor-not-allowed disabled:opacity-50 ${
+                      mode === m
+                        ? "border-primary-200 bg-primary-50 text-primary-600"
+                        : "border-background-300 bg-transparent text-foreground-600 hover:border-background-400"
+                    }`}
+                  >
+                    <i className={`${m === "暗标" ? "ri-eye-off-line" : "ri-eye-line"} text-sm`}></i>
+                    {m}
+                  </button>
+                );
+              })}
+              <span className="ml-2 self-center text-[11px] text-foreground-500">
+                {!blindAllowed
+                  ? "商务标按明标导出，不做暗标处理"
+                  : checks?.anonymityRequired
+                    ? modeOverride === null
+                      ? "招标文件要求暗标，已默认选暗标"
+                      : "招标文件要求暗标；你手动改了导出版本"
+                    : modeOverride === null
+                      ? "招标文件没有暗标要求，默认明标"
+                      : "招标文件没有暗标要求；你手动选了暗标"}
+              </span>
+            </div>
+            {blindAllowed && (
+              <div className="mt-1.5 text-[11px] text-foreground-500">
+                暗标会清空作者 / 修改者 / 标题等文档属性、公司名、自定义属性、批注与修订痕迹，并删掉页眉页脚里的单位名称；正文里出现单位名称会被拦截。
+              </div>
+            )}
           </div>
         </div>
 
@@ -302,6 +394,7 @@ export default function ExportPage() {
             <thead>
               <tr className="font-label border-b border-background-300 bg-background-50 text-xs text-foreground-500">
                 <th className="px-4 py-2.5 font-medium">文件名</th>
+                <th className="px-3 py-2.5 font-medium">分册</th>
                 <th className="px-3 py-2.5 font-medium">模式</th>
                 <th className="px-3 py-2.5 font-medium">操作人</th>
                 <th className="px-3 py-2.5 font-medium">校验</th>
@@ -313,7 +406,7 @@ export default function ExportPage() {
             <tbody>
               {records.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-xs text-foreground-500">
+                  <td colSpan={8} className="px-4 py-8 text-center text-xs text-foreground-500">
                     暂无导出记录
                   </td>
                 </tr>
@@ -323,6 +416,9 @@ export default function ExportPage() {
                   <td className="max-w-[320px] px-4 py-3">
                     <div className="truncate text-sm font-medium text-foreground-900">{rec.filename || "—"}</div>
                     <div className="mt-0.5 font-label text-[10px] text-foreground-500">哈希 {formatHash(rec.fileHash)}</div>
+                  </td>
+                  <td className="px-3 py-3">
+                    <span className="whitespace-nowrap text-sm text-foreground-700">{scopeLabel(rec.scope)}</span>
                   </td>
                   <td className="px-3 py-3">
                     <span
@@ -373,13 +469,13 @@ export default function ExportPage() {
       </div>
 
       {/* 导出确认弹窗 */}
-      <Modal open={exportOpen} onClose={() => setExportOpen(false)} title="确认导出" subtitle={`${currentProject?.name || ""} · ${mode}`}>
+      <Modal open={exportOpen} onClose={() => setExportOpen(false)} title="确认导出" subtitle={`${currentProject?.name || ""} · ${SCOPE_LABEL[scope]} · ${mode}`}>
         <form onSubmit={handleExport} className="space-y-4">
           <div className="rounded-lg bg-background-50 px-3 py-2.5 text-xs text-foreground-500">
-            将基于修改闭环最新保存版本（<span className="font-medium text-foreground-800">{checks?.versionLabel}</span>）生成 <span className="font-medium text-foreground-800">.docx</span>；
+            将基于{SCOPE_LABEL[scope]}在修改闭环里最新保存的版本（<span className="font-medium text-foreground-800">{checks?.versionLabel}</span>）生成 <span className="font-medium text-foreground-800">.docx</span>；
             {mode === "暗标"
-              ? "暗标模式将另存一份新文件，并清空作者 / 修改者 / 标题等文档属性。"
-              : "明标模式直接使用当前文档，不做任何脱敏处理。"}
+              ? "暗标模式将另存一份脱敏文件：清空作者 / 公司 / 标题等文档属性、自定义属性、批注和修订痕迹，并删掉页眉页脚里的单位名称。"
+              : "明标模式另存一份导出副本，不做任何脱敏处理。"}
           </div>
           <div className="flex items-center justify-end gap-2 pt-2">
             <button

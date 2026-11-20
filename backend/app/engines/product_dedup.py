@@ -139,9 +139,13 @@ def _union_candidate(base: dict, extra: dict) -> None:
             base["intro"] = extra["intro"]
         if extra.get("bidCopy"):
             base["bidCopy"] = extra["bidCopy"]
+        if extra.get("sourceText"):
+            base["sourceText"] = extra["sourceText"]
         if extra.get("module"):
             base["module"] = extra["module"]
     else:
+        if extra.get("sourceText") and not base.get("sourceText"):
+            base["sourceText"] = extra["sourceText"]
         if extra.get("intro") and not base.get("intro"):
             base["intro"] = extra["intro"]
         if extra.get("bidCopy") and not base.get("bidCopy"):
@@ -258,6 +262,14 @@ def apply_to_library(
     candidates: list[dict],
 ) -> dict[str, int]:
     """把本份候选并入产品库。返回 extracted/merged/suspected/conflicts 计数。"""
+    # 同一产品库的多份技术标并发抽取时排队比对，避免互相看不到刚写入的功能点而重复入库
+    if db.bind is not None and db.bind.dialect.name == "postgresql":
+        from sqlalchemy import text
+
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(7340212, hashtext(:lib))"),
+            {"lib": source_doc.library_id or ""},
+        )
     existing = (
         db.query(ProductFeature)
         .options(selectinload(ProductFeature.images))
@@ -395,9 +407,13 @@ def _merge_into_feature(db: Session, feat: ProductFeature, cand: dict, source_ro
             feat.intro = cand["intro"]
         if cand.get("bidCopy") and not feat.locked_copy:
             feat.bid_copy = cand["bidCopy"]
+        if cand.get("sourceText"):
+            feat.source_text = cand["sourceText"]
         if cand.get("module"):
             feat.module = cand["module"]
     else:
+        if cand.get("sourceText") and not feat.source_text:
+            feat.source_text = cand["sourceText"]
         if cand.get("module") and not feat.module:
             feat.module = cand["module"]
         if cand.get("intro") and not feat.intro:
@@ -430,6 +446,7 @@ def _insert_feature(
         params=(cand.get("params") or "").strip(),
         intro=(cand.get("intro") or "").strip(),
         bid_copy=(cand.get("bidCopy") or cand.get("intro") or "").strip(),
+        source_text=(cand.get("sourceText") or "").strip(),
         brand=(cand.get("brand") or "").strip(),
         model=(cand.get("model") or "").strip(),
         unit=(cand.get("unit") or "").strip(),
@@ -520,6 +537,7 @@ def merge_features(db: Session, keep: ProductFeature, drop: ProductFeature) -> P
         "params": drop.params,
         "intro": drop.intro,
         "bidCopy": drop.bid_copy,
+        "sourceText": drop.source_text or "",
         "brand": drop.brand,
         "model": drop.model,
         "unit": drop.unit,

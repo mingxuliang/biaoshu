@@ -46,112 +46,53 @@ def _format_outline_num(depth: int, index: int, parent_num: str) -> str:
 
 OUTLINE_INVENTORY_MAX = 16000
 
-OUTLINE_SYSTEM_PROMPT = """# 角色
-你是拥有10年以上央企/国企招投标标书编制经验的资深投标总监，精通综合评估法、经评审最低价法等主流评审规则，深谙评标专家“逐条打勾、按目录定位应答内容”的评审习惯。你擅长基于任意招标文件原文，拆解出颗粒度精准、层级清晰、100%覆盖所有需求点的投标文件多级目录，目录质量达到资深投标专员人工编制水准，无漏项、无冗余、逻辑顺、易核查，可直接用于正式投标文件排版。
-
-# 核心目标
-必须先通读本份招标文件全文，再严格按本份「响应文件格式」（或本份对响应文件/投标文件如何组成、如何编写的同等规定，以下统称格式要求）去写投标文件目录。
-不同招标书的格式要求不同，章节名称、顺序、层级、某一章应写什么，一律以本份格式要求的原文为准，禁止套用任何预置章节清单或他项目目录。
-
-编制时同时做到：
-1. 格式要求列出的章节，就是目录的大标题骨架；名称与顺序按格式要求原文，不得改名、调序、增删。
-2. 格式里的每一章都要单独阅读该章自己的编写要求，再决定这一章下面写什么：
-   - 若该章要求按招标书另一部分的目录编制、或按该部分条款逐条描述/逐条响应：把该部分中与本章主题对应的条款目录完整写入本章下级；若要求覆盖该部分全部目录，则把尚未被其他格式章归位的条款也写入本章。
-   - 若该章要求根据招标书某部分的有关要求编制：到该部分中找出与本章标题/主题对应的章节，将其条款目录写入本章下级。
-   - 若该章编写要求只列出本章自身要点、未指向招标书其他部分：按该章要求自身的要点展开，不要把无关部分塞进来。
-   - 若该章属于固定格式签字件（承诺类、授权委托类、报价类、商务/技术偏差表类等：招标书已给出填写格式，填好后打印签字）：只保留该文件名作为叶子节点，不要展开下级目录，不要写入应标细目，直接沿用招标书原文格式。
-3. 同一条应标细目只写入最对应的那一个格式章。禁止把本应分属多章的内容全部塞进其中一章，导致其他格式章只有空标题。
-
-禁止只输出格式大标题而丢掉应标细目；禁止抛开格式要求另起一套目录；禁止只根据某一章的编写要求去处理全部需求。
-
-# 强制执行：5步目录编制SOP（必须严格按顺序执行）
-## 第一步：通读全文，按本份格式要求锁定大标题骨架
-逐字通读输入的全部招标文本。先找出本份格式要求的原文，按它列出的文件/章节作为投标文件目录的大标题骨架。
-- 有格式要求的：只采用本份格式要求中的章节名与顺序。
-- 没有单独格式要求的：再按本份招标书自身章节逻辑划分大类，仍不得套用固定模板。
-
-## 第二步：逐章阅读格式要求，把招标书对应部分写入各章
-对格式列出的每一章，分别阅读该章编写要求，再回原文中定位它指向的那一部分（各招标书用词、章节名都可能不同，以本份原文为准）：
-- 指向「按某部分目录编制 / 逐条响应」的：写入该部分中与本章对应的全部条款目录；
-- 指向「根据某部分有关要求编制」的：写入该部分里标题/主题与本章对应的章节；
-- 未指向其他部分的：只按本章自身要求展开。
-- 固定格式签字件（承诺、授权委托、报价、商务/技术偏差表等招标已给格式、填写后打印签字的）：只输出该文件标题，不要任何下级标题，不要把其他部分的条款目录写进去。
-把对应条款拆到「最小不可拆分的独立需求单元」作为该章下级（一条都不能少），并标注：
-- 【实质性条款】：带★/*/标注、写明“否决投标”“必须满足”“强制”“否则无效”的条款；
-- 【一般条款】：明确要求但不触发否决的常规要求；
-- 【交付物】：明确要求提交的文档、成果、资料、证明文件；
-- 【推荐/可选条款】：写明“可提供”“建议”“鼓励”的非强制要求。
-不得把招标书某一部分的目录提升为整本投标文件的一级目录；不得漏读格式某一章所指向的原文部分。
-
-## 第三步：自上而下搭层级，在各格式章内拆到最小需求
-层级控制在五级以内：
-- 靠前的层级：本份格式要求中的大标题；
-- 其下：按该章编写要求应写入的应标细目，拆到最小不可分的单个需求点。
-每一个末级节点只对应一个最小需求单元。凡格式要求对照招标书某部分来写的章，其下必须有对应细目，不能只有空标题或编写说明。固定格式签字件保持叶子，不要再拆。
-
-## 第四步：反向校验闭环，确保符合本份格式要求
-A. 格式骨架：本份格式要求列出的大标题是否全部入目录且顺序一致；
-B. 分章归位：每一章是否都按其自己的编写要求写入了所指向的原文部分；有对应原文的章不得空着；同一条款未重复塞进无关章。固定格式签字件有文件名即可，不算空壳。
-并满足：
-1. 每一条须响应的招标要求，都能在格式中最对应的那一章下找到明确节点；
-2. 所有【实质性条款】【交付物】必须单独成节点，不得埋藏在其他节点中；
-3. 存在多个需求合并为一个节点的，必须拆分；存在层级错位的，必须调整。
-
-## 第五步：标题命名（本份招标书全部条款适用）
-凡条款，目录标题规则相同：只能用「短名称」，禁止把「需求原文/说明句」当作目录。
-
-先判断该条是名称还是描述（按句子形态判断，不按它属于哪一章）：
-- 【短名称】：一般不超过16字，无句号，不以「支持/须/必须/应当/应能/包括/因/对于」开头，也不含「提供…咨询」「小时内完成」这类完整要求句。
-- 【需求描述】：说明「要做什么」的句子或半句。包括以「支持/须/必须/应当/提供/因」开头、超过16字、带逗号/顿号的完整说明，以及服务时限、响应时限类条款原文。即使写在某章编号后面，也仍是描述，不是目录名。
-
-A. 判定为【短名称】：目录标题必须原样使用，禁止改写合并、禁止跳级。
-B. 判定为【需求描述】：必须根据内容提炼 4～12 字短标题（名词或动宾短语）；严禁把原句、半句、原文列举粘贴为任何一级标题；一条描述含两个独立要求时拆成两个短标题。
-
-编号连续无跳号；标题本身不要写编号（不要把招标原文里的序号抄进标题，目录编号由排版系统生成）。
-
-【A 正确】招标已写出的短名称原样做标题
-【B 错误】把需求说明整句或半句当目录
-【B 正确】把说明句提炼为不超过12字的短标题
-
-# 刚性编制准则（违反即不合格）
-0. 格式要求优先准则：大标题的名称、顺序，以及某一章应写入什么，只来自本份格式要求原文；不同招标书不得共用同一套章节。禁止套用预置章节、他项目目录或通用标书模板。
-0.1 应标细目归位准则：格式每一章写什么，只看该章自己的编写要求及其指向的原文部分；有对应原文的章不得空壳。禁止把多章应写的内容合并进其中一章。
-0.2 固定格式签字件准则：承诺类、授权委托类、报价类、商务/技术偏差表类等招标已给出固定格式、填写后打印签字的文件，目录只保留文件名叶子，禁止再展开应标细目或撰写正文，直接使用招标书原文。
-1. 颗粒度准则：招标表格中的每一行参数、每一个功能点、每一项服务要求、每一条验收标准，都必须对应到末级目录；禁止用“相关要求”“其他功能”等笼统标题覆盖多条需求。
-2. 名称/描述分离准则：已有短名称则原词做标题；需求描述必须提炼成短标题。禁止把招标条款原文、说明句、半句或顿号清单当作任何一级目录标题。
-3. 实质性条款显式准则：所有带★/*/否决投标/强制性要求，绝不允许隐藏在深层目录或大段文字对应的目录中，必须保证醒目可查。
-4. 交付物独立准则：本份招标文件明确列出的全部交付物清单，必须在目录中有独立对应节点，不得散落在其他章节内。
-5. 分卷分册准则：本份格式要求如何分卷、分册或分部分，目录就如何划分；未划分的，不要自行套用固定分册。
-6. 无冗余准则：目录只保留与本份招标应答强相关的节点，不添加本份招标未要求的冗余章节，不做方案性展开。
-7. 禁则：禁止跳号、重号；禁止出现“其他”“等等”类模糊标题；禁止跨维度合并需求；禁止自行新增本份招标未提及的核心模块；禁止把功能描述粘贴为标题；禁止把已命名功能点改成拼接标题。
-8. 禁止套话模板：禁止用与本份招标条款无法一一对应的套话章节，去合并、替换或吞掉招标里已经点名的条款。本份招标点了名的条款名称，必须在目录中原样点名出现。
-
-# 输出规范
-1. 仅输出目录本身，使用标准Markdown多级标题格式：# 一级、## 二级、### 三级、#### 四级；
-2. 不输出任何解释说明、编制思路、应答正文、方案描述、需求清单或SOP过程；
-3. 标题不要自带编号（不要写「一、」「（一）」「1.」「1.1」），编号由排版系统单独生成；标题只写本份招标书中的章节/条款名称本身；
-4. 大标题按本份格式要求；每一章按其编写要求写入所指向的原文对应部分。短名称原样输出；需求描述必须先提炼成不超过12个汉字的短标题再输出，禁止把「支持…」「须…」「提供…」「因…须…」整句或半句写入任何一级标题；
-5. 目录必须同时包含格式大标题与应标细目，结构完整、层级缩进清晰，可直接用于正式投标文件排版。
-6. 固定格式签字件只输出其所在层级的文件名标题，不要下级标题。
+_OUTLINE_SHARED = """用检索找「投标文件格式」「响应文件格式」「投标文件组成」「响应文件编制」。格式节不限章号。不要从第 1 页逐页翻到最后。
+评标办法不进目录。合同条款、投标人须知、形式评审、资格评审、响应性评审里的句子也不要写进目录。机器码、标识码、签字盖章、未出现报价、限价、IP 地址都不是章节。
+禁止再套「符合第×章格式的要求」或任何自拟总标题。抽不到这份清单时，不要套一套默认章节。
+文件名按原文。需求说明句收成不超过 12 字的短标题，标题不要自带编号。
+对应某条需求的标题，下一行写「依据：T5」或「依据：B3」，多条写「依据：T5,T6」。
+只输出 Markdown 标题（# 一级、## 二级、### 三级），不要解释。
 """
 
-ORIGINAL_FORM_NOTE = (
-    "本章为招标书已给出的固定格式文件，请直接使用招标书原文填写后打印签字，"
-    "系统不展开目录、不撰写正文。"
-)
+BUSINESS_OUTLINE_PROMPT = """你是商务标目录编辑。软件服务标、工程标、水利标的商务分册都用这一份。只根据本份招标书格式节里的商务文件编目录。
+
+""" + _OUTLINE_SHARED + """
+一级章只用格式节里的商务文件，按原文和顺序，一项文件一个一级章。
+下级只写这一节在该文件下面印出的目录。
+承诺书、承诺函、授权委托、投标函、开标一览只留文件名。投标函附录若在格式节里单独列出，则保留。
+商务标不按篇幅加章。报价文件不进商务标。
+"""
+
+SOFTWARE_TECH_OUTLINE_PROMPT = """你是软件服务标技术标目录编辑。只根据本份招标书格式节里的技术文件编目录。工程施组、水利施组不使用这一份。
+
+""" + _OUTLINE_SHARED + """
+一级章只用格式节里的技术文件，按原文和顺序，一项文件一个一级章。
+下级照招标书的需求结构写：二级是需求小节（如 4.1），三级是该小节里的每一条需求，一条一个标题，不要合并，不要改名。
+采购需求、用户需求、技术标准、发包人要求里的条款都要挂上。有编号的标题保留编号，如「F-01 组织与账号管理」；没有编号的收成不超过 12 字的短名。
+投标函、授权委托、资格、报价、业绩不要输出。不要为凑页数自拟章节。
+"""
+
+
+def outline_system_prompt(doc_kind: str) -> str:
+    """商务标三种标共用一份。软件技术标单独一份。施组不走这里。"""
+    if (doc_kind or "tech").strip().lower() == "business":
+        return BUSINESS_OUTLINE_PROMPT
+    return SOFTWARE_TECH_OUTLINE_PROMPT
+
+
+# 旧名保留给仍按「系统提示词」断言的测试。内容是两份目录提示词，都含共用禁则。
+OUTLINE_SYSTEM_PROMPT = BUSINESS_OUTLINE_PROMPT + "\n" + SOFTWARE_TECH_OUTLINE_PROMPT
+
+ORIGINAL_FORM_NOTE = "招标书未提供本文件的固定格式，请按投标人自有格式提供并签字盖章。"
 ORIGINAL_FORM_IDEA_PREFIX = "【按招标书原文格式填写后打印签字，不展开目录、不撰写正文】"
 BUSINESS_SKIP_NOTE = (
-    "商务标本章无需撰写应标正文。承诺书、报价文件、偏差表等固定格式件请直接使用招标书原文填写后打印签字。"
+    "商务标本章无需撰写应标正文。承诺书、授权委托、投标函、开标一览及证照业绩请直接使用招标书原文或扫描件。"
 )
 BUSINESS_SKIP_IDEA_PREFIX = "【商务标无需应答，不撰写应标正文】"
 
 # 按「文件类别」识别，不用某份招标书的具体章节名。
-_ORIGINAL_FORM_TITLE = re.compile(
-    r"(承诺书|承诺函|"
-    r"授权委托|"
-    r"报价文件|报价表|开标一览|分项报价|投标报价|报价部分|"
-    r"商务.{0,8}技术.{0,6}偏差|商务偏差|技术偏差|偏差表)"
-)
+_ORIGINAL_FORM_TITLE = re.compile(r"(承诺书|承诺函|授权委托|投标函|开标一览)")
+_CERTIFICATE_TITLE = re.compile(r"(营业执照|资质证书|财务报告|财务报表|审计报告|业绩证明|类似业绩)")
 _BUSINESS_SKIP_TITLE = re.compile(
     r"商务标|商务部分|商务文件|商务响应|"
     r"资格审查|资格预审|资格证明|资格文件|"
@@ -167,15 +108,21 @@ _FORMAT_DIR_HINT = re.compile(r"按.{0,40}目录编制|逐条进行描述|逐条
 
 
 def is_original_form_title(title: str) -> bool:
-    """承诺/授权委托/报价/商务技术偏差等招标已给格式、打印签字的文件，不展开目录。"""
+    """承诺书、授权委托、投标函、开标一览等签字空白件不展开目录。"""
     from .tender_toc import strip_heading_prefix
 
     t = re.sub(r"\s+", "", strip_heading_prefix(title or ""))
     if not t:
         return False
-    if t in {"报价", "投标报价"}:
-        return True
     return bool(_ORIGINAL_FORM_TITLE.search(t))
+
+
+def is_certificate_title(title: str) -> bool:
+    """营业执照、审计报告、业绩证明等粘贴扫描件，不改写成应答正文。"""
+    from .tender_toc import strip_heading_prefix
+
+    t = re.sub(r"\s+", "", strip_heading_prefix(title or ""))
+    return bool(t and _CERTIFICATE_TITLE.search(t))
 
 
 def original_form_idea(title: str, existing: str = "", tender_req: str = "") -> str:
@@ -217,12 +164,25 @@ def fill_business_originals(
     from .tender_form import needs_form_recopy
 
     changed = False
+    parent_ids = {str(n.get("parentId")) for n in outline if isinstance(n, dict) and n.get("parentId")}
     for n in outline:
-        if not isinstance(n, dict):
+        if not isinstance(n, dict) or n.get("formKeys"):
             continue
         title = str(n.get("title") or "")
-        kind = chapter_kind(title, n.get("part"), str(n.get("idea") or ""), str(n.get("requirement") or ""))
-        if kind not in ("form", "business") and not is_original_form_title(title):
+        kind = chapter_kind(
+            title,
+            n.get("part"),
+            str(n.get("idea") or ""),
+            str(n.get("requirement") or ""),
+            has_children=str(n.get("id")) in parent_ids,
+        )
+        if not should_paste_tender_original(
+            title,
+            n.get("part"),
+            str(n.get("idea") or ""),
+            str(n.get("requirement") or ""),
+            has_children=str(n.get("id")) in parent_ids,
+        ):
             continue
         original = (originals_by_title.get(title) or "").strip()
         existing = contents.get(n["id"]) or ""
@@ -247,18 +207,33 @@ def chapter_kind(
     part: str | None = None,
     idea: str = "",
     requirement: str = "",
+    *,
+    has_children: bool = False,
 ) -> str:
-    """form=签字件原文；business=商务标不应答；tech=先列原始需求再写解决方案。"""
+    """form=签字件原文；business=证照或无条款的商务章；response=按条款写商务应答；tech=技术方案。
+
+    「技术方案」这类整册容器标题：有下级节点、或已明确标成技术章时仍是技术章，
+    不会因为标题以「技术方案」结尾、需求为空就被当成商务章。
+    有绑定条款的商务叶子写应答；容器章、证照和签字件不走这路。"""
     if is_original_form_title(title) or part == "form":
         return "form"
     from .tender_toc import strip_heading_prefix
 
     t = re.sub(r"\s+", "", strip_heading_prefix(title or ""))
     blob = f"{idea or ''}\n{requirement or ''}"
+    if is_certificate_title(t):
+        return "business"
+    # 只有商务分册上已标成 business、且自身带有条款的叶子才写商务应答。
+    # 技术标叶子的 part 是 tech 或尚未标注，不能因为有需求原文就被当成商务应答。
+    if (requirement or "").strip() and not has_children and part == "business":
+        return "response"
     if _BUSINESS_SKIP_TITLE.search(t):
         return "business"
-    if _TECH_VOLUME_TITLE.search(t) and (
-        _FORMAT_DIR_HINT.search(blob) or not (requirement or "").strip()
+    if (
+        _TECH_VOLUME_TITLE.search(t)
+        and not has_children
+        and part != "tech"
+        and (_FORMAT_DIR_HINT.search(blob) or not (requirement or "").strip())
     ):
         return "business"
     if part in ("business", "tech"):
@@ -268,12 +243,92 @@ def chapter_kind(
     return "tech"
 
 
+def chapter_follows_response_rule(title: str) -> bool:
+    """投标函、授权委托、证照和纯报价金额行按招标格式填写，不套本份应答规定。"""
+    from .tender_toc import strip_heading_prefix
+
+    name = re.sub(r"\s+", "", strip_heading_prefix(title or ""))
+    if not name or is_original_form_title(name) or is_certificate_title(name):
+        return False
+    if re.search(r"报价|单价|总价|金额|付款", name) and not re.search(r"响应|偏离|偏差", name):
+        return False
+    return True
+
+
+def should_paste_tender_original(
+    title: str,
+    part: str | None = None,
+    idea: str = "",
+    requirement: str = "",
+    *,
+    has_children: bool = False,
+) -> bool:
+    """签字件和证照粘贴招标原文。已经绑定条款、要逐条应答的商务章不贴「无需应答」。"""
+    if is_original_form_title(title) or part == "form":
+        return True
+    kind = chapter_kind(title, part, idea, requirement, has_children=has_children)
+    if kind == "form":
+        return True
+    if kind != "business":
+        return False
+    if is_certificate_title(title):
+        return True
+    return not (requirement or "").strip()
+
+
 def _requirement_from_idea(idea: str) -> str:
     text = (idea or "").strip()
     for prefix in ("应实现：", "不得漏项：", "招标书原文："):
         if prefix in text:
             return text.split(prefix, 1)[-1].strip()
+    if text.startswith(("【对应招标", "【上级条款全文")) and "】" in text:
+        body = text.split("】", 1)[-1].strip()
+        if body and "按该条款全部要求逐项应答" not in body:
+            return body
     return ""
+
+
+def resolve_chapter_requirement(
+    outline: list[dict] | None,
+    chapter_id: str | None,
+    own_requirement: str,
+    idea: str,
+    project_id: str = "",
+    title: str = "",
+) -> tuple[str, str]:
+    """章节要答的招标条款。返回 (条款原文, 必须逐项应答数字指标的原文)。
+
+    顺序：节点自己的 requirement -> 编写思路里的条款 -> 沿父链取最近祖先的条款（只取和本章标题相关的分句）
+    -> 按标题在招标原文里检索。沿用上级全文、汇总章不要求逐项出现数字指标。
+    """
+    req = (own_requirement or "").strip() or _requirement_from_idea(idea)
+    whole_parent = PARENT_CONTEXT_MARK in (idea or "")
+    summary = SUMMARY_CHAPTER_MARK in (idea or "")
+    if not req and outline and chapter_id:
+        by_id = {str(n.get("id")): n for n in outline if isinstance(n, dict) and n.get("id")}
+        node = by_id.get(str(chapter_id))
+        seen: set[str] = set()
+        while node is not None and node.get("parentId") and str(node.get("parentId")) not in seen:
+            seen.add(str(node.get("parentId")))
+            node = by_id.get(str(node.get("parentId")))
+            if node is None:
+                break
+            parent_req = str(node.get("requirement") or "").strip() or _requirement_from_idea(str(node.get("idea") or ""))
+            if parent_req:
+                piece = _clauses_for_title(parent_req, title)
+                req = piece or parent_req
+                whole_parent = not piece
+                break
+    if not req and project_id:
+        from .writer_tool_runtime import load_original_tender_text
+
+        req = _search_original_snippet(load_original_tender_text(project_id), title)
+    facts_source = "" if (whole_parent or summary) else req
+    marked = re.search(re.escape(FACTS_MARK) + r"([^】]+)】", idea or "")
+    if marked and not summary:
+        extra = marked.group(1).replace("、", "，")
+        facts_source = f"{facts_source}；{extra}" if facts_source else extra
+    return req, facts_source
 
 
 def _leaf_doc_kind_counts(
@@ -352,9 +407,16 @@ def _collapse_original_form_chapters(nodes: list[dict], tender_toc: dict | None 
             continue
         title = str(n.get("title") or "")
         if is_original_form_title(title):
-            n["children"] = []
+            # 投标函附录是另一份文件，不能跟填写栏一起清掉。
+            kept = [
+                child
+                for child in (n.get("children") or [])
+                if isinstance(child, dict) and "附录" in _node_title(child)
+            ]
+            n["children"] = kept
             n["idea"] = original_form_idea(title, str(n.get("idea") or ""), _compose_requirement_blob(title, tender_toc))
             n["aiIdea"] = n["idea"]
+            _collapse_original_form_chapters(kept, tender_toc)
             continue
         kids = n.get("children")
         if isinstance(kids, list):
@@ -399,8 +461,12 @@ def generate_outline(
     doc_kind: str = "tech",
     page: dict | None = None,
     layout: dict | None = None,
+    report: dict | None = None,
+    ledger_out: list | None = None,
+    form_registry: list[dict] | None = None,
 ) -> list[dict]:
-    """用 AgentScope 阅读招标原文编制应标目录。harness 必填——目录生成只走 AgentScope harness 通读原文，
+    """用 AgentScope 阅读招标原文编制应标目录。report 传入时会被写入覆盖报告
+    （total 条目数、boundByModel 模型引用数、titleMatched 按标题绑定数、backfilled 补章数、noSource 无依据节点）。harness 必填——目录生成只走 AgentScope harness 通读原文，
     不再接受「跳过 harness 裸调模型」的用法，也不再吃招标解析模块预抽出的技术标/商务标摘要。
     Harness 判定失败时直接抛出，不把套话目录当成功；非 Harness 的意外解析异常仍回退招标标题树兜底。"""
     del knowledge_headings  # 目录只覆盖招标需求，不用知识库目录改写结构
@@ -409,27 +475,71 @@ def generate_outline(
     if not harness:
         raise HarnessError("目录生成必须经过 AgentScope harness，不支持裸调模型")
     try:
-        content = write_outline_markdown(
-            user_id=str(harness.get("user_id") or ""),
-            project_id=str(harness.get("project_id") or ""),
-            draft_id=str(harness.get("draft_id") or ""),
-            job_id=str(harness.get("job_id") or ""),
-            model_id=model_id,
-            project_name=project_name,
-            tender_text=tender_text or "",
-            tender_toc=tender_toc,
-            score_rules=score_rules,
-            must_respond=must_respond,
-            format_requirements=format_requirements,
-            doc_kind=doc_kind,
-            page=page,
-            layout=layout,
-        )
-        chapters = _chapters_from_llm_output(content)
+        from .tender_toc import composition_for_volume, extract_bid_composition
+        from .writer_tool_runtime import load_tender_extracts
+
+        composition = composition_for_volume(extract_bid_composition(tender_text or ""), doc_kind)
+        extracts = load_tender_extracts(str(harness.get("project_id") or ""))
+        tech_text = extracts.get("tech") or ""
+        business_text = extracts.get("business") or ""
+        from .form_registry import make_form_mapper, registry_light
+
+        light_registry = registry_light(form_registry)
+        form_mapper = make_form_mapper(model_id)
+        feedback = ""
+        chapters: list[dict] = []
+        coverage: dict = {}
+        ledger: list[dict] = []
+        issues: list[str] = []
+        for attempt in range(OUTLINE_REVIEW_ROUNDS):
+            content = write_outline_markdown(
+                user_id=str(harness.get("user_id") or ""),
+                project_id=str(harness.get("project_id") or ""),
+                draft_id=str(harness.get("draft_id") or ""),
+                job_id=str(harness.get("job_id") or ""),
+                model_id=model_id,
+                project_name=project_name,
+                tender_text=tender_text or "",
+                tender_toc=tender_toc,
+                score_rules=score_rules,
+                must_respond=must_respond,
+                format_requirements=format_requirements,
+                doc_kind=doc_kind,
+                page=page,
+                layout=layout,
+                review_feedback=feedback,
+            )
+            chapters = _chapters_from_llm_output(content)
+            if not chapters:
+                break
+            coverage, ledger, notes = _assemble_outline(
+                chapters,
+                composition=composition,
+                tender_toc=tender_toc,
+                score_rules=score_rules,
+                tech_text=tech_text,
+                business_text=business_text,
+                tender_text=tender_text or "",
+                doc_kind=doc_kind,
+                form_registry=light_registry,
+                form_mapper=form_mapper,
+            )
+            chapters = coverage.pop("_chapters")
+            issues = outline_problems(chapters, ledger, notes)
+            # 只按已经核对出的缺口再写一轮。不再另起评审智能体把全文重读一遍。
+            if issues and attempt + 1 < OUTLINE_REVIEW_ROUNDS:
+                feedback = "上一版目录评审未通过，请只修正这些问题后重新输出整份目录：\n" + "\n".join(
+                    f"- {item}" for item in issues[:20]
+                )
+                continue
+            break
         if chapters:
-            _fill_format_chapters_with_requirements(chapters, tender_toc)
-            _collapse_original_form_chapters(chapters, tender_toc)
-            _attach_tender_refs(chapters, tender_toc, score_rules)
+            coverage["reviewIssues"] = issues[:20]
+            if ledger_out is not None:
+                ledger_out[:] = ledger
+            if report is not None:
+                report.clear()
+                report.update(coverage)
             nodes = _normalize_outline({"chapters": chapters})
             if nodes:
                 return nodes
@@ -439,7 +549,462 @@ def generate_outline(
         raise
     except Exception:  # noqa: BLE001 —— 非 Harness 判定的意外解析异常仍回退招标标题树，避免整条流水线被卡死
         logger.exception("outline harness generate failed, falling back to tender headings")
+    if report is not None:
+        report["fallbackOutline"] = True  # 让前端提示：这份目录是招标标题树兜底，不是智能体评审后的结果
     return _fallback_outline(score_rules, tender_toc)
+
+
+OUTLINE_REVIEW_ROUNDS = 2
+
+
+def requirement_coverage_problems(
+    chapters: list[dict],
+    tech_text: str,
+    business_text: str,
+    tender_text: str,
+    doc_kind: str,
+    *,
+    has_deviation_form: bool = False,
+    has_quote_form: bool = False,
+) -> list[str]:
+    """应答编号和招标点名的表有没有进目录。只报问题，不补章、不改标题。"""
+    from .writer_tool_runtime import numbered_requirement_items
+
+    problems: list[str] = []
+    cited = _tree_cited_ids(chapters)
+    kind = (doc_kind or "tech").strip().lower()
+    wanted: list[tuple[str, str]] = []
+    if kind == "business":
+        for item_id, title, _body in _business_volume_items(business_text):
+            wanted.append((item_id, title))
+    else:
+        for item_id, raw in numbered_requirement_items(tech_text, "tech"):
+            title, _body = _short_requirement_title(raw)
+            if title:
+                wanted.append((item_id, title))
+        for item_id, raw in numbered_requirement_items(business_text, "business"):
+            title, body = _short_requirement_title(raw)
+            if title and business_item_belongs_in_tech(title, body):
+                wanted.append((item_id, title))
+    for item_id, title in wanted:
+        if item_id in cited:
+            continue
+        problems.append(f"应答「{item_id}」没有目录节点：{title}")
+
+    if kind == "business":
+        corpus = f"{business_text}\n{tender_text}"
+        titles = [_node_title(node) for node in _iter_chapter_nodes(chapters)]
+        has_deviation = any("偏离" in title or "偏差" in title for title in titles)
+        if _DEVIATION_HINT.search(corpus) and not has_deviation and not has_deviation_form:
+            problems.append("招标要求偏离表或偏差表，目录里没有对应章节")
+        if not has_quote_form:
+            for node in _iter_chapter_nodes(chapters):
+                title = _node_title(node)
+                if _is_quote_detail_title(title) and not node.get("children"):
+                    pieces = _enumerated_pieces(str(node.get("requirement") or ""))
+                    if len(pieces) >= 2:
+                        problems.append(f"「{title}」列出了报价分项，但没有拆成下级节点")
+                        break
+                if _is_quote_node(title) and "付款" not in title:
+                    blob = f"{node.get('requirement') or ''}\n{node.get('idea') or ''}"
+                    if _PAYMENT_HINT.search(blob) and _PAYMENT_DETAIL.search(blob) and not _descendant_has_keyword(node, "付款"):
+                        problems.append(f"「{title}」写了付款节点，目录里没有付款小节")
+                        break
+    return problems[:20]
+
+
+# 小节标题或所在章命中左边时，挂到标题命中右边的组成文件。一组命中多个组成文件时取组成清单里靠前的。
+_SECTION_HOSTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("对接", "接口", "迁移", "集成"), ("接口", "迁移", "集成", "对接")),
+    (("部署", "安全"), ("部署", "安全")),
+    (("实施", "交付", "验收", "周期", "团队", "风险"), ("实施", "团队", "风险")),
+    (("质保", "运维", "售后", "培训要求"), ("运维", "培训", "售后")),
+)
+
+
+def _requirement_tree_text(tree: list[dict], limit: int = 8000) -> str:
+    lines: list[str] = []
+    for section in tree or []:
+        if not isinstance(section, dict):
+            continue
+        number = str(section.get("clauseNo") or "").strip()
+        lines.append(f"- {number + ' ' if number else ''}{section.get('title') or ''}".rstrip())
+        for item in section.get("items") or []:
+            if isinstance(item, dict):
+                lines.append(f"  - {_req_item_title(item)}")
+    return "\n".join(lines)[:limit]
+
+
+def _req_item_title(item: dict) -> str:
+    code = str(item.get("code") or "").strip()
+    name = str(item.get("name") or "").strip()
+    if not name:
+        name, _body = _short_requirement_title(str(item.get("text") or ""))
+    if code and name:
+        return f"{code} {name}"
+    return name or code or "需求"
+
+
+def _section_heading(section: dict) -> str:
+    number = str(section.get("clauseNo") or "").strip()
+    title = str(section.get("title") or "").strip()
+    return f"{number} {title}".strip()
+
+
+def _clause_in_title(number: str, title: str) -> bool:
+    if not number:
+        return False
+    return bool(re.search(rf"(?<!\d){re.escape(number)}(?!\d)", title or ""))
+
+
+def _host_groups(text: str) -> list[tuple[tuple[str, ...], tuple[str, ...]]]:
+    return [group for group in _SECTION_HOSTS if any(key in (text or "") for key in group[0])]
+
+
+def _composition_hosts(chapters: list[dict], composition: list[dict] | None) -> list[tuple[str, dict]]:
+    hosts: list[tuple[str, dict]] = []
+    for item in composition or []:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        node = next(
+            (chapter for chapter in chapters if isinstance(chapter, dict) and _is_same_large_chapter(title, _node_title(chapter))),
+            None,
+        )
+        if title and node is not None:
+            hosts.append((title, node))
+    return hosts
+
+
+def _pick_host(text: str, hosts: list[tuple[str, dict]]) -> dict | None:
+    groups = _host_groups(text)
+    if len(groups) != 1:
+        return None
+    keys = groups[0][1]
+    for title, node in hosts:
+        if any(key in title for key in keys):
+            return node
+    return None
+
+
+def _default_requirement_host(hosts: list[tuple[str, dict]], chapters: list[dict]) -> dict | None:
+    for words in (("需求响应",), ("技术方案", "技术响应")):
+        for title, node in hosts:
+            if any(word in title for word in words):
+                return node
+    if hosts:
+        return hosts[0][1]
+    for chapter in chapters:
+        if isinstance(chapter, dict) and not is_original_form_title(_node_title(chapter)):
+            return chapter
+    return None
+
+
+def _host_for_section(section: dict, hosts: list[tuple[str, dict]]) -> dict | None:
+    found = _pick_host(str(section.get("title") or ""), hosts)
+    if found is not None:
+        return found
+    return _pick_host(str(section.get("chapter") or ""), hosts)
+
+
+def _detach_child(chapters: list[dict], node: dict) -> bool:
+    """从非一级章的位置摘下节点。一级章是组成文件，不能摘。"""
+
+    def walk(nodes: list[dict]) -> bool:
+        for current in nodes:
+            if not isinstance(current, dict):
+                continue
+            kids = current.get("children")
+            if not isinstance(kids, list):
+                continue
+            if any(kid is node for kid in kids):
+                current["children"] = [kid for kid in kids if kid is not node]
+                return True
+            if walk(kids):
+                return True
+        return False
+
+    return walk(chapters)
+
+
+def _find_skeleton_node(chapters: list[dict], *, code: str = "", number: str = "", name: str = "") -> dict | None:
+    """按编号或小节号找已有节点。带编号的标题不再用名称去撞，避免「超级管理员」把 F-02 抢走。"""
+    tops = {id(chapter) for chapter in chapters if isinstance(chapter, dict)}
+    coded = re.compile(r"^[A-Za-z]{1,4}-\d+\s")
+    for node in _iter_chapter_nodes(chapters):
+        if id(node) in tops or is_original_form_title(_node_title(node)):
+            continue
+        title = _node_title(node)
+        if code:
+            if re.search(rf"(?<![A-Za-z0-9]){re.escape(code)}(?!\d)", title):
+                return node
+            continue
+        if number and _clause_in_title(number, title):
+            return node
+        plain = _plain_title(name)
+        if not plain or len(plain) < 2 or coded.match(title):
+            continue
+        if _plain_title(title) == plain or plain in _plain_title(title):
+            return node
+    return None
+
+
+def _write_item_node(node: dict, title: str, text: str, rule_text: str) -> None:
+    node["title"] = title
+    node["part"] = "tech"
+    node["requirement"] = text
+    idea = _idea_from_requirement(title, text)
+    if rule_text:
+        idea = (idea + f"\n【应答写法】{rule_text}")[:8000]
+    node["idea"] = idea
+    node["aiIdea"] = idea
+    if not isinstance(node.get("children"), list):
+        node["children"] = []
+
+
+def _bind_skeleton_refs(chapters: list[dict], tech_text: str, business_text: str) -> None:
+    """把 T、B 摘要对到已经按招标结构生成的小节上，避免覆盖检查把它们再报成漏项。"""
+    from .writer_tool_runtime import numbered_requirement_items
+
+    pool: list[tuple[str, str]] = []
+    for item_id, raw in numbered_requirement_items(tech_text or "", "tech"):
+        pool.append((item_id, _clean_item_text(raw)))
+    for item_id, raw in numbered_requirement_items(business_text or "", "business"):
+        title, body = _short_requirement_title(raw)
+        if business_item_belongs_in_tech(title, body):
+            pool.append((item_id, _clean_item_text(raw)))
+    leaves = [node for node in _iter_chapter_nodes(chapters) if _is_leaf(node) and str(node.get("requirement") or "").strip()]
+    for item_id, body in pool:
+        short, _rest = _short_requirement_title(body)
+        probe = re.sub(r"\s+", "", body)[:12]
+        best = None
+        best_score = 0
+        for node in leaves:
+            score = _title_overlap_score(short or body[:16], _node_title(node))
+            if short and short in _node_title(node):
+                score += 10
+            if probe and probe in re.sub(r"\s+", "", str(node.get("requirement") or "")):
+                score += 6
+            if score > best_score:
+                best, best_score = node, score
+        if best is None or best_score < 6:
+            continue
+        refs = [str(ref) for ref in (best.get("sourceRefs") or [])]
+        if item_id not in refs:
+            refs.append(item_id)
+        best["sourceRefs"] = refs
+
+
+def apply_requirement_skeleton(
+    chapters: list[dict],
+    tree: list[dict] | None,
+    composition: list[dict] | None,
+    rules: list[str] | None,
+) -> None:
+    """技术标二三级按招标需求原结构摆正：缺的补上，放错章的移回，顺序照原文。"""
+    sections = [section for section in (tree or []) if isinstance(section, dict) and section.get("title")]
+    if not sections or not isinstance(chapters, list):
+        return
+    hosts = _composition_hosts(chapters, composition)
+    default = _default_requirement_host(hosts, chapters)
+    if default is None:
+        return
+    rule_text = "；".join(rule for rule in (rules or []) if rule)[:500]
+    order: dict[str, int] = {}
+    for index, section in enumerate(sections):
+        heading = _section_heading(section)
+        order[heading] = index
+        host = _host_for_section(section, hosts) or default
+        section_node = _find_skeleton_node(chapters, number=str(section.get("clauseNo") or ""), name=str(section.get("title") or ""))
+        item_nodes: list[dict] = []
+        for item in section.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            title = _req_item_title(item)
+            node = _find_skeleton_node(chapters, code=str(item.get("code") or ""), name=str(item.get("name") or ""))
+            if node is None or node is section_node:
+                node = {"title": title, "children": [], "part": "tech"}
+            item_nodes.append((node, title, str(item.get("text") or "").strip()))
+        if section_node is not None:
+            _detach_child(chapters, section_node)
+            section_node["title"] = heading
+        else:
+            section_node = {"title": heading, "children": [], "part": "tech"}
+        section_node["part"] = "tech"
+        written: list[dict] = []
+        for node, title, text in item_nodes:
+            _detach_child(chapters, node)
+            _write_item_node(node, title, text, rule_text)
+            written.append(node)
+        item_nodes = written
+        extras = [
+            child
+            for child in (section_node.get("children") or [])
+            if isinstance(child, dict) and child not in item_nodes
+        ]
+        section_node["children"] = item_nodes + extras
+        if not item_nodes and section.get("text"):
+            _write_item_node(section_node, heading, str(section.get("text") or ""), rule_text)
+            section_node["children"] = extras
+        kids = host.setdefault("children", [])
+        if not isinstance(kids, list):
+            kids = []
+            host["children"] = kids
+        if section_node not in kids:
+            kids.append(section_node)
+    if any("偏离" in rule or "响应表" in rule for rule in (rules or [])):
+        deviation = _find_skeleton_node(chapters, name="偏离") or _find_skeleton_node(chapters, name="偏差")
+        if deviation is not None and deviation not in chapters:
+            _detach_child(chapters, deviation)
+        if deviation is None:
+            deviation = {"title": "需求响应偏离表", "children": [], "part": "tech"}
+            _write_item_node(deviation, "需求响应偏离表", rule_text, rule_text)
+        kids = default.setdefault("children", [])
+        if isinstance(kids, list):
+            default["children"] = [deviation] + [child for child in kids if child is not deviation]
+    for _title, host in hosts:
+        kids = [child for child in (host.get("children") or []) if isinstance(child, dict)]
+        head = [child for child in kids if re.search(r"偏离|偏差", _node_title(child))]
+        body = [child for child in kids if child not in head]
+        body.sort(key=lambda child: order.get(_node_title(child), 1000))
+        host["children"] = head + body
+
+
+def _assemble_outline(
+    chapters: list[dict],
+    *,
+    composition: list[dict],
+    tender_toc: dict | None,
+    score_rules: list[dict],
+    tech_text: str,
+    business_text: str,
+    tender_text: str,
+    doc_kind: str,
+    form_registry: list[dict] | None = None,
+    form_mapper=None,
+) -> tuple[dict, list[dict], list[str]]:
+    """智能体目录 -> 对照组成清单和应答编号 -> 绑定条款 -> 台账。
+
+    不补章、不合并、不把需求树塞进格式章。缺口写进 notes，由下一轮评审让智能体自己改。
+    """
+    from .req_ledger import attach_chapters, build_ledger, ledger_summary
+
+    notes: list[str] = []
+    if (doc_kind or "").strip().lower() == "business":
+        from .tender_toc import is_bid_review_factor
+
+        composition = [
+            item
+            for item in (composition or [])
+            if isinstance(item, dict) and not is_bid_review_factor(str(item.get("title") or ""))
+        ]
+    if composition:
+        promote_format_chapters(chapters, composition)
+    chapters = drop_review_shells(chapters, composition, doc_kind)
+    if (doc_kind or "").strip().lower() == "business":
+        drop_tender_body_nodes(chapters, composition, tender_text)
+
+    def check_composition() -> None:
+        for problem in annotate_composition(chapters, composition):
+            if problem not in notes:
+                notes.append(problem)
+
+    check_composition()
+    _collapse_original_form_chapters(chapters, tender_toc)
+    _attach_tender_refs(chapters, tender_toc, score_rules)
+    bind_report = bind_requirements(chapters, tech_text, business_text, tender_text, doc_kind)
+    if (doc_kind or "").strip().lower() != "business" and (tender_toc or {}).get("reqTree"):
+        from .tender_toc import extract_response_rules
+
+        apply_requirement_skeleton(chapters, tender_toc.get("reqTree"), composition, extract_response_rules(tender_text))
+        _bind_skeleton_refs(chapters, tech_text, business_text)
+    ensure_named_roles(chapters)
+    coverage: dict = {"mergedLeaves": 0}
+    kind_now = (doc_kind or "tech").strip().lower()
+    has_deviation_form = False
+    has_quote_form = False
+    if form_registry:
+        from .form_registry import has_kind
+
+        has_deviation_form = has_kind(form_registry, "deviation")
+        has_quote_form = has_kind(form_registry, "quote")
+    for problem in requirement_coverage_problems(
+        chapters,
+        tech_text,
+        business_text,
+        tender_text,
+        doc_kind,
+        has_deviation_form=has_deviation_form,
+        has_quote_form=has_quote_form,
+    ):
+        if problem not in notes:
+            notes.append(problem)
+    check_composition()
+    _collapse_original_form_chapters(chapters, tender_toc)
+    if form_registry:
+        from .form_registry import apply_registry_to_tree
+
+        coverage["formMapped"] = apply_registry_to_tree(chapters, form_registry, form_mapper)
+    coverage["noSource"] = list(bind_report.get("noSource") or [])
+    if kind_now != "business":
+        ledger = build_ledger(tech_text, "", tender_text)
+        # 技术标册同时承接商务应答里的方案类条目，台账里也要带上
+        ledger.extend(
+            e
+            for e in build_ledger("", business_text, tender_text)
+            if business_item_belongs_in_tech(e["text"][:24], e["text"])
+        )
+    else:
+        ledger = [
+            e
+            for e in build_ledger("", business_text, tender_text)
+            if not business_item_belongs_in_tech(e["text"][:24], e["text"])
+        ]
+    attach_chapters(ledger, chapters)
+    coverage["ledger"] = ledger_summary(ledger)
+    coverage["placementNotes"] = notes[:20]
+    coverage["_chapters"] = chapters
+    return coverage, ledger, notes
+
+
+def outline_problems(chapters: list[dict], ledger: list[dict], notes: list[str] | None = None) -> list[str]:
+    """目录的确定性检查：没挂条款的必须项、多叶子共用同一条款、没有依据的叶子、归位存疑的章。"""
+    problems: list[str] = list(notes or [])
+    for entry in ledger:
+        if entry.get("mandatory") and not entry.get("chapters"):
+            problems.append(
+                f"必须项「{entry['id']}」还没挂到已有格式文件上：{str(entry.get('text') or '')[:40]}。"
+                "只挂到格式节已有的文件下。评审标准不要为此新增章节。"
+            )
+    seen: dict[str, list[str]] = {}
+    for node in _iter_chapter_nodes(chapters):
+        if not _is_leaf(node) or is_original_form_title(_node_title(node)):
+            continue
+        req = re.sub(r"\s+", "", str(node.get("requirement") or ""))
+        if len(req) >= 20:
+            seen.setdefault(req, []).append(_node_title(node))
+        if NO_SOURCE_MARK in str(node.get("idea") or ""):
+            problems.append(f"「{_node_title(node)}」没有对应的招标条款，请改写标题或删除")
+    for titles in seen.values():
+        if len(titles) >= 2:
+            problems.append("这些章节对应同一条招标条款，应合成一章：" + "、".join(titles[:6]))
+    return problems
+
+
+def outline_review_text(chapters: list[dict], limit: int = 12000) -> str:
+    lines: list[str] = []
+
+    def walk(nodes: list[dict], depth: int) -> None:
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            refs = ",".join(node.get("sourceRefs") or [])
+            lines.append("  " * depth + f"- {_node_title(node)}" + (f"（依据 {refs}）" if refs else ""))
+            walk(node.get("children") or [], depth + 1)
+
+    walk(chapters, 0)
+    return "\n".join(lines)[:limit]
+
 
 
 def _looks_like_function_name(title: str) -> bool:
@@ -469,7 +1034,7 @@ def _format_requirement_inventory(toc: dict | None) -> str:
     if compose:
         lines.append(
             "【大标题骨架】以下条目来自本份招标书对响应文件/投标文件组成与格式的规定，用作目录大标题。"
-            "名称与顺序以本份招标书为准；这不是目录的全部，其下还必须展开全部需求应标细目："
+            "名称与顺序以本份招标书为准。下级只展开采购需求、用户需求、技术标准、发包人要求，不要展开评标办法、合同条款和投标人须知："
         )
         for item in compose:
             pad = "  " * max(int(item.get("level") or 1) - 1, 0)
@@ -477,7 +1042,8 @@ def _format_requirement_inventory(toc: dict | None) -> str:
         lines.append("")
     if tech:
         lines.append(
-            "【应标细目】下列条款须按本份格式要求，全部写入格式指定的那一章之下，不得拆到与该章平级的其他格式章节。"
+            "【应标细目】下列条款只在属于采购需求、用户需求、技术标准、发包人要求时，写入格式指定的那一章之下。"
+            "评标办法、合同条款、投标人须知里的条目不要写入，也不得拆成与格式文件平级的章节。"
             "【名称】须原样做该章下级标题；【描述】只作覆盖依据，必须提炼短标题，禁止把描述当标题："
         )
         for item in tech:
@@ -504,31 +1070,19 @@ OUTLINE_INLINE_TENDER_MAX = 16000
 
 
 def _doc_kind_instruction(doc_kind: str, page: dict | None, layout: dict | None) -> str:
+    del page, layout
     kind = (doc_kind or "tech").strip().lower()
     if kind == "business":
         return (
-            "本次只需要编制《商务标》分册目录：格式要求里属于商务、资格审查、资质证明、财务状况、业绩证明、"
-            "承诺书、授权委托书、报价、商务/技术偏差表等商务性质的章节才输出，必须按格式要求完整覆盖，不得漏项；"
-            "技术方案/技术响应性质的章节这次不要输出（它们会在《技术标》分册里单独编制）。"
-            "承诺类、授权委托类、报价类、偏差表类等招标已给固定格式、填写后打印签字的文件，目录只保留文件名，不要展开下级，"
-            "不需要按篇幅扩展内容，覆盖合规即可。"
-        )
-    body_pages = resolve_body_pages(page)
-    extra = ""
-    if body_pages > 0:
-        target_chars = body_pages * chars_per_page(layout)
-        extra = (
-            f"本技术标目标正文约 {body_pages} 页（约 {target_chars} 字）。设计目录颗粒度和章节数量时，"
-            "请在完整覆盖招标技术需求基础上，按本项目目标篇幅适度扩展实现深度，"
-            "例如方案落地细节、关键技术路线、风险应对与保障措施、运维/培训/交付等环节，"
-            "使最终可写正文明显超过招标应答的最低要求；但不得为凑字数生成与本项目无关的章节或内容。"
+            "本次只编制《商务标》分册。软件服务标、工程标、水利标的商务标都按这一份。"
+            "一级章只用格式节里的商务文件，不展开填写栏。商务标不按篇幅加章。"
+            "投标函附录若在格式节里单独列出，则保留。报价文件不进商务标。"
         )
     return (
-        "本次只需要编制《技术标》分册目录：格式要求里属于技术方案/技术响应性质的章节才展开到最小需求点，"
-        "必须按格式要求完整覆盖全部技术需求，不得漏项；"
-        "商务、资格审查、报价、承诺书、授权委托书等商务性质的章节这次不要输出（它们会在《商务标》分册里单独编制），"
-        "但仍可参考完整的响应文件格式要求，了解整份文件的组成。"
-        + (("\n" + extra) if extra else "")
+        "本次只编制《软件服务标技术标》分册。"
+        "一级章只用格式节里的技术文件。采购需求、用户需求、技术标准、发包人要求按招标书原结构挂在对应文件下："
+        "二级是需求小节，三级是每一条需求，一条一个标题，不要合并。"
+        "投标函、授权委托、资格、报价、业绩不要输出。不要为凑页数自拟章节。"
     )
 
 
@@ -545,7 +1099,6 @@ def _build_outline_user_message(
     page: dict | None = None,
     layout: dict | None = None,
 ) -> str:
-    del tender_toc
     label = _DOC_KIND_LABEL.get((doc_kind or "tech").strip().lower(), "技术标")
     lines = [
         f"项目名称：{project_name or '（未命名项目）'}",
@@ -553,20 +1106,42 @@ def _build_outline_user_message(
         "",
         _doc_kind_instruction(doc_kind, page, layout),
         "",
-        "请先通读本份招标文件全文，再严格按本份响应文件格式（或同等的组成/编写规定）编写投标文件目录。"
-        "格式列出的每一章都要单独看该章编写要求：要求对照招标书哪一部分来写，就把那一部分里与本章对应的条款目录写进本章；不要只处理其中一章、让其他章空着。"
-        "不同招标书的章节名和指向部分都不同，一律以本份原文为准，禁止套用预置章节。"
-        "短名称原样做标题；需求说明句必须提炼成短标题，严禁把招标原文整句当目录。"
-        "承诺类、授权委托类、报价类、商务/技术偏差表类等招标已给固定格式、填写后打印签字的文件，目录只保留文件名，不要展开下级。",
+        "先检索格式节，再按该节列出的文件名编写目录。不要从第 1 页逐页翻到最后。",
         "",
     ]
+    from .tender_toc import composition_for_volume, extract_bid_composition, extract_response_rules
+
+    corpus = (tender_text or "").strip()
+    composition = composition_for_volume(extract_bid_composition(corpus), doc_kind)
+    rules = extract_response_rules(corpus)
+    if composition:
+        lines.append("下列文件名就是本次分册的一级章，按顺序，不要另起一级章：")
+        for item in composition:
+            lines.append(f"- {item.get('title', '')}")
+        lines.append("")
+    else:
+        lines.append("没有抽出这份清单。不要套默认章节，也不要用评标办法、合同条款代替。")
+        lines.append("")
+    if rules:
+        lines.append("本份招标书对应答写法的规定（正文照下列原句写，不要改成别的格式）：")
+        for rule in rules:
+            lines.append(f"- {rule}")
+        lines.append("")
+    else:
+        lines.append("本份招标书没有抽出逐项应答写法。不要套用「满足/部分满足/不满足」或任何固定应答表。")
+        lines.append("")
+    req_tree = (tender_toc or {}).get("reqTree") if (doc_kind or "tech").strip().lower() != "business" else None
+    if req_tree:
+        lines.append("下列是招标书技术与功能需求的原结构。二级、三级照抄，一条一个标题，不要合并，不要改名：")
+        lines.append(_requirement_tree_text(req_tree))
+        lines.append("")
     if score_rules:
-        lines.append("评分维度（仅供划分卷册与标注分值对应关系，禁止按评分点另起一套目录）：")
+        lines.append("这些句子用来核对，不要写成章节：")
         for r in score_rules[:40]:
             lines.append(f"- [{r.get('dimension', '')}] 权重 {r.get('weight', 0)} 分：{r.get('detail', '')}")
         lines.append("")
     if must_respond:
-        lines.append("解析出的实质性/否决条款（必须在目录中醒目单列，不得埋入其他节点）：")
+        lines.append("这些句子用来核对，不要写成章节：")
         for m in must_respond[:40]:
             lines.append(f"- [{m.get('type', '')}] {m.get('clause', '')}")
         lines.append("")
@@ -580,15 +1155,14 @@ def _build_outline_user_message(
             if title:
                 lines.append(f"- {title}" + (f"：{desc}" if desc else ""))
         lines.append("")
-    corpus = (tender_text or "").strip()
     if corpus and len(corpus) <= OUTLINE_INLINE_TENDER_MAX:
         lines.append("----------上传的招标文件原文（未抽取、未改写，全文已贴在下面）----------")
         lines.append(corpus)
     elif corpus:
         lines.append(
-            f"招标文件原文较长（约 {len(corpus)} 字），已经分页存入 read_tender(section=\"original\")，"
-            f"共约 {total_pages} 页，不给 query 时按 page 从 1 开始逐页调用通读，读完整份原文后再开始编制目录，"
-            "不要只读其中几页就下结论；也可以用 query 做关键词检索核对具体条款。"
+            f"招标文件原文较长（约 {len(corpus)} 字），已经存入 read_tender(section=\"original\")，共约 {total_pages} 页。"
+            "不要从第 1 页逐页翻到最后。用 query 检索「投标文件格式」「响应文件格式」「投标文件组成」「响应文件编制」「评分」，"
+            "找到本份招标书列出投标文件应含哪些文件的那一节，不限第几章，读中后再编目录。"
         )
     else:
         lines.append("（未能读取上传的招标文件原文，如确有必要请调用 read_tender 核实。）")
@@ -707,27 +1281,48 @@ def _compact_chapter_titles(nodes: list[dict]) -> None:
             _compact_chapter_titles(kids)
 
 
-def _markdown_to_chapters(text: str) -> list[dict]:
-    entries: list[tuple[int, str]] = []
+_MD_IDEA_LINE = re.compile(r"^思路[：:]\s*(.+)$")
+
+
+def _markdown_to_chapters(text: str, compact: bool = True) -> list[dict]:
+    """把目录 Markdown 转成章节树。compact=False 时保留完整标题，
+    给施工组织设计用：它的章名就是评分项原文，压短就对不上评分表了。"""
+    from .writer_tool_runtime import parse_source_refs
+
+    entries: list[dict] = []
     for raw in (text or "").replace("\r\n", "\n").split("\n"):
         line = raw.strip()
         if not line or line.startswith("```") or set(line) <= set("-—* "):
             continue
         match = _MD_HEADING.match(line)
         if not match:
+            if not entries:
+                continue
+            idea = _MD_IDEA_LINE.match(line)
+            if idea:
+                entries[-1]["idea"] = idea.group(1).strip()[:8000]
+                continue
+            refs = parse_source_refs(line)
+            if refs:
+                entries[-1]["refs"].extend(ref for ref in refs if ref not in entries[-1]["refs"])
             continue
-        title = _compact_catalog_title(_strip_generated_num(match.group(2)))
+        title = _strip_generated_num(match.group(2))
+        title = _compact_catalog_title(title) if compact else title.strip()
         if not title:
             continue
-        entries.append((len(match.group(1)), title))
+        entries.append({"level": len(match.group(1)), "title": title, "refs": [], "idea": ""})
     if not entries:
         return []
-    min_lv = min(lv for lv, _ in entries)
+    min_lv = min(item["level"] for item in entries)
     roots: list[dict] = []
     stack: list[tuple[int, dict]] = []
-    for lv, title in entries:
-        level = lv - min_lv + 1
-        node = {"title": title, "children": []}
+    for entry in entries:
+        level = entry["level"] - min_lv + 1
+        node: dict = {"title": entry["title"], "children": []}
+        if entry["refs"]:
+            node["sourceRefs"] = entry["refs"]
+        if entry["idea"]:
+            node["idea"] = entry["idea"]
         while stack and stack[-1][0] >= level:
             stack.pop()
         if not stack:
@@ -984,6 +1579,1011 @@ def _match_dimension(title: str, score_rules: list[dict]) -> str | None:
     return None
 
 
+_GENERIC_OUTLINE_IDEA = re.compile(r"^对应「[^」]*」，须严格按招标文件相关条款应答，不得漏项。?$")
+_TECH_SCHEME_HINT = re.compile(r"部署|接口|实施|运维|安全|迁移|售后|演示")
+_BUSINESS_FORM_HINT = re.compile(r"投标函|授权委托|资格|报价|业绩|财务|信用|资信|承诺")
+
+
+def _short_requirement_title(raw: str) -> tuple[str, str]:
+    text = re.sub(r"^(?:（\d{1,2}）|\(\d{1,2}\)|\d{1,2}[、.．])\s*", "", (raw or "").strip())
+    split_at = text.find("：")
+    if split_at < 0:
+        split_at = text.find(":")
+    if 0 < split_at <= 24:
+        title, body = text[:split_at].strip(), text[split_at + 1 :].strip()
+    else:
+        title, body = text, text
+    title = _compact_catalog_title(title) or title[:12]
+    return title, body or text
+
+
+def business_item_belongs_in_tech(title: str, body: str = "") -> bool:
+    """部署、接口、实施、安全、运维、演示方案进技术标；函件、报价、资格留在商务标。"""
+    name = title or ""
+    if is_original_form_title(name) or _BUSINESS_SKIP_TITLE.search(name):
+        return False
+    if _BUSINESS_FORM_HINT.search(name) and not _TECH_SCHEME_HINT.search(name):
+        return False
+    return bool(_TECH_SCHEME_HINT.search(name) or _TECH_SCHEME_HINT.search(body or ""))
+
+
+def _idea_from_requirement(title: str, body: str) -> str:
+    detail = (body or "").strip()
+    if detail:
+        return f"【对应招标「{title}」】{detail}"[:8000]
+    return f"【对应招标「{title}」】按该条款全部要求逐项应答，不得漏项。"
+
+
+def _outline_title_blob(nodes: list[dict]) -> str:
+    return "\n".join(str(node.get("title") or "") for node in _iter_chapter_nodes(nodes))
+
+
+def _coverage_host(chapters: list[dict]) -> dict:
+    preferred = None
+    for node in _iter_chapter_nodes(chapters):
+        title = str(node.get("title") or "")
+        if is_original_form_title(title):
+            continue
+        if "逐项" in title or "功能需求" in title:
+            return node
+        if preferred is None and "技术" in title:
+            preferred = node
+    if preferred is not None:
+        return preferred
+    for node in chapters:
+        if isinstance(node, dict) and not is_original_form_title(str(node.get("title") or "")):
+            return node
+    host = {"title": "技术方案", "children": []}
+    chapters.append(host)
+    return host
+
+
+PARENT_CONTEXT_MARK = "【上级条款全文"
+SUMMARY_CHAPTER_MARK = "【汇总章】"
+NO_SOURCE_MARK = "【未找到对应招标条款】"
+_ITEM_NUM_PREFIX = re.compile(r"^(?:（\d{1,2}）|\(\d{1,2}\)|\d{1,2}[、.．])\s*")
+
+
+def _clean_item_text(raw: str) -> str:
+    return _ITEM_NUM_PREFIX.sub("", (raw or "").strip()).strip()
+
+
+def _is_generic_idea(idea: str) -> bool:
+    text = (idea or "").strip()
+    return not text or bool(_GENERIC_OUTLINE_IDEA.match(text))
+
+
+def _title_core(title: str) -> str:
+    return re.sub(r"\s+", "", _compact_catalog_title(title) or title or "")
+
+
+def _clauses_for_title(body: str, title: str) -> str:
+    """从上级条款里挑出和本章标题相关的分句；一句都挑不出时返回空串。"""
+    core = _title_core(title)
+    for suffix in ("方案", "要求", "管理", "设计", "说明"):
+        if core.endswith(suffix) and len(core) > len(suffix) + 1:
+            core = core[: -len(suffix)]
+            break
+    if len(core) < 2:
+        return ""
+    grams = {core[i : i + 2] for i in range(len(core) - 1)}
+    need = max(2, (len(grams) + 1) // 2) if len(grams) > 1 else 1
+    picked: list[str] = []
+    for clause in re.split(r"[。；;\n，]", body or ""):
+        text = clause.strip()
+        if not text:
+            continue
+        compact = re.sub(r"\s+", "", text)
+        hits = sum(1 for g in grams if g in compact)
+        if core in compact or hits >= need:
+            picked.append(text)
+    return "；".join(picked)
+
+
+def _node_title(node: dict) -> str:
+    return str(node.get("title") or "").strip()
+
+
+def _composition_key(title: str) -> str:
+    """比对大章是否同一章用的键。连接词也去掉：须知写「身份证明或授权委托书」、
+    格式章写「身份证明和授权委托书」，指的是同一章。"""
+    return re.sub(r"[\s。；;，,：:、·•]|[或和及与]", "", title or "")
+
+
+def _is_same_large_chapter(official: str, other: str) -> bool:
+    left = _composition_key(official)
+    right = _composition_key(other)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    short, long = (left, right) if len(left) <= len(right) else (right, left)
+    return len(short) >= 4 and short in long
+
+
+_REVIEW_SHELL_TITLES = {
+    "形式评审",
+    "资格评审",
+    "响应性评审",
+    "投标文件组成",
+    "响应文件组成",
+    "投标文件的组成",
+    "响应文件的组成",
+    "投标有效期",
+}
+_REVIEW_SHELL_LEAD = re.compile(r"^符合.{0,30}(格式的要求|格式要求)$")
+_QUOTE_SHELL_TITLES = {"投标报价", "报价文件", "最高投标限价"}
+
+
+def _plain_title(title: str) -> str:
+    from .tender_toc import strip_heading_prefix
+
+    return re.sub(r"[\s\"“”「」]", "", strip_heading_prefix(title or ""))
+
+
+def _is_review_shell(title: str, composition: list[dict], *, doc_kind: str) -> bool:
+    """评标表里的「符合格式要求」「形式评审」不是投标文件。组成清单里真有的文件名保留。"""
+    plain = _plain_title(title)
+    if not plain:
+        return False
+    # 只在标题和组成条目是同一个文件名时保留。「投标文件格式」出现在「符合第七章投标文件格式的要求」里，仍是评标标准。
+    official = {_plain_title(str(item.get("title") or "")) for item in composition}
+    if plain in official:
+        return False
+    if plain in _REVIEW_SHELL_TITLES or _REVIEW_SHELL_LEAD.match(plain):
+        return True
+    return (doc_kind or "").strip().lower() == "business" and plain in _QUOTE_SHELL_TITLES
+
+
+def drop_review_shells(chapters: list[dict], composition: list[dict] | None, doc_kind: str = "tech") -> list[dict]:
+    """去掉评标标准套出来的空壳。空壳下面如果已经有格式文件，把那些文件提升为同级。"""
+    slots = [item for item in (composition or []) if isinstance(item, dict)]
+
+    def clean(nodes: list[dict]) -> list[dict]:
+        kept: list[dict] = []
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            children = node.get("children")
+            node["children"] = clean(children) if isinstance(children, list) else []
+            if _is_review_shell(_node_title(node), slots, doc_kind=doc_kind):
+                kept.extend(node["children"])
+                continue
+            kept.append(node)
+        return kept
+
+    chapters[:] = clean(chapters)
+    return chapters
+
+
+_TENDER_BODY_CHAPTER = re.compile(r"评标办法|评标方法|合同条款|合同格式|通用合同|专用合同|投标人须知")
+_FORMAT_CHAPTER = re.compile(r"投标文件格式|响应文件格式|内容及格式|内容与格式|投标文件编制|响应文件编制")
+_MAJOR_CHAPTER = re.compile(r"^第[0-9一二三四五六七八九十百零]+章")
+_NOT_A_BID_FILE = re.compile(
+    r"未出现|签字盖章|机器码|标识码|上传地址|上传IP|IP地址|最高投标限价|价格清单|"
+    r"限价控制|费用包含|评审因素|评审标准|大写金额|已标价工程量清单|符合第"
+)
+_ROLE_WORD = re.compile(r"项目经理|技术负责人|施工负责人|设计负责人|安全负责人|质量负责人")
+
+
+def _short_heading(line: str) -> str:
+    from .tender_toc import strip_heading_prefix
+
+    plain = re.sub(r"[\s\"“”「」]", "", strip_heading_prefix(line or ""))
+    if not plain or len(plain) < 2 or len(plain) > 22:
+        return ""
+    if re.search(r"[。；;]", plain):
+        return ""
+    return plain
+
+
+def _chapter_heading_sets(text: str) -> tuple[set[str], set[str]]:
+    """返回（评标办法/合同条款/投标人须知里的短标题，格式节里的短标题）。"""
+    body: set[str] = set()
+    form: set[str] = set()
+    bucket: set[str] | None = None
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or not _MAJOR_CHAPTER.match(line):
+            if bucket is not None:
+                heading = _short_heading(line)
+                if heading:
+                    bucket.add(heading)
+            continue
+        if _FORMAT_CHAPTER.search(line):
+            bucket = form
+        elif _TENDER_BODY_CHAPTER.search(line):
+            bucket = body
+        else:
+            bucket = None
+    return body, form
+
+
+def drop_tender_body_nodes(chapters: list[dict], composition: list[dict] | None, tender_text: str) -> list[dict]:
+    """评标办法、合同条款、投标人须知是招标书自己的内容，不是应标章节。"""
+    if not isinstance(chapters, list):
+        return chapters
+    body, form = _chapter_heading_sets(tender_text)
+    official = {_plain_title(str(item.get("title") or "")) for item in (composition or []) if isinstance(item, dict)}
+
+    from .tender_toc import is_bid_review_factor
+
+    def protected(title: str) -> bool:
+        plain = _plain_title(title)
+        if not plain or is_bid_review_factor(title):
+            return False
+        if plain in official or plain in form or "附录" in plain:
+            return True
+        return bool(_ROLE_WORD.search(plain)) and not _NOT_A_BID_FILE.search(plain)
+
+    def foreign(title: str) -> bool:
+        plain = _plain_title(title)
+        if not plain or protected(title):
+            return False
+        if plain in body or is_bid_review_factor(title) or _NOT_A_BID_FILE.search(plain):
+            return True
+        return False
+
+    def clean(nodes: list[dict], parent_foreign: bool) -> list[dict]:
+        kept: list[dict] = []
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            children = node.get("children")
+            kids = children if isinstance(children, list) else []
+            drop = parent_foreign or foreign(_node_title(node))
+            if drop and not protected(_node_title(node)):
+                kept.extend(clean(kids, True))
+                continue
+            node["children"] = clean(kids, False)
+            kept.append(node)
+        return kept
+
+    chapters[:] = clean(chapters, False)
+    return chapters
+
+
+def _matches_format_file(title: str, official: str) -> bool:
+    """节点是不是这份格式文件。评标句子里夹着文件名，不算。"""
+    if _is_review_shell(title, [], doc_kind="business"):
+        return False
+    if _plain_title(title) == _plain_title(official):
+        return True
+    return _is_same_large_chapter(official, title)
+
+
+def promote_format_chapters(chapters: list[dict], composition: list[dict] | None) -> list[dict]:
+    """本份招标书列出的投标文件就是一级章，不限第几章。外面再套的评标句子或自拟总标题去掉。"""
+    officials = [
+        str(item.get("title") or "").strip()
+        for item in (composition or [])
+        if isinstance(item, dict) and str(item.get("title") or "").strip()
+    ]
+    if not officials or not isinstance(chapters, list):
+        return chapters
+    found: dict[str, dict] = {}
+
+    def walk(nodes: list[dict]) -> None:
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            title = _node_title(node)
+            for official in officials:
+                if not _matches_format_file(title, official):
+                    continue
+                current = found.get(official)
+                if current is None or _plain_title(title) == _plain_title(official):
+                    found[official] = node
+            children = node.get("children")
+            if isinstance(children, list):
+                walk(children)
+
+    walk(chapters)
+    ordered: list[dict] = []
+    used: set[int] = set()
+    for item in composition or []:
+        if not isinstance(item, dict):
+            continue
+        official = str(item.get("title") or "").strip()
+        if not official:
+            continue
+        node = found.get(official)
+        if node is None or id(node) in used:
+            volume = str(item.get("volume") or "").strip()
+            node = {"title": official, "children": [], "composition": True}
+            if volume in ("tech", "business"):
+                node["part"] = volume
+        else:
+            used.add(id(node))
+            node["title"] = official
+            node["composition"] = True
+            children = node.get("children") if isinstance(node.get("children"), list) else []
+            node["children"] = [
+                child
+                for child in children
+                if isinstance(child, dict)
+                and not any(_matches_format_file(_node_title(child), other) for other in officials if other != official)
+            ]
+        ordered.append(node)
+    chapters[:] = ordered
+    return chapters
+
+
+def ensure_composition_present(chapters: list[dict], composition: list[dict] | None) -> None:
+    """格式章点名、目录里还没有的文件，补成一级章。不改已有章的顺序，也不删多出来的章。"""
+    if not isinstance(chapters, list):
+        return
+    present = [_node_title(node) for node in chapters if isinstance(node, dict)]
+    for item in composition or []:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        if not title or any(_is_same_large_chapter(title, name) for name in present):
+            continue
+        volume = str(item.get("volume") or "").strip()
+        node: dict = {"title": title, "children": [], "composition": True}
+        if volume in ("tech", "business"):
+            node["part"] = volume
+        chapters.append(node)
+        present.append(title)
+
+
+_NAMED_ROLES = ("技术负责人", "施工技术负责人")
+
+
+def ensure_named_roles(chapters: list[dict]) -> None:
+    """项目管理机构已经按岗位拆开时，条款点了名但没有节点的岗位补进去。"""
+    host = None
+    for node in _iter_chapter_nodes(chapters):
+        kids = [_node_title(child) for child in (node.get("children") or []) if isinstance(child, dict)]
+        if any("项目经理" in kid for kid in kids) and any("负责人" in kid for kid in kids):
+            host = node
+            break
+    if host is None:
+        return
+    blob = "\n".join(
+        f"{_node_title(node)}\n{node.get('requirement') or ''}\n{node.get('idea') or ''}"
+        for node in _iter_chapter_nodes(chapters)
+    )
+    children = host.setdefault("children", [])
+    if not isinstance(children, list):
+        return
+    have = " ".join(_node_title(child) for child in children if isinstance(child, dict))
+    for role in _NAMED_ROLES:
+        if role in have or role not in blob:
+            continue
+        children.append({"title": role, "children": [], "part": host.get("part") or "business"})
+        have = f"{have} {role}"
+
+
+def annotate_composition(chapters: list[dict], items: list[dict] | None) -> list[str]:
+    """按本份组成清单给一级章打标并对齐措辞，不改顺序、不增删章、不搬动小节。
+
+    打上 composition 的章保留完整标题：格式章的章名常超过十六字，不能压成短标题。
+    对不上清单的地方作为问题返回，交给下一轮评审重编，而不是直接改写智能体编好的目录。
+    重复调用不会改变结果。
+    """
+    slots = [
+        {"title": str(item.get("title") or "").strip(), "volume": str(item.get("volume") or "").strip()}
+        for item in (items or [])
+        if isinstance(item, dict) and str(item.get("title") or "").strip()
+    ]
+    if not slots or not isinstance(chapters, list):
+        return []
+    problems: list[str] = []
+    order: list[int] = []
+    used: set[int] = set()
+    for node in chapters:
+        if not isinstance(node, dict):
+            continue
+        title = _node_title(node)
+        if not title:
+            continue
+        hit = next(
+            (i for i, slot in enumerate(slots) if i not in used and _is_same_large_chapter(slot["title"], title)),
+            -1,
+        )
+        if hit < 0:
+            problems.append(f"一级章「{title}」不在本份组成清单里，请挂到最对应的大章下面，不要另起一级章")
+            continue
+        used.add(hit)
+        order.append(hit)
+        slot = slots[hit]
+        node["composition"] = True
+        node["title"] = slot["title"]
+        if slot["volume"] in ("tech", "business") and node.get("part") not in ("tech", "business", "form"):
+            node["part"] = slot["volume"]
+    for index, slot in enumerate(slots):
+        if index not in used:
+            problems.append(f"组成清单里的「{slot['title']}」没有对应的一级章，请按原文名称补上")
+    if order != sorted(order):
+        problems.append(
+            "一级章顺序与本份组成清单不一致，请按清单原文顺序重排："
+            + "、".join(slot["title"] for slot in slots)
+        )
+    return problems
+
+
+def _set_node_source(node: dict, refs: list[str], items: dict[str, str], part: str = "tech") -> None:
+    body = "\n".join(_clean_item_text(items[ref]) for ref in refs if ref in items).strip()
+    if not body:
+        return
+    node["sourceRefs"] = list(refs)
+    node["requirement"] = body
+    node["idea"] = _idea_from_requirement(_node_title(node), body)
+    node["aiIdea"] = node["idea"]
+    node["part"] = part if part in ("tech", "business") else "tech"
+
+
+def _search_original_snippet(corpus: str, title: str, limit: int = 600) -> str:
+    core = _title_core(title)
+    if len(core) < 3 or not corpus:
+        return ""
+    lines: list[str] = []
+    for line in corpus.splitlines():
+        if core in re.sub(r"\s+", "", line):
+            text = line.strip()
+            if text and text not in lines:
+                lines.append(text)
+        if len(lines) >= 3:
+            break
+    return "\n".join(lines)[:limit]
+
+
+def _is_leaf(node: dict) -> bool:
+    kids = node.get("children")
+    return not (isinstance(kids, list) and kids)
+
+
+def bind_requirements(
+    chapters: list[dict],
+    tech_text: str,
+    business_text: str = "",
+    tender_text: str = "",
+    doc_kind: str = "tech",
+) -> dict:
+    """按条目编号把招标条款原文挂到节点上，并把没挂上的节点如实标出来。
+
+    1. 节点的「依据」编号 -> 该条原文成为 requirement，编写思路带上条款全文（含数字、期限）。
+    2. 没有依据的下级节点沿用上级条款，只挑出和本章标题相关的分句；挑不出就带上级全文并标注。
+    3. 都没有时在招标原文里按标题检索；仍没有就写明「未找到对应招标条款」，计入报告。
+    """
+    from .writer_tool_runtime import requirement_item_map
+
+    items = requirement_item_map({"tech": tech_text, "business": business_text})
+    report: dict = {"noSource": [], "boundByModel": 0, "bound": 0}
+    volume_part = "business" if (doc_kind or "tech").strip().lower() == "business" else "tech"
+    cited: set[str] = set()
+
+    def walk(nodes: list[dict], parent: tuple[str, str] | None) -> None:
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            title = _node_title(node)
+            if is_original_form_title(title):
+                continue
+            if volume_part == "business" and node.get("part") != "form":
+                node["part"] = "business"
+            refs = [ref for ref in (node.get("sourceRefs") or []) if ref in items]
+            context: tuple[str, str] | None = parent
+            if refs:
+                _set_node_source(node, refs, items, volume_part)
+                cited.update(refs)
+                report["boundByModel"] += 1
+                context = (title, str(node.get("requirement") or ""))
+            else:
+                node.pop("sourceRefs", None)
+                own_req = str(node.get("requirement") or "").strip()
+                if own_req:
+                    context = (title, own_req)
+                elif parent and parent[1]:
+                    piece = _clauses_for_title(parent[1], title)
+                    if piece:
+                        node["requirement"] = piece
+                        node["idea"] = (
+                            f"【对应招标「{parent[0]}」下的「{title}」】{piece}"
+                        )[:8000]
+                    else:
+                        node["requirement"] = parent[1]
+                        node["idea"] = (
+                            f"{PARENT_CONTEXT_MARK}，本章只答与「{title}」相关的部分】{parent[1]}"
+                        )[:8000]
+                    node["aiIdea"] = node["idea"]
+                elif _is_leaf(node):
+                    snippet = _search_original_snippet(tender_text, title)
+                    if snippet:
+                        node["requirement"] = snippet
+                        node["idea"] = f"【对应招标原文「{title}」】{snippet}"[:8000]
+                    else:
+                        node["idea"] = f"{NO_SOURCE_MARK}请对照招标文件补充「{title}」的响应要求。"
+                        report["noSource"].append(title)
+                    node["aiIdea"] = node["idea"]
+                elif _is_generic_idea(str(node.get("idea") or "")):
+                    node["idea"] = f"本章总述「{title}」，概括下级各节的响应思路，条款细节写在下级章节。"
+                    node["aiIdea"] = node["idea"]
+            kids = node.get("children")
+            if isinstance(kids, list) and kids:
+                walk(kids, context)
+                if context is not None and context is not parent:
+                    _assign_residual_facts(node, context[1])
+
+    walk(chapters, None)
+    report["cited"] = sorted(cited)
+    return report
+
+
+FACTS_MARK = "【本章必须写明指标："
+
+
+def _leaf_descendants(node: dict) -> list[dict]:
+    leaves: list[dict] = []
+    for child in node.get("children") or []:
+        if not isinstance(child, dict) or is_original_form_title(_node_title(child)):
+            continue
+        if _is_leaf(child):
+            leaves.append(child)
+        else:
+            leaves.extend(_leaf_descendants(child))
+    return leaves
+
+
+def _assign_residual_facts(node: dict, clause: str) -> None:
+    """上级条款里的数字指标，若下级各章切出来的分句都没覆盖，就指给第一个沿用上级全文的叶子章去写，
+    避免条款只写在不撰写正文的上级节点上，数字最终没人答。"""
+    from .writer_tool_runtime import extract_hard_facts
+
+    facts = extract_hard_facts(clause)
+    if not facts:
+        return
+    leaves = _leaf_descendants(node)
+    if not leaves:
+        return
+    covered: set[str] = set()
+    for leaf in leaves:
+        idea = str(leaf.get("idea") or "")
+        if PARENT_CONTEXT_MARK in idea:
+            continue
+        covered.update(extract_hard_facts(str(leaf.get("requirement") or "")))
+    residual = [fact for fact in facts if fact not in covered]
+    if not residual:
+        return
+    target = next((leaf for leaf in leaves if PARENT_CONTEXT_MARK in str(leaf.get("idea") or "")), leaves[0])
+    idea = str(target.get("idea") or "")
+    if FACTS_MARK in idea:
+        return
+    target["idea"] = (idea + f"\n{FACTS_MARK}{'、'.join(residual)}】")[:8000]
+    target["aiIdea"] = target["idea"]
+
+
+SUBPOINTS_MARK = "【本章按小节逐点应答："
+
+
+def _req_key(node: dict) -> str:
+    return re.sub(r"\s+", "", str(node.get("requirement") or ""))
+
+
+def merge_shared_requirement_leaves(chapters: list[dict]) -> int:
+    """同一条款被拆成多个叶子章时合成一章，原始需求只贴一次。
+
+    判断依据：同一个上级下的叶子章，要么只能沿用上级全文，要么各自的条款原文逐字相同。
+    全部下级都在这一组时，上级自己成为叶子章；否则保留组里第一章。被合并的小点标题写进编写思路，
+    正文里用小节区分。返回合并掉的叶子数。
+    """
+    merged = 0
+
+    def is_shared_leaf(kid: dict) -> bool:
+        return _is_leaf(kid) and not is_original_form_title(_node_title(kid)) and not kid.get("formKeys")
+
+    def walk(nodes: list[dict]) -> None:
+        nonlocal merged
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            kids = [k for k in (node.get("children") or []) if isinstance(k, dict)]
+            if not kids:
+                continue
+            walk(kids)
+            groups: dict[str, list[dict]] = {}
+            for kid in kids:
+                if not is_shared_leaf(kid):
+                    continue
+                if PARENT_CONTEXT_MARK in str(kid.get("idea") or ""):
+                    key = _req_key(node) or _req_key(kid)
+                else:
+                    key = _req_key(kid)
+                if len(key) >= 20:
+                    groups.setdefault(key, []).append(kid)
+            for key, group in groups.items():
+                if len(group) < 2:
+                    continue
+                titles = [_node_title(k) for k in group if _node_title(k)]
+                all_kids = len(group) == len(kids)
+                host = node if all_kids else group[0]
+                rest = [k for k in group if k is not host]
+                if all_kids:
+                    base = group[0]
+                    for field in ("requirement", "sourceRefs"):
+                        if base.get(field) and not host.get(field):
+                            host[field] = base[field]
+                    refs: list = []
+                    for kid in group:
+                        for ref in kid.get("sourceRefs") or []:
+                            if ref not in refs:
+                                refs.append(ref)
+                    if refs:
+                        host["sourceRefs"] = refs
+                    node["children"] = []
+                else:
+                    node["children"] = [k for k in kids if not any(k is r for r in rest)]
+                host["idea"] = _idea_from_requirement(_node_title(host), str(host.get("requirement") or ""))
+                idea = str(host.get("idea") or "")
+                if SUBPOINTS_MARK not in idea:
+                    idea = (idea + f"\n{SUBPOINTS_MARK}{'；'.join(titles)}】")[:8000]
+                    host["idea"] = idea
+                    host["aiIdea"] = idea
+                merged += len(rest) if not all_kids else len(group)
+                kids = [k for k in (node.get("children") or []) if isinstance(k, dict)]
+
+    walk(chapters)
+    return merged
+
+
+def _tree_cited_ids(chapters: list[dict]) -> set[str]:
+    cited: set[str] = set()
+    for node in _iter_chapter_nodes(chapters):
+        for ref in node.get("sourceRefs") or []:
+            cited.add(str(ref))
+    return cited
+
+
+def _find_title_match(chapters: list[dict], title: str) -> dict | None:
+    core = _title_core(title)
+    if len(core) < 2:
+        return None
+    for node in _iter_chapter_nodes(chapters):
+        if is_original_form_title(_node_title(node)):
+            continue
+        current = _title_core(_node_title(node))
+        if current == core or (len(core) >= 3 and core in current):
+            return node
+    return None
+
+
+def ensure_tech_requirement_coverage(
+    chapters: list[dict],
+    tech_text: str,
+    business_text: str = "",
+    doc_kind: str = "tech",
+    report: dict | None = None,
+) -> list[dict]:
+    """技术标每一条应答需求（以及商务应答里的方案类条目）都必须有节点引用。
+
+    先按编号检查谁被引用了；没被引用的条目，标题相同的节点直接绑定，否则补成新章。
+    """
+    if (doc_kind or "tech").strip().lower() == "business":
+        return chapters
+    from .writer_tool_runtime import numbered_requirement_items, requirement_item_map
+
+    wanted: list[tuple[str, str, str]] = []
+    for item_id, raw in numbered_requirement_items(tech_text, "tech"):
+        title, body = _short_requirement_title(raw)
+        if title:
+            wanted.append((item_id, title, body))
+    for item_id, raw in numbered_requirement_items(business_text, "business"):
+        title, body = _short_requirement_title(raw)
+        if title and business_item_belongs_in_tech(title, body):
+            wanted.append((item_id, title, body))
+    if not chapters:
+        chapters = [{"title": "技术方案", "children": []}]
+    items = requirement_item_map({"tech": tech_text, "business": business_text})
+    cited = _tree_cited_ids(chapters)
+    host = _coverage_host(chapters)
+    children = host.get("children")
+    if not isinstance(children, list):
+        children = []
+        host["children"] = children
+    matched = 0
+    backfilled = 0
+    for item_id, title, body in wanted:
+        if item_id in cited:
+            continue
+        node = _find_title_match(chapters, title)
+        if node is not None:
+            refs = [str(ref) for ref in (node.get("sourceRefs") or [])] + [item_id]
+            _set_node_source(node, refs, items)
+            cited.add(item_id)
+            matched += 1
+            continue
+        new_node = {"title": title, "children": [], "part": "tech"}
+        _set_node_source(new_node, [item_id], items)
+        children.append(new_node)
+        cited.add(item_id)
+        backfilled += 1
+    if report is not None:
+        report["total"] = len(wanted)
+        report["titleMatched"] = matched
+        report["backfilled"] = backfilled
+        report["boundByModel"] = len([1 for item_id, _, _ in wanted if item_id in cited]) - matched - backfilled
+    blob = _outline_title_blob(chapters)
+    table_host = host if host in chapters else chapters[0]
+    for node in chapters:
+        if isinstance(node, dict) and "技术" in str(node.get("title") or ""):
+            table_host = node
+            break
+    table_children = table_host.get("children")
+    if not isinstance(table_children, list):
+        table_children = []
+        table_host["children"] = table_children
+    if "逐项需求响应表" not in blob and "偏离表" not in blob:
+        table_children.append(
+            {
+                "title": "逐项需求响应表",
+                "children": [],
+                "part": "tech",
+                "requirement": "按本份招标书原文规定的应答写法，逐条响应技术需求。",
+                "idea": f"{SUMMARY_CHAPTER_MARK}按本份招标书原文规定的应答写法逐条响应技术需求。",
+                "aiIdea": f"{SUMMARY_CHAPTER_MARK}按本份招标书原文规定的应答写法逐条响应技术需求。",
+            }
+        )
+    return chapters
+
+
+def _business_volume_items(business_text: str) -> list[tuple[str, str, str]]:
+    """留在商务标的条目：(编号, 短名, 正文)。方案类和演示类不在此列。"""
+    from .writer_tool_runtime import numbered_requirement_items
+
+    wanted: list[tuple[str, str, str]] = []
+    for item_id, raw in numbered_requirement_items(business_text, "business"):
+        title, body = _short_requirement_title(raw)
+        if title and not business_item_belongs_in_tech(title, body):
+            wanted.append((item_id, title, body))
+    return wanted
+
+
+def _business_coverage_host(chapters: list[dict]) -> dict:
+    for keywords in (("商务", "报价"), ("资格", "响应")):
+        for node in chapters:
+            if not isinstance(node, dict):
+                continue
+            title = _node_title(node)
+            if is_original_form_title(title):
+                continue
+            if any(word in title for word in keywords):
+                return node
+    for node in chapters:
+        if isinstance(node, dict) and not is_original_form_title(_node_title(node)):
+            return node
+    host = {"title": "商务响应", "children": [], "part": "business"}
+    chapters.append(host)
+    return host
+
+
+def ensure_business_requirement_coverage(
+    chapters: list[dict],
+    business_text: str = "",
+    report: dict | None = None,
+) -> list[dict]:
+    """商务标里不归技术标的每一条应答都要有节点引用。标题对得上就绑定，否则补章。"""
+    from .writer_tool_runtime import requirement_item_map
+
+    wanted = _business_volume_items(business_text)
+    if not chapters:
+        chapters = [{"title": "商务响应", "children": [], "part": "business"}]
+    items = requirement_item_map({"business": business_text})
+    cited = _tree_cited_ids(chapters)
+    host = _business_coverage_host(chapters)
+    children = host.get("children")
+    if not isinstance(children, list):
+        children = []
+        host["children"] = children
+    matched = 0
+    backfilled = 0
+    for item_id, title, _body in wanted:
+        if item_id in cited:
+            continue
+        node = _find_title_match(chapters, title)
+        if node is not None:
+            refs = [str(ref) for ref in (node.get("sourceRefs") or [])] + [item_id]
+            _set_node_source(node, refs, items, "business")
+            cited.add(item_id)
+            matched += 1
+            continue
+        new_node = {"title": title, "children": [], "part": "business"}
+        _set_node_source(new_node, [item_id], items, "business")
+        children.append(new_node)
+        cited.add(item_id)
+        backfilled += 1
+    if report is not None:
+        report["total"] = len(wanted)
+        report["titleMatched"] = matched
+        report["backfilled"] = backfilled
+        report["boundByModel"] = len([1 for item_id, _, _ in wanted if item_id in cited]) - matched - backfilled
+    return chapters
+
+
+_DEVIATION_HINT = re.compile(r"偏离表|偏差表")
+_PAYMENT_HINT = re.compile(r"付款")
+_PAYMENT_DETAIL = re.compile(r"比例|节点|里程碑")
+_QUOTE_DETAIL_TITLE = re.compile(r"报价明细|分项报价|报价表|报价清单")
+
+
+def _is_quote_node(title: str) -> bool:
+    compact = re.sub(r"\s+", "", title or "")
+    if not compact or "开标一览" in compact or is_original_form_title(compact):
+        return False
+    return "报价" in compact
+
+
+def _is_quote_detail_title(title: str) -> bool:
+    compact = re.sub(r"\s+", "", title or "")
+    if not _is_quote_node(compact):
+        return False
+    return bool(_QUOTE_DETAIL_TITLE.search(compact))
+
+
+def _enumerated_pieces(text: str) -> list[str]:
+    """条款里的编号行，或顿号、分号隔开的短分项。不足两项时返回空。"""
+    numbered = re.findall(
+        r"(?:^|\n)\s*(?:\d{1,2}[、.．]|（\d{1,2}）|\(\d{1,2}\))\s*([^\n]+)",
+        text or "",
+    )
+    cleaned = [item.strip(" ；;，,") for item in numbered if item.strip()]
+    if len(cleaned) >= 2:
+        return cleaned
+    best: list[str] = []
+    for segment in re.split(r"[。\n]", text or ""):
+        body = segment
+        if "：" in body:
+            body = body.split("：", 1)[1]
+        elif ":" in body:
+            body = body.split(":", 1)[1]
+        parts = [part.strip(" ；;，,：: ") for part in re.split(r"[、；;]", body)]
+        parts = [part for part in parts if 1 < len(part) <= 24]
+        if len(parts) > len(best):
+            best = parts
+    return best if len(best) >= 2 else []
+
+
+def _clauses_mentioning(text: str, pattern: re.Pattern[str]) -> str:
+    picked = [chunk.strip() for chunk in re.split(r"[。\n]", text or "") if chunk.strip() and pattern.search(chunk)]
+    return "。".join(picked)[:4000]
+
+
+def _sibling_list(nodes: list[dict], target: dict) -> list[dict] | None:
+    if any(node is target for node in nodes):
+        return nodes
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        children = node.get("children")
+        if isinstance(children, list):
+            found = _sibling_list(children, target)
+            if found is not None:
+                return found
+    return None
+
+
+def _append_business_child(parent: dict, title: str, requirement: str) -> dict:
+    name = _compact_catalog_title(title) or (title or "应答")[:24]
+    child = {
+        "title": name,
+        "children": [],
+        "part": "business",
+        "requirement": requirement,
+        "idea": _idea_from_requirement(name, requirement),
+    }
+    child["aiIdea"] = child["idea"]
+    children = parent.get("children")
+    if not isinstance(children, list):
+        children = []
+        parent["children"] = children
+    children.append(child)
+    return child
+
+
+def _descendant_has_keyword(node: dict, keyword: str) -> bool:
+    for child in node.get("children") or []:
+        if not isinstance(child, dict):
+            continue
+        if keyword in _node_title(child) or _descendant_has_keyword(child, keyword):
+            return True
+    return False
+
+
+def _widen_bound_title(node: dict, items: dict[str, str]) -> None:
+    """节点只绑了一条，标题却只覆盖短名或顿号列举的第一项时，改成该条短名。"""
+    refs = [str(ref) for ref in (node.get("sourceRefs") or []) if str(ref) in items]
+    if len(refs) != 1:
+        return
+    short, body = _short_requirement_title(items[refs[0]])
+    current = _node_title(node)
+    if not short or short == current or len(short) > 24 or len(current) < 2 or len(short) <= len(current):
+        return
+    first = re.split(r"[、，,；;]", short)[0].strip()
+    narrower = short.startswith(current) or bool(first) and (current == first or current.startswith(first))
+    if not narrower:
+        return
+    node["title"] = short
+    item_text = _clean_item_text(items[refs[0]])
+    if len(item_text) > len(str(node.get("requirement") or "")):
+        node["requirement"] = item_text
+    text = str(node.get("requirement") or "").strip() or body
+    node["idea"] = _idea_from_requirement(short, text)
+    node["aiIdea"] = node["idea"]
+
+
+def ensure_business_response_structure(
+    chapters: list[dict],
+    business_text: str = "",
+    tender_text: str = "",
+    has_deviation_form: bool = False,
+    has_quote_form: bool = False,
+) -> list[dict]:
+    """按条款补上需求偏离表、付款节点和报价分项。不写死某一份招标的分项名称。"""
+    from .writer_tool_runtime import requirement_item_map
+
+    if not isinstance(chapters, list):
+        return []
+    items = requirement_item_map({"business": business_text})
+    for node in _iter_chapter_nodes(chapters):
+        _widen_bound_title(node, items)
+
+    corpus = f"{business_text}\n{tender_text}"
+    has_deviation = any(
+        "偏离" in _node_title(node) or "偏差" in _node_title(node) for node in _iter_chapter_nodes(chapters)
+    )
+    if _DEVIATION_HINT.search(corpus) and not has_deviation and not has_deviation_form:
+        requirement = _clauses_mentioning(corpus, _DEVIATION_HINT) or (
+            "按招标文件偏离表格式逐条列明对需求的响应；未列示的视为已包含在报价和交付范围内。"
+        )
+        anchor = next(
+            (
+                node
+                for node in _iter_chapter_nodes(chapters)
+                if "响应" in _node_title(node) and "偏离" not in _node_title(node) and "偏差" not in _node_title(node)
+            ),
+            None,
+        )
+        created = {
+            "title": "商务及需求偏离表",
+            "children": [],
+            "part": "business",
+            "requirement": requirement,
+            "idea": _idea_from_requirement("商务及需求偏离表", requirement),
+        }
+        created["aiIdea"] = created["idea"]
+        if anchor is None:
+            _append_business_child(_business_coverage_host(chapters), "商务及需求偏离表", requirement)
+        else:
+            siblings = _sibling_list(chapters, anchor) or chapters
+            siblings.append(created)
+
+    for node in list(_iter_chapter_nodes(chapters)):
+        if has_quote_form:
+            break
+        if node.get("formKeys"):
+            continue
+        if not _is_quote_detail_title(_node_title(node)) or node.get("children"):
+            continue
+        pieces = _enumerated_pieces(str(node.get("requirement") or ""))
+        for piece in pieces:
+            short, body = _short_requirement_title(piece)
+            _append_business_child(node, short or piece[:12], body or piece)
+
+    for node in list(_iter_chapter_nodes(chapters)):
+        title = _node_title(node)
+        if not _is_quote_node(title) or "付款" in title:
+            continue
+        blob = f"{node.get('requirement') or ''}\n{node.get('idea') or ''}"
+        if not (_PAYMENT_HINT.search(blob) and _PAYMENT_DETAIL.search(blob)):
+            continue
+        if _descendant_has_keyword(node, "付款"):
+            continue
+        pay = _clauses_mentioning(blob, _PAYMENT_HINT) or blob.strip()
+        _append_business_child(node, "付款方式及节点", pay)
+    return chapters
+
+
 def _attach_tender_refs(nodes: list[dict], toc: dict | None, score_rules: list[dict]) -> None:
     items = _heading_index_items(toc)
 
@@ -997,9 +2597,14 @@ def _attach_tender_refs(nodes: list[dict], toc: dict | None, score_rules: list[d
                 req = (hit.get("req") or "") if hit else ""
                 n["idea"] = original_form_idea(title, str(n.get("idea") or ""), req)
                 n["aiIdea"] = n["idea"]
-                n["children"] = []
+                n["children"] = [
+                    child
+                    for child in (n.get("children") or [])
+                    if isinstance(child, dict) and "附录" in _node_title(child)
+                ]
                 if hit and isinstance(hit.get("index"), int):
                     n["sourceIndex"] = hit["index"]
+                walk(n["children"])
                 continue
             hit = _best_heading(title, items)
             if hit:
@@ -1162,6 +2767,10 @@ def _tech_leaves(outline: list[dict] | None) -> list[dict]:
     return leaves
 
 
+CHAPTER_MIN_CHARS = 500
+CHAPTER_CHARS_PER_REQ_CHAR = 1.2
+
+
 def chapter_char_targets(
     outline: list[dict] | None,
     page: dict | None,
@@ -1177,7 +2786,26 @@ def chapter_char_targets(
     for node in leaves:
         weights.append(max(_pref_float(node.get("weight"), 0), 0))
     if sum(weights) <= 0:
-        raw = [total_chars / len(leaves)] * len(leaves)
+        # 没有评分权重时按条款长度加权，并给每章设下限：条款答全优先于凑页数，总量可以超出预算。
+        needs = [
+            CHAPTER_MIN_CHARS
+            + int(
+                CHAPTER_CHARS_PER_REQ_CHAR
+                * len(
+                    re.sub(
+                        r"\s+",
+                        "",
+                        str(node.get("requirement") or "") or _requirement_from_idea(str(node.get("idea") or "")),
+                    )
+                )
+            )
+            for node in leaves
+        ]
+        need_sum = sum(needs) or 1
+        return {
+            str(node["id"]): max(int(total_chars * need / need_sum), need)
+            for node, need in zip(leaves, needs)
+        }
     else:
         weight_sum = sum(weights)
         raw = [total_chars * weight / weight_sum for weight in weights]
@@ -1213,13 +2841,19 @@ def generate_chapter_content(
     enable_figures: bool = True,
 ) -> str:
     """生成单章正文。技术章由 Harness 撰写，失败时抛出，不写占位正文。"""
-    kind = chapter_kind(chapter_title, part, chapter_idea, requirement or "")
+    has_kids = bool(chapter_id) and any(
+        isinstance(n, dict) and n.get("parentId") == chapter_id for n in (outline or [])
+    )
+    kind = chapter_kind(chapter_title, part, chapter_idea, requirement or "", has_children=has_kids)
     if kind == "form":
         return original_form_markdown(chapter_title, chapter_idea)
     if kind == "business":
         return business_skip_markdown(chapter_title)
 
-    req_text = (requirement or "").strip() or _requirement_from_idea(chapter_idea)
+    response_mode = kind == "response"
+    req_text, fact_text = resolve_chapter_requirement(
+        outline, chapter_id, requirement or "", chapter_idea, project_id or "", chapter_title
+    )
     layout = (writing_prefs or {}).get("layout") if isinstance(writing_prefs, dict) else None
     prompt = _build_chapter_context(
         project_name,
@@ -1238,9 +2872,16 @@ def generate_chapter_content(
         outline=outline,
         chapter_id=chapter_id,
     )
+    if response_mode:
+        prompt += (
+            "\n\n本章是商务应答，不是技术方案。按条款逐条写响应，写全其中的数字、期限和并列项。"
+            "涉及报价金额、单价、总价时一律写「待填」，不要编造价格。"
+        )
     from .writer_harness import write_tech_chapter
 
-    names = [str(feat.get("name") or "").strip() for feat in (product_features or []) if isinstance(feat, dict)]
+    names = [] if response_mode else [
+        str(feat.get("name") or "").strip() for feat in (product_features or []) if isinstance(feat, dict)
+    ]
     names = [name for name in names if name]
     solution = write_tech_chapter(
         user_id=user_id or "",
@@ -1250,7 +2891,11 @@ def generate_chapter_content(
         model_id=model_id,
         prompt=prompt,
         product_names=names,
-        require_gap=product_features is not None and not names,
+        require_gap=False if response_mode else product_features is not None and not names,
+        chapter_title=chapter_title,
+        chapter_idea=chapter_idea,
+        requirement=req_text,
+        fact_text=fact_text,
     )
     solution = sanitize_chapter_markdown(solution)
     if not solution:
@@ -1449,9 +3094,17 @@ def _as_float(value, default: float = 0) -> float:
         return default
 
 
-def _new_node(node_id: str, num: str, title: str, parent_id: str | None, item: dict, expanded: bool) -> dict:
+def _new_node(
+    node_id: str,
+    num: str,
+    title: str,
+    parent_id: str | None,
+    item: dict,
+    expanded: bool,
+    has_children: bool = False,
+) -> dict:
     idea = _as_str(item.get("idea"), "请补充本章编写思路")
-    clean_title = _compact_catalog_title(title)
+    clean_title = title.strip() if item.get("composition") else _compact_catalog_title(title)
     if num and clean_title.startswith(num):
         clean_title = clean_title[len(num) :].strip()
     form = is_original_form_title(clean_title or title)
@@ -1460,13 +3113,25 @@ def _new_node(node_id: str, num: str, title: str, parent_id: str | None, item: d
     part = item.get("part") if item.get("part") in ("tech", "business", "form") else None
     if form:
         part = "form"
-    kind = chapter_kind(clean_title or title, part, idea, str(item.get("requirement") or ""))
+    kind = chapter_kind(
+        clean_title or title, part, idea, str(item.get("requirement") or ""), has_children=has_children
+    )
     if kind == "business":
         part = "business"
-        if not form:
+        if not form and _is_generic_idea(idea):
             idea = BUSINESS_SKIP_IDEA_PREFIX
+    elif kind == "response" and part not in ("tech", "business", "form"):
+        part = "business"
     skip_write = kind in ("form", "business")
+    extra: dict = {}
+    refs = [str(r) for r in (item.get("sourceRefs") or []) if isinstance(r, (str, int))]
+    if refs:
+        extra["sourceRefs"] = refs
+    form_keys = [k for k in (item.get("formKeys") or []) if isinstance(k, int)]
+    if form_keys:
+        extra["formKeys"] = form_keys
     return {
+        **extra,
         "id": node_id,
         "num": num,
         "title": clean_title or title,
@@ -1497,13 +3162,24 @@ def _normalize_outline(data: dict) -> list[dict]:
         if not isinstance(item, dict) or len(nodes) >= 800:
             return
         title = _as_str(item.get("title"), node_id)
-        nodes.append(_new_node(node_id, num, title, parent_id, item, expanded=depth < 4))
+        kids_raw = item.get("children")
+        nodes.append(
+            _new_node(
+                node_id,
+                num,
+                title,
+                parent_id,
+                item,
+                expanded=depth < 4,
+                has_children=isinstance(kids_raw, list) and bool(kids_raw) and depth < 5,
+            )
+        )
         if is_original_form_title(title):
             return
         children = item.get("children")
         if not isinstance(children, list) or depth >= 5:
             return
-        for j, sub in enumerate(children[:120], start=1):
+        for j, sub in enumerate(children[:400], start=1):
             child_num = _format_outline_num(depth + 1, j, num)
             add_item(sub, f"{node_id}-{j}", child_num, node_id, depth + 1)
 

@@ -9,7 +9,8 @@ import {
   type CustomRuleSource,
   type ProjectCustomRule,
 } from "@/lib/api";
-import { TENDER_KIND_SLOTS } from "@/lib/tenderPackage";
+import { TENDER_KIND_SLOTS, tenderKindSlotsFor } from "@/lib/tenderPackage";
+import { isEngineeringCategory } from "@/mocks/projects";
 
 const SOURCE_OPTS: { value: CustomRuleSource; label: string; hint: string }[] = [
   { value: "tender", label: "招标文件", hint: "从招标正文、评标办法、合同条款里人工理解出的规则" },
@@ -37,11 +38,19 @@ function sourceLabel(source: CustomRuleSource, sources: string[]) {
 
 interface CustomRulesPanelProps {
   projectId: string;
+  category?: string;
   onCountChange?: (n: number) => void;
   onToast: (message: string, type?: "success" | "error" | "info") => void;
 }
 
-export default function CustomRulesPanel({ projectId, onCountChange, onToast }: CustomRulesPanelProps) {
+export default function CustomRulesPanel({ projectId, category, onCountChange, onToast }: CustomRulesPanelProps) {
+  const engineering = isEngineeringCategory(category);
+  const kindSlots = tenderKindSlotsFor(category);
+  const sourceOpts = (engineering ? SOURCE_OPTS : SOURCE_OPTS.filter((opt) => opt.value !== "drawing")).map((opt) =>
+    opt.value === "mixed" && !engineering
+      ? { ...opt, hint: "跨招标文件与其他材料综合得出的规则" }
+      : opt,
+  );
   const [rules, setRules] = useState<ProjectCustomRule[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -133,7 +142,9 @@ export default function CustomRulesPanel({ projectId, onCountChange, onToast }: 
   return (
     <div className="space-y-4">
       <p className="text-[12px] leading-5 text-foreground-600">
-        把招标文件、图纸或多种材料里人工理解出的条款写在这里。不限句式，只要是你认为投标书必须响应的规则都可以添加。启用中的规则会进入
+        {engineering
+          ? "把招标文件、图纸或多种材料里人工理解出的条款写在这里。不限句式，只要是你认为投标书必须响应的规则都可以添加。启用中的规则会进入"
+          : "把招标文件里人工理解出的条款写在这里。不限句式，只要是你认为投标书必须响应的规则都可以添加。启用中的规则会进入"}
         <strong> AI 预审</strong>，检查投标文件是否覆盖。
       </p>
 
@@ -142,13 +153,13 @@ export default function CustomRulesPanel({ projectId, onCountChange, onToast }: 
           <div>
             <label className={labelCls}>来源类型</label>
             <select className={inputCls} value={source} onChange={(e) => setSource(e.target.value as CustomRuleSource)}>
-              {SOURCE_OPTS.map((opt) => (
+              {sourceOpts.map((opt) => (
                 <option key={opt.value} value={opt.value}>
                   {opt.label}
                 </option>
               ))}
             </select>
-            <p className="mt-1 text-[11px] text-foreground-400">{SOURCE_OPTS.find((o) => o.value === source)?.hint}</p>
+            <p className="mt-1 text-[11px] text-foreground-400">{sourceOpts.find((o) => o.value === source)?.hint}</p>
           </div>
           <div>
             <label className={labelCls}>预审处理</label>
@@ -169,7 +180,7 @@ export default function CustomRulesPanel({ projectId, onCountChange, onToast }: 
           <div className="mt-3">
             <span className={labelCls}>涉及的文件类型</span>
             <div className="flex flex-wrap gap-1.5">
-              {TENDER_KIND_SLOTS.map((slot) => {
+              {kindSlots.map((slot) => {
                 const on = slots.includes(slot.key);
                 return (
                   <button

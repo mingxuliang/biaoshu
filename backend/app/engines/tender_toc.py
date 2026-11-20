@@ -149,7 +149,7 @@ def extract_stipulated_toc(path: str) -> dict:
     try:
         paragraphs = extract_paragraphs(path)
     except Exception:
-        return {"compose": [], "tech": []}
+        return {"compose": [], "tech": [], "reqTree": []}
 
     headings = _heading_candidates(paragraphs)
     _attach_following_text(paragraphs, headings)
@@ -157,7 +157,11 @@ def extract_stipulated_toc(path: str) -> dict:
     tech = _slice_by_anchors(headings, TECH_ANCHORS)
     if not tech:
         tech = _fallback_tech_headings(headings)
-    return {"compose": compose[:80], "tech": tech[:400]}
+    try:
+        req_tree = extract_requirement_tree(path)
+    except Exception:  # noqa: BLE001 —— 需求结构抽不出时目录照旧由智能体编
+        req_tree = []
+    return {"compose": compose[:80], "tech": tech[:400], "reqTree": req_tree}
 
 
 def format_toc_for_prompt(toc: dict) -> str:
@@ -171,7 +175,7 @@ def format_toc_for_prompt(toc: dict) -> str:
             lines.append(f"{pad}- {item.get('title', '')}")
         lines.append("")
     if tech:
-        lines.append("本份招标书中的需求/技术条款（须挂入上方规定骨架的对应章节之下，不得单独改写成整本投标文件一级目录）：")
+        lines.append("本份招标书中的需求/技术条款（只挂入格式节指定的章节之下。评标办法、合同条款、投标人须知不要写进目录）：")
         for item in tech:
             pad = "  " * max(int(item.get("level") or 1) - 1, 0)
             req = (item.get("requirement") or "").strip()
@@ -382,11 +386,152 @@ def _find_anchor_index(headings: list[dict], anchors: tuple[str, ...]) -> int | 
             score += 8
         if int(h.get("level") or 9) <= 2:
             score += 3
+        nxt = headings[i + 1] if i + 1 < len(headings) else None
+        if nxt is not None and int(nxt.get("level") or 0) > int(h.get("level") or 0):
+            score += 5
         ranked.append((score, i))
     if not ranked:
         return None
     ranked.sort(key=lambda x: (-x[0], x[1]))
     return ranked[0][1]
+
+
+_REQ_SECTION = re.compile(r"^(\d+\.\d+)\s*[、.．]?\s*(\S.{0,40})$")
+_REQ_BULLET = re.compile(r"^(?:[•·●▪◦\-–—]|（\d{1,2}）|\(\d{1,2}\)|\d{1,2}[、.．](?!\d))\s*(.+)$")
+_REQ_CODE = re.compile(r"^[A-Za-z]{1,4}[-－]?\d{1,3}$|^\d{1,3}$")
+_REQ_STOP = re.compile(r"投标文件组成|响应文件组成|投标文件格式|响应文件格式|合同|评标|投标人须知")
+_REQ_BACKGROUND = re.compile(r"概况|背景|建设目标")
+_CODE_HEAD = ("编号", "序号", "需求编号", "条款号")
+_NAME_HEAD = ("需求项", "场景", "功能", "名称", "指标", "对接系统", "类型", "培训对象", "阶段", "项目")
+
+
+def _block_texts(path: str) -> list[dict]:
+    """按正文顺序列出段落和表格。表格保留全部单元格，不走预审那种只留长格的抽法。"""
+    import docx
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    document = docx.Document(path)
+    blocks: list[dict] = []
+    for child in document.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            para = Paragraph(child, document)
+            text = " ".join((para.text or "").split())
+            if text:
+                blocks.append({"kind": "p", "text": text})
+        elif child.tag == qn("w:tbl"):
+            rows: list[list[str]] = []
+            for row in Table(child, document).rows:
+                seen: set[int] = set()
+                cells: list[str] = []
+                for cell in row.cells:
+                    if id(cell._tc) in seen:
+                        continue
+                    seen.add(id(cell._tc))
+                    cells.append(" ".join((cell.text or "").split()))
+                if any(cells):
+                    rows.append(cells)
+            if rows:
+                blocks.append({"kind": "t", "rows": rows})
+    return blocks
+
+
+def _table_items(rows: list[list[str]]) -> list[dict]:
+    header = [re.sub(r"\s+", "", cell) for cell in rows[0]]
+    if len(header) < 2:
+        return []
+    code_col = next((i for i, head in enumerate(header) if head in _CODE_HEAD), -1)
+    name_col = next((i for i, head in enumerate(header) if i != code_col and any(key in head for key in _NAME_HEAD)), -1)
+    if name_col < 0:
+        name_col = next(i for i in range(len(header)) if i != code_col)
+    items: list[dict] = []
+    for cells in rows[1:]:
+        cells = cells + [""] * (len(header) - len(cells))
+        code = cells[code_col].strip() if code_col >= 0 else ""
+        if code and not _REQ_CODE.match(code):
+            code = ""
+        name = cells[name_col].strip()
+        text = "；".join(cell.strip() for i, cell in enumerate(cells) if i not in (code_col, name_col) and cell.strip())
+        if not (name or text):
+            continue
+        if len(name) > 24 and not text:
+            name, text = "", name
+        items.append({"code": code, "name": name[:24], "text": text or name})
+    return items
+
+
+def extract_requirement_tree(path: str) -> list[dict]:
+    """招标书技术、功能需求的原结构。
+
+    从第一个带下级小节的技术章开始，到投标文件组成、合同、评标或附件为止。
+    小节下的表格行（编号、需求项、要求说明）和项目符号各成一条。
+    技术章前一章是项目概况时，收成一节「项目理解与建设目标」，不再往下拆。
+    不是 docx 或抽不到时返回空列表。
+    """
+    if not str(path or "").lower().endswith(".docx"):
+        return []
+    blocks = _block_texts(path)
+    chapters = [i for i, block in enumerate(blocks) if block["kind"] == "p" and _CHAPTER.match(block["text"])]
+
+    def has_sections(at: int) -> bool:
+        nxt = next((pos for pos in chapters if pos > at), len(blocks))
+        return any(block["kind"] == "p" and _REQ_SECTION.match(block["text"]) for block in blocks[at + 1 : nxt])
+
+    start = next(
+        (i for i in chapters if _contains_any(blocks[i]["text"], TECH_ANCHORS) and has_sections(i)),
+        None,
+    )
+    if start is None:
+        return []
+    sections: list[dict] = []
+    earlier = [pos for pos in chapters if pos < start and has_sections(pos)]
+    if earlier and _REQ_BACKGROUND.search(blocks[earlier[-1]]["text"]):
+        nxt = next(pos for pos in chapters if pos > earlier[-1])
+        note = "\n".join(block["text"] for block in blocks[earlier[-1] + 1 : nxt] if block["kind"] == "p")
+        sections.append(
+            {
+                "title": "项目理解与建设目标",
+                "clauseNo": "",
+                "chapter": blocks[earlier[-1]]["text"],
+                "text": note[:3000],
+                "items": [],
+            }
+        )
+    chapter = blocks[start]["text"]
+    current: dict | None = None
+    for block in blocks[start + 1 :]:
+        if block["kind"] == "p":
+            text = block["text"]
+            if _CHAPTER.match(text):
+                if _REQ_STOP.search(text):
+                    break
+                chapter = text
+                current = None
+                continue
+            if _ATTACH.match(text):
+                break
+            section = _REQ_SECTION.match(text)
+            if section and not re.search(r"[。；;]", text):
+                current = {
+                    "title": section.group(2).strip(),
+                    "clauseNo": section.group(1),
+                    "chapter": chapter,
+                    "text": "",
+                    "items": [],
+                }
+                sections.append(current)
+                continue
+            if current is None:
+                continue
+            bullet = _REQ_BULLET.match(text)
+            if bullet:
+                current["items"].append({"code": "", "name": "", "text": bullet.group(1).strip()})
+            else:
+                current["text"] = (current["text"] + "\n" + text).strip()[:3000]
+        elif current is not None:
+            current["items"].extend(_table_items(block["rows"]))
+    return sections
 
 
 def _slice_by_anchors(headings: list[dict], anchors: tuple[str, ...]) -> list[dict]:
@@ -914,3 +1059,350 @@ def _transform_chapters(nodes: list[dict]) -> list[dict]:
 def build_bid_chapters(headings: list[dict]) -> list[dict]:
     """功能需求严格 1:1；其余需求整理为应标目录，编写思路收录需求全文。"""
     return _transform_chapters(headings_to_chapters(headings))
+
+
+# 组成清单只认本份原文里的锚点。抽不到就返回空，调用方不得再补一套默认大章。
+_COMPOSE_ANCHOR = re.compile(
+    r"(?:"
+    r"商务文件应当包括|技术文件应当包括|"
+    r"商务文件应包括|技术文件应包括|"
+    r"商务部分应包括|技术部分应包括|"
+    r"商务标应包括|技术标应包括|"
+    r"商务文件包括|技术文件包括|"
+    r"商务部分包括|技术部分包括|"
+    r"商务标包括|技术标包括|"
+    r"投标文件的组成|响应文件的组成|"
+    r"投标文件组成|响应文件组成|"
+    r"投标文件的格式|响应文件的格式|"
+    r"投标文件格式|响应文件格式|"
+    r"投标文件内容及格式|响应文件内容及格式|"
+    r"投标文件内容与格式|响应文件内容与格式|"
+    r"投标文件的编制|响应文件的编制|"
+    r"投标文件编制|响应文件编制|"
+    r"投标文件应包括|响应文件应包括"
+    r")"
+)
+_LEADING_NUM = re.compile(
+    r"^(?:第[0-9一二三四五六七八九十百零]+[章节篇]\s*"
+    r"|\d+(?:\.\d+)+\s*"
+    r"|\d+[.．、]\s*"
+    r"|[一二三四五六七八九十]+、\s*"
+    r"|（[一二三四五六七八九十\d]+）\s*"
+    r"|\([0-9]+\)\s*)"
+)
+_SECTION_BREAK = re.compile(r"^(?:第[0-9一二三四五六七八九十百零]+[章节篇]|\d+\.\d+(?:\.\d+)*\s+\S)")
+_BULLET_ITEM = re.compile(r"^(?:[•·●▪◦\*]|[-–—])\s*(.+)$")
+# 格式章的条目常写成「一、投标函」「十一、其他资料」，中文序号也要认
+_ITEM_MARK = r"(?:（\d{1,2}）|\(\d{1,2}\)|\d{1,2}[.．、](?!\d)|[一二三四五六七八九十]{1,3}[、.．])"
+_NUM_ITEM = re.compile(r"^" + _ITEM_MARK + r"\s*(.+)$")
+_TECH_COMPOSITION = re.compile(
+    r"技术方案|技术响应|需求响应|部署|接口|数据迁移|实施计划|售后|培训|运维|安全方案|演示"
+)
+_BIZ_COMPOSITION = re.compile(
+    r"投标函|身份证明|授权|资质|证照|财务|信用|案例|业绩|报价|商务条款|商务响应|资格|承诺|保证金|开标"
+)
+_RESPONSE_CUE = re.compile(
+    r"(逐项响应|逐条响应|逐条应答|逐项应答|点对点|"
+    r"部分满足|不满足|无偏离|正偏离|负偏离|"
+    r"偏离表|偏差表|偏离说明)"
+)
+_RESPONSE_INSTRUCTION = re.compile(r"应|须|必须|逐|按照|作出|列示|说明")
+
+
+def _anchor_volume(phrase: str) -> str:
+    if "商务" in (phrase or ""):
+        return "business"
+    if "技术" in (phrase or ""):
+        return "tech"
+    return ""
+
+
+def _is_anchor_line(line: str) -> bool:
+    match = _COMPOSE_ANCHOR.search(line or "")
+    if not match:
+        return False
+    prefix = _LEADING_NUM.sub("", (line or "")[: match.start()]).strip()
+    if len(prefix) > 6:
+        return False
+    if len(line) > 48 and "：" not in line and ":" not in line:
+        return False
+    return True
+
+
+_TABLE_HEAD_WORDS = re.compile(r"^(序号|编号|文件名称|名称|内容|页码|备注|份数|说明|材料名称|目录)$")
+
+
+def _is_table_header(line: str) -> bool:
+    if "|" not in (line or ""):
+        return False
+    cells = [c.strip() for c in re.split(r"\s*\|\s*", line) if c.strip()]
+    return bool(cells) and all(_TABLE_HEAD_WORDS.match(c) for c in cells)
+
+
+def _table_row_item(line: str) -> str:
+    """组成清单写成表格时，一行取出文件名称那一格。"""
+    if "|" not in (line or ""):
+        return ""
+    cells = [c.strip() for c in re.split(r"\s*\|\s*", line) if c.strip()]
+    for cell in cells:
+        stripped = _LEADING_NUM.sub("", cell).strip()
+        if re.fullmatch(r"[\d.\-/\s]*", stripped) or _TABLE_HEAD_WORDS.match(stripped):
+            continue
+        if 2 <= len(stripped) <= 40 and not re.search(r"[。；]", stripped):
+            return stripped
+        return ""
+    return ""
+
+
+def _list_item_text(line: str) -> str:
+    row = _table_row_item(line)
+    if row:
+        return row
+    match = _BULLET_ITEM.match(line or "") or _NUM_ITEM.match(line or "")
+    if not match:
+        return ""
+    body = match.group(1).strip()
+    if not (2 <= len(body) <= 80):
+        return ""
+    if body.endswith(("。", "；")) and len(body) > 40 and re.search(r"应|须|必须", body):
+        return ""
+    return body
+
+
+def _split_inline_items(rest: str) -> list[str]:
+    rest = (rest or "").strip(" ：:，,")
+    if not rest:
+        return []
+    numbered = re.findall(
+        _ITEM_MARK + r"\s*([^（(\d][^（(]{0,40}?)(?=" + _ITEM_MARK + r"|$)",
+        rest,
+    )
+    cleaned = [item.strip(" ；;，,。") for item in numbered if item.strip()]
+    if len(cleaned) >= 2:
+        return cleaned
+    one = _list_item_text(rest)
+    if one:
+        return [one]
+    if re.search(r"应|须|必须|如下|下列", rest):
+        return []
+    parts = [part.strip(" ；;，,。") for part in re.split(r"[、；;]", rest)]
+    parts = [part for part in parts if 2 <= len(part) <= 40]
+    return parts if len(parts) >= 2 else []
+
+
+def volume_of_composition_title(title: str) -> str:
+    """原文没有把清单分成商务/技术两组时，只按条目名称本身判断。两边都像或都不像则留空。"""
+    name = re.sub(r"\s+", "", title or "")
+    tech = bool(_TECH_COMPOSITION.search(name))
+    biz = bool(_BIZ_COMPOSITION.search(name))
+    if tech and not biz:
+        return "tech"
+    if biz and not tech:
+        return "business"
+    if tech and biz:
+        if re.search(r"报价|商务条款|投标函", name):
+            return "business"
+        return "tech"
+    return ""
+
+
+# 列出投标/响应文件应当包含哪些文件的那一节，章号不固定。须知里的「投标文件组成」
+# 通常先出现，措辞也常和后面的格式节不同。两种都抽，拼目录时以格式节那份为准。
+_FORMAT_ANCHOR = re.compile(
+    r"(?:投标|响应)文件(?:内容及格式|内容与格式|的?格式|的?编制)"
+)
+# 一句「格式见第×章」也会命中锚点，条目太少的格式段不足以取代组成清单
+_MIN_FORMAT_ITEMS = 3
+_REVIEW_FACTOR_TITLE = re.compile(
+    r"未出现|机器码|标识码|上传地址|上传IP|IP地址|联系人.*相同|相同$|"
+    r"符合第.+格式|最高投标限价|大写金额|未超过.+限价|不得超过.+限价|"
+    r"已标价工程量清单|评审因素|评审标准|签字盖章"
+)
+_REVIEW_FACTOR_EXACT = {
+    "投标文件格式",
+    "响应文件格式",
+    "投标文件的格式",
+    "响应文件的格式",
+    "形式评审",
+    "资格评审",
+    "响应性评审",
+    "联合体投标人",
+    "备选投标方案",
+    "签字盖章",
+}
+
+
+def is_bid_review_factor(title: str) -> bool:
+    """评标表里的评审标准，不是投标人要提交的文件。"""
+    plain = re.sub(r"[\s\"“”「」]", "", title or "")
+    plain = re.sub(r"^(?:第[0-9一二三四五六七八九十百零]+[章节篇]|[一二三四五六七八九十]+、|（[一二三四五六七八九十\d]+）|\d+[.、])", "", plain)
+    if not plain:
+        return False
+    if plain in _REVIEW_FACTOR_EXACT:
+        return True
+    return bool(_REVIEW_FACTOR_TITLE.search(plain))
+
+
+def _composition_groups(text: str) -> list[dict]:
+    """按锚点逐段抽出组成条目。每段为 {kind, volume, titles}，kind 为 format / volume / compose。"""
+    lines = [re.sub(r"\s+", " ", line).strip() for line in (text or "").replace("\r\n", "\n").split("\n")]
+    groups: list[dict] = []
+    index = 0
+    total = len(lines)
+    while index < total:
+        if not _is_anchor_line(lines[index]):
+            index += 1
+            continue
+        match = _COMPOSE_ANCHOR.search(lines[index])
+        if not match:
+            index += 1
+            continue
+        phrase = match.group(0)
+        group_volume = _anchor_volume(phrase)
+        if _FORMAT_ANCHOR.search(phrase):
+            kind = "format"
+        else:
+            kind = "volume" if group_volume else "compose"
+        bucket = _split_inline_items(lines[index][match.end() :])
+        index += 1
+        skipped = 0
+        while index < total:
+            line = lines[index]
+            if not line:
+                index += 1
+                continue
+            if _is_anchor_line(line):
+                break
+            if bucket and _SECTION_BREAK.match(line):
+                break
+            if _is_table_header(line):
+                index += 1
+                continue
+            item = _list_item_text(line)
+            if item:
+                bucket.append(item)
+                skipped = 0
+                index += 1
+                continue
+            # 格式章标题后面常先排封面、页码、「目录」二字，条目在后面。还没收到条目时跳过这些行。
+            if not bucket:
+                if _SECTION_BREAK.match(line):
+                    break
+                skipped += 1
+                if skipped > 40:
+                    break
+                index += 1
+                continue
+            if len(line) > 16:
+                break
+            index += 1
+        titles: list[str] = []
+        for raw in bucket:
+            title = re.sub(r"\s+", "", raw.strip("。；; "))
+            if 2 <= len(title) <= 80 and title not in titles and not is_bid_review_factor(title):
+                titles.append(title)
+        if titles:
+            groups.append({"kind": kind, "volume": group_volume, "titles": titles})
+    return groups
+
+
+def _preferred_groups(groups: list[dict]) -> list[dict]:
+    """格式章那份排在最前，重名条目用它的措辞和顺序。
+
+    分册锚点（「商务文件包括」「技术文件包括」）另外保留，它带着技术/商务的分卷归属。
+    没有成规模的格式段时，沿用原文里出现的全部组成段。
+    """
+    formats = [g for g in groups if g["kind"] == "format" and len(g["titles"]) >= _MIN_FORMAT_ITEMS]
+    if not formats:
+        return groups
+    return formats + [g for g in groups if g["kind"] == "volume"]
+
+
+def extract_bid_composition(text: str) -> list[dict]:
+    """从本份原文抽出投标文件组成条目。每项为 {title, volume}。
+
+    volume 为 business、tech 或空字符串。锚点写明「商务文件包括」「技术文件包括」时用该分组；
+    只写了「投标文件组成」时，volume 按条目名称判断。抽不到清单时返回空列表。
+    """
+    items: list[dict] = []
+    seen: set[str] = set()
+    for group in _preferred_groups(_composition_groups(text)):
+        for title in group["titles"]:
+            if title in seen:
+                continue
+            seen.add(title)
+            items.append({"title": title, "volume": group["volume"] or volume_of_composition_title(title)})
+    return items
+
+
+def composition_for_volume(items: list[dict] | None, doc_kind: str) -> list[dict]:
+    """取出本分册的组成条目，保持原文顺序。没有标明分册、名称也分不出的条目两边都保留。"""
+    kind = "business" if (doc_kind or "").strip().lower() == "business" else "tech"
+    chosen: list[dict] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        volume = str(item.get("volume") or "").strip()
+        if volume == kind or not volume:
+            chosen.append({"title": title, "volume": volume})
+    return chosen
+
+
+def extract_response_rules(text: str) -> list[str]:
+    """抽出本份原文里要求如何逐项应答的句子，整句保留。抽不到返回空列表。"""
+    found: list[str] = []
+    pieces = re.split(r"(?<=[。！？])|\n", text or "")
+    for piece in pieces:
+        sentence = piece.strip()
+        compact = re.sub(r"\s+", "", sentence)
+        if not (12 <= len(compact) <= 240):
+            continue
+        if compact.startswith("第") or re.match(r"^\d+\.\d+", compact):
+            continue
+        if compact.count("|") >= 2 or compact.count("｜") >= 2:
+            continue
+        if not _RESPONSE_CUE.search(compact) or not _RESPONSE_INSTRUCTION.search(compact):
+            continue
+        if sentence not in found:
+            found.append(sentence)
+        if len(found) >= 4:
+            break
+    return found
+
+
+def response_checks(rule: str) -> list[str]:
+    """验收词只从这句原文里出现的写法来，不使用固定表头。原文没写的词不会被要求。"""
+    text = re.sub(r"\s+", "", rule or "")
+    if not text:
+        return []
+    required: list[str] = []
+
+    def add(phrase: str) -> None:
+        if phrase and phrase not in required:
+            required.append(phrase)
+
+    if "部分满足" in text or "不满足" in text:
+        add("满足")
+        if "部分满足" in text:
+            add("部分满足")
+        if "不满足" in text:
+            add("不满足")
+    if "无偏离" in text:
+        add("无偏离")
+    if "正偏离" in text:
+        add("正偏离")
+    if "负偏离" in text:
+        add("负偏离")
+    if "偏离说明" in text:
+        add("偏离说明")
+    elif ("偏离表" in text or "偏差表" in text) and "无偏离" not in text:
+        add("偏离")
+    elif "偏离" in text and not any(token in text for token in ("无偏离", "正偏离", "负偏离", "偏离说明")):
+        add("偏离")
+    for phrase in ("实现方式", "点对点", "逐条", "逐项"):
+        if phrase in text:
+            add(phrase)
+    return required

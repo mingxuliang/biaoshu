@@ -1,6 +1,16 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import Modal from "../../components/Modal";
-import { projectCategories, projectTypes, type Project, type ProjectCategory, type ProjectType } from "@/mocks/projects";
+import {
+  isEngineeringCategory,
+  normalizeCategory,
+  projectTypes,
+  writerTrackOf,
+  writerTracks,
+  type WriterTrack,
+  type Project,
+  type ProjectCategory,
+  type ProjectType,
+} from "@/mocks/projects";
 import { useAuth } from "@/context/AuthContext";
 import { listUsers, type TeamMember } from "@/lib/api";
 import { formatOf } from "@/lib/tenderPackage";
@@ -10,6 +20,8 @@ export interface ProjectFormValues {
   code: string;
   type: ProjectType;
   category: ProjectCategory;
+  specialty: string;
+  workType: string;
   budget: string;
   deadline: string;
   owner: string;
@@ -53,6 +65,8 @@ export default function ProjectFormModal({
     code: "",
     type: "工程" as ProjectType,
     category: "软件服务类" as ProjectCategory,
+    specialty: "",
+    workType: "",
     budget: "",
     deadline: "",
     owner: "",
@@ -84,7 +98,9 @@ export default function ProjectFormModal({
       name: initial?.name ?? "",
       code: initial?.code ?? "",
       type: initial?.type ?? "工程",
-      category: initial?.category ?? "软件服务类",
+      category: initial?.category ? normalizeCategory(initial.category) : "软件服务类",
+      specialty: initial?.specialty ?? "",
+      workType: initial?.workType ?? "",
       budget: parseBudget(initial?.budget),
       deadline: initial?.deadline ?? "",
       owner: defaultOwner,
@@ -132,13 +148,30 @@ export default function ProjectFormModal({
     setExistingTenderName(undefined);
   };
 
+  const track = writerTrackOf(form.category, form.specialty);
+
+  const setTrack = (next: WriterTrack) => {
+    if (next === "software") {
+      setForm((f) => ({ ...f, category: "软件服务类", specialty: "", workType: "" }));
+      return;
+    }
+    if (next === "water") {
+      setForm((f) => ({ ...f, category: "工程类", specialty: "水利" }));
+      return;
+    }
+    setForm((f) => ({ ...f, category: "工程类", specialty: f.specialty === "水利" ? "" : f.specialty }));
+  };
+
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
+    const specialty = track === "water" ? "水利" : track === "software" ? "" : form.specialty === "水利" ? "" : form.specialty;
     onSubmit({
       name: form.name,
       code: form.code,
       type: form.type,
-      category: form.category,
+      category: track === "software" ? "软件服务类" : "工程类",
+      specialty,
+      workType: track === "software" ? "" : form.workType,
       budget: form.budget,
       deadline: form.deadline,
       owner: form.owner,
@@ -213,22 +246,44 @@ export default function ProjectFormModal({
             </label>
             <select
               id="np-category"
-              value={form.category}
-              onChange={(e) => setForm((f) => ({ ...f, category: e.target.value as ProjectCategory }))}
+              value={track}
+              onChange={(e) => setTrack(e.target.value as WriterTrack)}
               className={`${inputCls} cursor-pointer`}
             >
-              {projectCategories.map((c) => (
-                <option key={c} value={c}>
-                  {c}
+              {writerTracks.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}
                 </option>
               ))}
             </select>
-            <p className="mt-1 text-[11px] text-foreground-500">
-              {form.category === "工程类"
-                ? "工程类：招标解析将按施工类招标书特点抽取评定分离/三信封/清单图纸/异常低价等字段"
-                : "软件服务类：招标解析、AI 预审沿用现有项目字段体系"}
-            </p>
+            <p className="mt-1 text-[11px] text-foreground-500">{writerTracks.find((item) => item.id === track)?.hint}</p>
           </div>
+          {track === "engineering" || track === "water" ? (
+            <>
+              <div>
+                <label className={labelCls} htmlFor="np-specialty">专业</label>
+                {track === "water" ? (
+                  <input id="np-specialty" value="水利" readOnly className={`${inputCls} bg-background-100`} />
+                ) : (
+                  <select id="np-specialty" value={form.specialty} onChange={(e) => setForm((f) => ({ ...f, specialty: e.target.value }))} className={`${inputCls} cursor-pointer`}>
+                    <option value="">解析时自动识别（不会改成水利）</option>
+                    {["房建", "市政", "公路"].map((item) => (
+                      <option key={item} value={item}>{item}</option>
+                    ))}
+                  </select>
+                )}
+              </div>
+              <div>
+                <label className={labelCls} htmlFor="np-work">工程类型</label>
+                <select id="np-work" value={form.workType} onChange={(e) => setForm((f) => ({ ...f, workType: e.target.value }))} className={`${inputCls} cursor-pointer`}>
+                  <option value="">解析时自动识别</option>
+                  {["新建", "改建", "扩建", "除险加固", "维修养护"].map((item) => (
+                    <option key={item} value={item}>{item}</option>
+                  ))}
+                </select>
+              </div>
+            </>
+          ) : null}
           <div>
             <label className={labelCls} htmlFor="np-budget">
               预算金额（万元）
@@ -380,7 +435,11 @@ export default function ProjectFormModal({
           <label className={labelCls} htmlFor="np-tender">
             招标文件
             <span className="ml-1 font-normal text-foreground-500">
-              （{isEdit ? "重新选择可替换招标文件包中的主文件" : "可选；图纸/清单/答疑请到招标解析页分类上传"}）
+              （{isEdit
+                ? "重新选择可替换招标文件包中的主文件"
+                : isEngineeringCategory(form.category)
+                  ? "可选；图纸/清单/答疑请到招标解析页分类上传"
+                  : "可选；答疑补遗请到招标解析页分类上传"}）
             </span>
           </label>
           <input

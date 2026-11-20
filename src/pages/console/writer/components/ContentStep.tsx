@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import Toast from "../../components/Toast";
 import ChapterTree from "./ChapterTree";
 import EditorPanel, { type EditorPanelHandle } from "./EditorPanel";
@@ -9,7 +10,11 @@ import {
   createChapterGenerateJob,
   createGenerateAllJob,
   exportWriterDraftDocx,
+  getWriterSelfCheck,
+  downloadWriterTraceMatrix,
+  type WriterSelfCheck,
   type GenerateAllProgress,
+  type WaterCheck,
   getOrCreateWriterDraft,
   pollWriterJobUntilDone,
   saveChapterContent,
@@ -20,6 +25,11 @@ import {
 import { compactOutlineTitles, isOriginalFormTitle, isSkipAiWrite } from "@/lib/outlineNum";
 import type { ImageConfig, LayoutConfig, PageConfig } from "@/mocks/writerSteps";
 import { chapterCharTargets } from "@/lib/pageBudget";
+
+/** 缺资质材料的红字提示数量，与后端 red_marker.count_gaps 同一标记。 */
+function countMaterialGaps(md: string): number {
+  return (md.match(/【缺少资质材料，请补充后再投标】/g) || []).length + (md.match(/【缺人员】|【缺】/g) || []).length;
+}
 
 interface ToastState {
   message: string;
@@ -64,11 +74,15 @@ export default function ContentStep({
   const [activeId, setActiveId] = useState<string>(outline[0]?.id ?? "");
   const [generatingId, setGeneratingId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [exportedDocId, setExportedDocId] = useState<string | null>(null);
+  const [selfChecking, setSelfChecking] = useState(false);
+  const [selfCheck, setSelfCheck] = useState<WriterSelfCheck | null>(null);
   const [toast, setToast] = useState<ToastState>({ message: "", type: "success", visible: false });
   const [batch, setBatch] = useState<GenerateAllProgress | null>(null);
   const [batchRunning, setBatchRunning] = useState(false);
   const [overwriteAll, setOverwriteAll] = useState(false);
   const [showFailed, setShowFailed] = useState(false);
+  const [waterCheck, setWaterCheck] = useState<WaterCheck | null>(null);
   const generatingRef = useRef(false);
   const chapterContentsRef = useRef(chapterContents);
   chapterContentsRef.current = chapterContents;
@@ -121,6 +135,7 @@ export default function ContentStep({
           const result = current.result;
           if (!result) return;
           setBatch(result);
+          if (result.waterCheck) setWaterCheck(result.waterCheck);
           const done = result.done ?? 0;
           if (done !== lastDone) {
             lastDone = done;
@@ -129,7 +144,10 @@ export default function ContentStep({
         },
       });
       const result = finished.result;
-      if (result) setBatch(result);
+      if (result) {
+        setBatch(result);
+        if (result.waterCheck) setWaterCheck(result.waterCheck);
+      }
       const doneIds = (result?.items ?? []).filter((item) => item.status === "done").map((item) => item.id);
       await syncDraft(doneIds);
       const failed = result?.failed?.length ?? 0;
@@ -159,7 +177,7 @@ export default function ContentStep({
     if (isSkipAiWrite(node)) {
       showToast(
         isOriginalFormTitle(node.title, node.num)
-          ? "本章请直接使用招标书原文填写后打印签字，无需 AI 撰写"
+          ? "本章内容直接取自招标书格式原文，无需 AI 撰写；有金额、人员等空白请人工填写"
           : "商务标本章无需应答，无需 AI 撰写",
         "info",
       );
@@ -218,21 +236,72 @@ export default function ContentStep({
     showToast(item.mode === "flow" ? "流程图已插入当前章节" : "图片已插入当前章节");
   };
 
-  const handleExport = async () => {
-    setExporting(true);
+  const handleSelfCheck = async () => {
+    setSelfChecking(true);
     try {
-      const blob = await exportWriterDraftDocx(draftId);
+      setSelfCheck(await getWriterSelfCheck(draftId));
+    } catch (err) {
+      showToast(err instanceof ApiError ? err.message : "自查失败，请检查网络后重试", "error");
+    } finally {
+      setSelfChecking(false);
+    }
+  };
+
+  const handleTraceMatrix = async () => {
+    try {
+      const blob = await downloadWriterTraceMatrix(draftId);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${projectName}-投标书（撰写工作台导出）.docx`;
+      a.download = `${projectName}-追溯矩阵.csv`;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      showToast("导出成功，已开始下载 Word 文档");
     } catch (err) {
-      showToast(err instanceof ApiError ? err.message : "导出失败，请检查网络后重试", "error");
+      showToast(err instanceof ApiError ? err.message : "追溯矩阵下载失败", "error");
+    }
+  };
+
+  const gapChapters = outline
+    .map((node) => ({ id: node.id, title: `${node.num || ""}${node.title}`, n: countMaterialGaps(chapterContents[node.id] || "") }))
+    .filter((item) => item.n > 0);
+  const gapTotal = gapChapters.reduce((sum, item) => sum + item.n, 0);
+
+  const downloadExport = async (force: boolean) => {
+    const { blob, bidDocumentId } = await exportWriterDraftDocx(draftId, force);
+    setExportedDocId(bidDocumentId || null);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${projectName}-${docKindLabel}（撰写工作台导出）.docx`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    showToast("导出成功，已开始下载 Word 文档");
+  };
+
+  const handleExport = async () => {
+    if (gapTotal > 0) {
+      showToast(`仍有 ${gapTotal} 处缺资质材料，导出文件里已用红字标出，补齐前无法应标`, "info");
+    }
+    setExporting(true);
+    try {
+      await downloadExport(false);
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : "导出失败，请检查网络后重试";
+      if (err instanceof ApiError && err.status === 400 && message.includes("水利施组校核未通过")) {
+        if (window.confirm(`${message}\n\n仍要导出吗？`)) {
+          try {
+            await downloadExport(true);
+          } catch (again) {
+            showToast(again instanceof ApiError ? again.message : "导出失败，请检查网络后重试", "error");
+          }
+          return;
+        }
+      }
+      showToast(message, "error");
     } finally {
       setExporting(false);
     }
@@ -247,9 +316,18 @@ export default function ContentStep({
         </span>
         <div>
           <div className="font-heading text-sm font-semibold tracking-wide text-foreground-900">第四步 · {docKindLabel}正文生成</div>
-          <div className="text-xs text-foreground-500">按目录逐章 AI 撰写；承诺/授权/报价/偏差表等固定格式件带入招标书原文</div>
+          <div className="text-xs text-foreground-500">按目录逐章 AI 撰写；承诺、授权、投标函、开标一览带入招标书原文，报价分项和偏离表逐条应答</div>
         </div>
         <div className="ml-auto flex items-center gap-2">
+          {exportedDocId && (
+            <Link
+              to={`/console/audit?project=${projectId}&bidDocumentId=${exportedDocId}&scope=${docKind}`}
+              className="flex h-8 items-center gap-1.5 whitespace-nowrap rounded-md border border-primary-300 px-3 text-xs font-medium text-primary-600 transition-colors hover:bg-primary-50"
+            >
+              <i className="ri-shield-flash-line text-sm"></i>
+              用刚导出的{docKindLabel}去预审
+            </Link>
+          )}
           <button
             type="button"
             onClick={onBack}
@@ -359,24 +437,69 @@ export default function ContentStep({
         </div>
       ) : null}
 
+      {gapChapters.length > 0 ? (
+        <div className="shrink-0 border-b border-red-200 bg-red-50 px-4 py-2 text-xs leading-relaxed text-red-700">
+          <span className="text-sm font-bold">
+            有 {gapChapters.length} 章缺资质材料（共 {gapTotal} 处），缺这些材料无法应标。
+          </span>
+          请到「企业资质证照库」录入并审核入库后，重新生成对应章节：
+          {gapChapters.slice(0, 8).map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setActiveId(item.id)}
+              className="ml-2 cursor-pointer font-semibold underline"
+            >
+              {item.title}
+            </button>
+          ))}
+          {gapChapters.length > 8 ? " 等" : ""}
+        </div>
+      ) : null}
+
+      {waterCheck && (waterCheck.blocking.length > 0 || waterCheck.advisory.length > 0 || (waterCheck.siteGaps?.length ?? 0) > 0) ? (
+        <div className="shrink-0 border-b border-accent-200 bg-accent-50 px-4 py-2 text-xs leading-relaxed text-accent-800">
+          <div className="font-medium">
+            水利校核：{waterCheck.blocking.length} 条需处理
+            {waterCheck.advisory.length ? `，${waterCheck.advisory.length} 条建议` : ""}
+            {waterCheck.siteGaps?.length ? `，勘察待补 ${waterCheck.siteGaps.length} 项` : ""}
+          </div>
+          {waterCheck.siteGaps?.length ? (
+            <div className="mt-0.5">勘察资料还缺：{waterCheck.siteGaps.join("、")}。正文里这些项会标成待补，请在工程事实里补上后再生成。</div>
+          ) : null}
+          {[...waterCheck.blocking, ...waterCheck.advisory].slice(0, 8).map((item, index) => (
+            <button
+              key={`${item.chapterId}-${index}`}
+              type="button"
+              onClick={() => item.chapterId && setActiveId(item.chapterId)}
+              className="mt-0.5 block cursor-pointer text-left hover:underline"
+            >
+              {item.axis} · {item.message}
+            </button>
+          ))}
+        </div>
+      ) : null}
+
       {/* 三栏撰写工作区 */}
       <div className="flex min-h-0 flex-1 gap-3 p-3">
         <ChapterTree
           nodes={outline}
           activeId={activeId}
-          generatingId={generatingId}
           onSelect={setActiveId}
           onGenerate={startGenerate}
           onNodesChange={onOutlineChange}
         />
         <EditorPanel
           ref={editorRef}
+          draftId={draftId}
           chapter={activeNode}
           content={chapterContents[activeId] || ""}
           generating={generatingId === activeId}
           onGenerate={() => startGenerate(activeId)}
           onSave={handleSave}
           onExport={handleExport}
+          onSelfCheck={handleSelfCheck}
+          selfChecking={selfChecking}
           onContentChange={handleContentChange}
           exporting={exporting}
           layout={layout}
@@ -397,6 +520,46 @@ export default function ContentStep({
           />
         </div>
       </div>
+
+      {selfCheck && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/30 p-6">
+          <div className="flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-lg border border-background-300 bg-background-50 shadow-xl">
+            <div className="flex items-center gap-2 border-b border-background-300 px-4 py-3">
+              <h3 className="text-sm font-semibold text-foreground-950">
+                提交前自查{selfCheck.ok ? "：各项均通过" : ""}
+              </h3>
+              <button
+                type="button"
+                onClick={handleTraceMatrix}
+                className="ml-auto h-7 cursor-pointer rounded-md border border-background-300 px-2.5 text-xs text-foreground-600 hover:bg-background-200"
+              >
+                下载追溯矩阵
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelfCheck(null)}
+                className="h-7 cursor-pointer rounded-md border border-background-300 px-2.5 text-xs text-foreground-600 hover:bg-background-200"
+              >
+                关闭
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 space-y-3 overflow-auto px-4 py-3 text-xs leading-relaxed text-foreground-700">
+              {selfCheck.checks.map((check) => (
+                <div key={check.name}>
+                  <div className="font-semibold text-foreground-950">
+                    {check.ok ? "通过" : `${check.problems.length} 项提示`} · {check.name}
+                  </div>
+                  {check.problems.slice(0, 12).map((problem, index) => (
+                    <div key={index} className="pl-3 text-foreground-600">
+                      - {problem}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 悬浮 AI 聊天 */}
       <FloatingChat

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useProjects } from "@/context/ProjectContext";
-import { ApiError, getProjectStandardRules, type DrawingReviewRule, type ProjectStandardRules, type TenderLeafRule } from "@/lib/api";
+import { ApiError, getProjectStandardRules, type DrawingFact, type DrawingReviewRule, type ProjectRule, type ProjectStandardRules, type TenderLeafRule } from "@/lib/api";
+import { isEngineeringCategory } from "@/mocks/projects";
 
 type SourceKey = "all" | "tender" | "drawing";
 
@@ -84,8 +85,25 @@ function DrawingCard({ rule, index }: { rule: DrawingReviewRule; index: number }
   );
 }
 
+function ProjectRuleCard({ rule }: { rule: ProjectRule }) {
+  return (
+    <article className="rounded-lg border border-background-300 bg-background-100 p-4">
+      <div className="text-[11px] text-foreground-500">{rule.source || "规则"} · {rule.checkType || "必须有"} · {rule.severity || "扣分"}</div>
+      <h3 className="mt-0.5 text-sm font-semibold text-foreground-900">{rule.title}</h3>
+      <p className="mt-2 text-sm leading-relaxed text-foreground-800">{rule.requirement}</p>
+      {rule.evidence ? <p className="mt-2 text-xs text-foreground-500">依据：{rule.evidence}</p> : null}
+      {rule.enabled === false ? <p className="mt-1 text-xs text-warning-600">已停用</p> : null}
+    </article>
+  );
+}
+
+function FactLine({ fact }: { fact: DrawingFact }) {
+  return <li>{fact.drawingNo} {fact.field} {fact.value} · {fact.evidence}</li>;
+}
+
 export default function StandardRulesPanel() {
-  const { projects, loading: projectsLoading } = useProjects();
+  const { projects: allProjects, loading: projectsLoading } = useProjects();
+  const projects = allProjects.filter((project) => isEngineeringCategory(project.category));
   const [projectId, setProjectId] = useState("");
   const [source, setSource] = useState<SourceKey>("all");
   const [data, setData] = useState<ProjectStandardRules | null>(null);
@@ -93,7 +111,8 @@ export default function StandardRulesPanel() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    if (projectId || projects.length === 0) return;
+    if (projects.length === 0) return;
+    if (projects.some((project) => project.id === projectId)) return;
     setProjectId(projects[0].id);
   }, [projectId, projects]);
 
@@ -119,13 +138,19 @@ export default function StandardRulesPanel() {
     };
   }, [projectId]);
 
+  const selected = projects.find((project) => project.id === projectId);
+  const engineering = isEngineeringCategory(selected?.category);
   const tenderCount = data?.tenderRules.length ?? 0;
-  const drawingCount = data?.drawingRules.length ?? 0;
+  const drawingCount = engineering ? data?.drawingRules.length ?? 0 : 0;
   const sources: { key: SourceKey; label: string; count: number }[] = [
     { key: "all", label: "全部", count: tenderCount + drawingCount },
     { key: "tender", label: "招标书规则", count: tenderCount },
-    { key: "drawing", label: "图纸规则", count: drawingCount },
+    ...(engineering ? [{ key: "drawing" as const, label: "图纸规则", count: drawingCount }] : []),
   ];
+
+  useEffect(() => {
+    if (!engineering && source === "drawing") setSource("all");
+  }, [engineering, source]);
 
   return (
     <div>
@@ -174,7 +199,7 @@ export default function StandardRulesPanel() {
         <div className="rounded-lg border border-dashed border-accent-200 bg-accent-50/50 p-10 text-center text-sm text-accent-700">{error}</div>
       ) : projects.length === 0 ? (
         <div className="rounded-lg border border-dashed border-background-300 bg-background-100/60 p-10 text-center text-sm text-foreground-500">
-          还没有项目。创建项目并完成招标解析后，这里按项目显示规范对标规则。
+          还没有工程类项目。规范对标只服务工程标，创建工程类项目并完成招标解析后，这里按项目显示。
         </div>
       ) : (
         <div className="space-y-6">
@@ -194,7 +219,33 @@ export default function StandardRulesPanel() {
               )}
             </section>
           ) : null}
-          {source !== "tender" ? (
+          {engineering && source !== "tender" ? (
+            <section>
+              <h2 className="mb-3 text-sm font-semibold text-foreground-800">本项目规则 {data?.projectRules?.length ?? 0}</h2>
+              {(data?.projectRules?.length ?? 0) === 0 ? (
+                <p className="rounded-lg border border-dashed border-background-300 bg-background-100/60 p-8 text-center text-sm text-foreground-500">
+                  重新解析后，这里会列出招标、清单、图纸和水利规则池合成的规则。
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+                  {data?.projectRules?.map((rule) => (
+                    <ProjectRuleCard key={rule.id || rule.title} rule={rule} />
+                  ))}
+                </div>
+              )}
+              {(data?.drawingFacts?.length ?? 0) > 0 ? (
+                <div className="mt-4">
+                  <h3 className="mb-2 text-xs font-semibold text-foreground-700">图纸特征</h3>
+                  <ul className="space-y-1 text-xs text-foreground-700">
+                    {data?.drawingFacts?.map((fact, index) => (
+                      <FactLine key={`${fact.drawingNo}-${index}`} fact={fact} />
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </section>
+          ) : null}
+          {engineering && source !== "tender" ? (
             <section>
               <h2 className="mb-3 text-sm font-semibold text-foreground-800">图纸规则 {drawingCount}</h2>
               {drawingCount === 0 ? (

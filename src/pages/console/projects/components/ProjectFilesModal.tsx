@@ -23,6 +23,7 @@ const SOURCE_LABELS: Record<string, string> = {
   workbench: "预审示例文档",
   writer: "撰写工作台导出",
   revision: "修改闭环保存版本",
+  export: "导出中心（明标版）",
   "export-anon": "导出中心（暗标版）",
 };
 

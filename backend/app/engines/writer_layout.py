@@ -22,6 +22,10 @@ FONT_SIZE_PT: dict[str, float] = {
     "小四": 12,
     "五号": 10.5,
     "小五": 9,
+    "六号": 7.5,
+    "小六": 6.5,
+    "七号": 5.5,
+    "八号": 5,
 }
 _PT_TO_NAME = {value: key for key, value in FONT_SIZE_PT.items()}
 
@@ -32,6 +36,56 @@ _HEX = re.compile(r"^[0-9A-Fa-f]{6}$")
 _ALIGNS = ("left", "center", "right", "justify")
 
 PRESETS: dict[str, dict] = {
+    # 取自《自然资源综合业务管理智能框架及智能体研发项目》技术标配图优化版：
+    # 章黑体小二，节黑体小三，条黑体 13 磅，正文仿宋小四、首行缩进 2 字、1.5 倍行距。
+    "技术标标准": {
+        "preset": "技术标标准",
+        "margins": {"top": 3.7, "bottom": 3.5, "left": 2.8, "right": 2.6},
+        "bodyFont": "仿宋",
+        "bodyLatinFont": "Times New Roman",
+        "fontSize": "小四",
+        "bodySizePt": 12,
+        "lineSpacing": "1.5倍行距",
+        "lineSpacingMul": 1.5,
+        "indentChars": 2,
+        "indentPt": 24,
+        "justify": False,
+        # 实测自《自然资源…》V4-1：章节标题段前段后为 0（不是旧版的 12/6），多出第四级条款标题
+        "headings": {
+            "h1": {"font": "黑体", "sizePt": 18, "bold": True, "align": "left", "spaceBefore": 0, "spaceAfter": 0},
+            "h2": {"font": "黑体", "sizePt": 15, "bold": True, "align": "left", "spaceBefore": 0, "spaceAfter": 0},
+            "h3": {"font": "黑体", "sizePt": 13, "bold": True, "align": "left", "spaceBefore": 0, "spaceAfter": 0},
+            "h4": {"font": "黑体", "sizePt": 12, "bold": True, "align": "left", "spaceBefore": 0, "spaceAfter": 0},
+        },
+        "pageNumber": "full",
+        "header": "{project}  技术投标书",
+        "headerFont": "仿宋",
+        "headerSizePt": 9,
+        "headerBorder": True,
+        "headerDistanceCm": 1.5,
+        "footerFont": "仿宋",
+        "footerSizePt": 10.5,
+        "footerDistanceCm": 2.0,
+        "differentFirstPage": True,
+        "orientation": "portrait",
+        "cover": {
+            "enabled": False,
+            "title": "{project}",
+            "subtitle": "技 术 投 标 书",
+            "company": "投标单位：（投标人名称）",
+            "date": "编制日期：",
+            "titleFont": "方正小标宋简体",
+            "titleSizePt": 32,
+            "subtitleFont": "黑体",
+            "subtitleSizePt": 44,
+            "infoFont": "仿宋",
+            "infoSizePt": 16,
+            "infoSpaceAfter": 12,
+        },
+        "toc": {"enabled": False, "levels": 3},
+        "table": {"headerFill": "E8E8E8", "fontSizePt": 10.5, "headerBold": True, "borderColor": "808080", "borderSizePt": 0.5},
+        "caption": {"font": "黑体", "sizePt": 10.5, "spaceAfter": 10},
+    },
     "政府采购标准": {
         "preset": "政府采购标准",
         "margins": {"top": 2.54, "bottom": 2.54, "left": 3.17, "right": 3.17},
@@ -112,8 +166,15 @@ PRESETS: dict[str, dict] = {
 }
 
 
+DEFAULT_PRESET = "技术标标准"
+
+
 def preset_names() -> list[str]:
     return list(PRESETS)
+
+
+def default_writing_layout() -> dict:
+    return copy.deepcopy(PRESETS[DEFAULT_PRESET])
 
 
 def font_size_pt(value) -> float | None:
@@ -184,7 +245,14 @@ def sanitize_patch(patch: dict) -> dict:
             if name not in PRESETS:
                 raise ValueError("没有这个排版模板，可用：" + "、".join(PRESETS))
             out["preset"] = name
-        elif key in ("bodyFont", "bodyLatinFont", "headingFont", "lineSpacing"):
+        elif key in (
+            "bodyFont",
+            "bodyLatinFont",
+            "headingFont",
+            "lineSpacing",
+            "headerFont",
+            "footerFont",
+        ):
             out[key] = _text(value, 40)
         elif key == "fontSize":
             pt = font_size_pt(value)
@@ -201,9 +269,15 @@ def sanitize_patch(patch: dict) -> dict:
         elif key == "lineSpacingMul":
             out[key] = _num(value, 1, 3, "行距倍数")
             out["lineSpacingExactPt"] = None
+            out["lineSpacingAtLeastPt"] = None
         elif key == "lineSpacingExactPt":
             out[key] = _num(value, 10, 80, "固定行距")
             out["lineSpacingMul"] = None
+            out["lineSpacingAtLeastPt"] = None
+        elif key == "lineSpacingAtLeastPt":
+            out[key] = _num(value, 10, 80, "最小行距")
+            out["lineSpacingMul"] = None
+            out["lineSpacingExactPt"] = None
         elif key in ("paragraphBefore", "paragraphAfter"):
             out[key] = _num(value, 0, 60, "段间距")
         elif key == "indentChars":
@@ -212,8 +286,19 @@ def sanitize_patch(patch: dict) -> dict:
             out["indentPt"] = None  # 由导出按正文字号换算
         elif key == "indentPt":
             out[key] = _num(value, 0, 80, "首行缩进")
-        elif key in ("justify", "headingBold"):
+        elif key == "hangingIndentPt":
+            out[key] = _num(value, 0, 80, "悬挂缩进")
+        elif key == "leftIndentPt":
+            out[key] = _num(value, 0, 120, "左缩进")
+        elif key in ("justify", "headingBold", "headerBorder", "differentFirstPage"):
             out[key] = bool(value)
+        elif key in ("headerSizePt", "footerSizePt"):
+            pt = font_size_pt(value)
+            if pt is None:
+                raise ValueError("页眉页脚字号无法识别")
+            out[key] = _num(pt, 6, 24, "页眉页脚字号")
+        elif key in ("headerDistanceCm", "footerDistanceCm"):
+            out[key] = _num(value, 0.3, 5, "页眉页脚距边")
         elif key == "orientation":
             if value not in ("portrait", "landscape"):
                 raise ValueError("纸张方向只能是 portrait 或 landscape")
@@ -238,22 +323,26 @@ def sanitize_patch(patch: dict) -> dict:
             out[key] = {
                 level: _clean_heading(spec, level)
                 for level, spec in value.items()
-                if level in ("h1", "h2", "h3") and isinstance(spec, dict)
+                if level in ("h1", "h2", "h3", "h4") and isinstance(spec, dict)
             }
         elif key == "cover" and isinstance(value, dict):
             cover: dict = {}
             if "enabled" in value:
                 cover["enabled"] = bool(value["enabled"])
-            for field in ("title", "subtitle", "company", "date"):
+            for field in ("title", "subtitle", "company", "date", "titleFont", "subtitleFont", "infoFont"):
                 if field in value:
                     cover[field] = _text(value[field], 80)
+            for field in ("titleSizePt", "subtitleSizePt", "infoSizePt", "infoSpaceAfter"):
+                if field in value:
+                    pt = font_size_pt(value[field])
+                    cover[field] = _num(pt if pt is not None else value[field], 0, 72, "封面字号/间距")
             out[key] = cover
         elif key == "toc" and isinstance(value, dict):
             toc: dict = {}
             if "enabled" in value:
                 toc["enabled"] = bool(value["enabled"])
             if "levels" in value:
-                toc["levels"] = int(_num(value["levels"], 1, 3, "目录层级"))
+                toc["levels"] = int(_num(value["levels"], 1, 5, "目录层级"))
             out[key] = toc
         elif key == "table" and isinstance(value, dict):
             table: dict = {}
@@ -263,6 +352,10 @@ def sanitize_patch(patch: dict) -> dict:
                 table["fontSizePt"] = _num(font_size_pt(value["fontSizePt"]) or value["fontSizePt"], 6, 24, "表格字号")
             if "headerBold" in value:
                 table["headerBold"] = bool(value["headerBold"])
+            if "borderColor" in value:
+                table["borderColor"] = _hex(value["borderColor"], "表格边框颜色")
+            if "borderSizePt" in value:
+                table["borderSizePt"] = _num(value["borderSizePt"], 0.25, 3, "表格边框粗细")
             out[key] = table
         elif key == "caption" and isinstance(value, dict):
             caption: dict = {}
@@ -270,6 +363,8 @@ def sanitize_patch(patch: dict) -> dict:
                 caption["font"] = _text(value["font"], 40)
             if "sizePt" in value:
                 caption["sizePt"] = _num(font_size_pt(value["sizePt"]) or value["sizePt"], 6, 24, "图注字号")
+            if "spaceAfter" in value:
+                caption["spaceAfter"] = _num(value["spaceAfter"], 0, 40, "图注段后间距")
             out[key] = caption
     if not out:
         raise ValueError("没有可识别的排版字段")
@@ -311,6 +406,8 @@ def describe_layout(layout: dict | None) -> str:
     parts.append(f"正文：{body} {size:g}pt{latin}")
     if data.get("lineSpacingExactPt"):
         parts.append(f"行距：固定值 {data['lineSpacingExactPt']:g} 磅")
+    elif data.get("lineSpacingAtLeastPt"):
+        parts.append(f"行距：最小值 {data['lineSpacingAtLeastPt']:g} 磅")
     elif data.get("lineSpacingMul"):
         parts.append(f"行距：{data['lineSpacingMul']:g} 倍")
     elif data.get("lineSpacing"):
@@ -322,7 +419,7 @@ def describe_layout(layout: dict | None) -> str:
                 **{k: margins.get(k, "-") for k in ("top", "bottom", "left", "right")}
             )
         )
-    for level in ("h1", "h2", "h3"):
+    for level in ("h1", "h2", "h3", "h4"):
         spec = (data.get("headings") or {}).get(level)
         if spec:
             parts.append(

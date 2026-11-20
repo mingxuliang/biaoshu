@@ -56,7 +56,7 @@ import {
 } from "lexical";
 import { $createImageNode, $isImageNode, ImageNode } from "../nodes/ImageNode";
 import type { LayoutConfig } from "@/mocks/writerSteps";
-import { writerLayoutCssVars } from "@/mocks/writerSteps";
+import { layoutFontFamilies, writerBodyFontStack, writerLayoutCssVars } from "@/mocks/writerSteps";
 
 const INSERT_CHAPTER_IMAGE_COMMAND: LexicalCommand<{ src: string; alt: string }> = createCommand(
   "INSERT_CHAPTER_IMAGE_COMMAND",
@@ -65,30 +65,39 @@ const INSERT_CHAPTER_IMAGE_COMMAND: LexicalCommand<{ src: string; alt: string }>
 const IMAGE_MD_RE = /^!\[([^\]]*)\]\((\/api\/writer-images\/[^/]+\/file)\)$/;
 const INLINE_SPLIT_RE = /(\*\*.+?\*\*|__.+?__|\*.+?\*)/g;
 
-const FONT_STACK: Record<string, string> = {
-  宋体: '"宋体", SimSun, serif',
-  黑体: '"黑体", SimHei, sans-serif',
-  仿宋: '"仿宋", FangSong, serif',
-  楷体: '"楷体", KaiTi, serif',
-  微软雅黑: '"微软雅黑", "Microsoft YaHei", sans-serif',
-  "Times New Roman": '"Times New Roman", Times, serif',
-  Arial: "Arial, Helvetica, sans-serif",
-};
+// 字体列表和映射与排版设置页共用一份（src/mocks/writerSteps.ts），这里不再单独维护。
+const cssFontFamily = writerBodyFontStack;
 
-function cssFontFamily(name: string): string {
-  return FONT_STACK[name] || `"${name}"`;
-}
-
-function styleFromFont(font?: string, size?: string): string {
+function styleFromFont(font?: string, size?: string, color?: string): string {
   const parts: string[] = [];
   if (font) parts.push(`font-family: ${cssFontFamily(font)}`);
   if (size) parts.push(`font-size: ${size}`);
+  if (color) parts.push(`color: #${color}`);
   return parts.join("; ");
 }
 
-function parseNodeFont(style: string): { font?: string; size?: string } {
+/** 字号段可带第三段颜色，如 16pt:C00000（缺资质材料的红字提示）。 */
+function splitSizeColor(spec: string): { size?: string; color?: string } {
+  const [size, color] = spec.split(":").map((s) => s.trim());
+  return {
+    size: size || undefined,
+    color: color && /^#?[0-9a-fA-F]{6}$/.test(color) ? color.replace("#", "").toUpperCase() : undefined,
+  };
+}
+
+function rgbToHex(value: string): string | undefined {
+  const v = value.trim();
+  const hex = /^#([0-9a-fA-F]{6})$/.exec(v);
+  if (hex) return hex[1].toUpperCase();
+  const rgb = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i.exec(v);
+  if (!rgb) return undefined;
+  return [rgb[1], rgb[2], rgb[3]].map((n) => Number(n).toString(16).padStart(2, "0")).join("").toUpperCase();
+}
+
+function parseNodeFont(style: string): { font?: string; size?: string; color?: string } {
   const fam = /font-family:\s*([^;]+)/i.exec(style || "");
   const sz = /font-size:\s*([^;]+)/i.exec(style || "");
+  const col = /(?:^|;)\s*color:\s*([^;]+)/i.exec(style || "");
   let font: string | undefined;
   if (fam) {
     const raw = fam[1].trim();
@@ -102,6 +111,11 @@ const FONT_WRAP_RE = /\{\{([^|:{}]+)[:|]([^}]+)\}\}([\s\S]*?)\{\{\/\}\}/g;
 const CELL_SPAN_RE = /^(?:#c(\d+)#)?(?:#r(\d+)#)?/;
 
 const FONT_SIZE_CSS: Record<string, string> = {
+  初号: "42pt",
+  小初: "36pt",
+  一号: "26pt",
+  小一: "24pt",
+  二号: "22pt",
   小二: "18pt",
   三号: "16pt",
   小三: "15pt",
@@ -109,6 +123,10 @@ const FONT_SIZE_CSS: Record<string, string> = {
   小四: "12pt",
   五号: "10.5pt",
   小五: "9pt",
+  六号: "7.5pt",
+  小六: "6.5pt",
+  七号: "5.5pt",
+  八号: "5pt",
 };
 
 function applyAlign(node: { setFormat: (f: ElementFormatType) => void }, align: ElementFormatType | "") {
@@ -130,7 +148,7 @@ function alignPrefix(node: { getFormatType?: () => string }): string {
 }
 
 function isTableSep(line: string): boolean {
-  return /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(line.trim());
+  return /^(?:\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?|\|\s*:?-{2,}:?\s*\|)\s*$/.test(line.trim());
 }
 
 function isTableRow(line: string): boolean {
@@ -222,8 +240,9 @@ function appendStyledInline(
   text: string,
   font?: string,
   size?: string,
+  color?: string,
 ) {
-  const style = styleFromFont(font, size);
+  const style = styleFromFont(font, size, color);
   const parts = text.split(INLINE_SPLIT_RE).filter(Boolean);
   const apply = (n: TextNode) => {
     if (style) n.setStyle(style);
@@ -264,20 +283,21 @@ function appendStyledInline(
 
 function appendInline(parent: { append: (n: LexicalNode) => void }, text: string) {
   FONT_WRAP_RE.lastIndex = 0;
-  const chunks: { text: string; font?: string; size?: string }[] = [];
+  const chunks: { text: string; font?: string; size?: string; color?: string }[] = [];
   let last = 0;
   let m: RegExpExecArray | null;
   const re = new RegExp(FONT_WRAP_RE.source, "g");
   while ((m = re.exec(text))) {
     if (m.index > last) chunks.push({ text: text.slice(last, m.index) });
-    chunks.push({ text: m[3], font: m[1].trim(), size: m[2].trim() });
+    const { size, color } = splitSizeColor(m[2]);
+    chunks.push({ text: m[3], font: m[1].trim(), size, color });
     last = m.index + m[0].length;
   }
   if (last < text.length) chunks.push({ text: text.slice(last) });
   if (!chunks.length) chunks.push({ text });
   chunks.forEach((c) => {
     if (!c.text && !c.font && !c.size) return;
-    appendStyledInline(parent, c.text, c.font, c.size);
+    appendStyledInline(parent, c.text, c.font, c.size, c.color);
   });
 }
 
@@ -290,9 +310,9 @@ function serializeInline(node: LexicalNode): string {
     if (node.hasFormat("bold")) text = `**${text}**`;
     if (node.hasFormat("italic")) text = `*${text}*`;
     if (node.hasFormat("underline")) text = `__${text}__`;
-    const { font, size } = parseNodeFont(node.getStyle() || "");
-    if (font || size) {
-      text = `{{${font || "宋体"}:${size || "12pt"}}}${text}{{/}}`;
+    const { font, size, color } = parseNodeFont(node.getStyle() || "");
+    if (font || size || color) {
+      text = `{{${font || "宋体"}:${size || "12pt"}${color ? `:${color}` : ""}}}${text}{{/}}`;
     }
     return text;
   }
@@ -355,7 +375,7 @@ function markdownToEditor(editor: LexicalEditor, markdown: string) {
         if (heading) {
           flushList();
           const depth = heading[1].length;
-          const tag = depth <= 2 ? "h2" : "h3";
+          const tag = depth <= 1 ? "h1" : depth === 2 ? "h2" : "h3";
           const h = $createHeadingNode(tag);
           appendInline(h, heading[2]);
           applyAlign(h, align);
@@ -444,7 +464,7 @@ function editorToMarkdown(editor: LexicalEditor): string {
       }
       if ($isHeadingNode(node)) {
         const tag = node.getTag();
-        const prefix = tag === "h3" ? "### " : "## ";
+        const prefix = tag === "h1" ? "# " : tag === "h3" ? "### " : "## ";
         lines.push(alignPrefix(node) + prefix + serializeInline(node));
         return;
       }
@@ -562,7 +582,7 @@ function Toolbar({
       const selection = $getSelection();
       if (!$isRangeSelection(selection)) return;
       $patchStyleText(selection, {
-        "font-family": FONT_STACK[family] || family,
+        "font-family": cssFontFamily(family),
         "font-size": FONT_SIZE_CSS[size] || size,
       });
     });
@@ -604,7 +624,7 @@ function Toolbar({
         className="h-6 cursor-pointer rounded border border-background-300 bg-background-50 px-1.5 text-[11px] text-foreground-700 outline-none focus:border-primary-400"
         title="应用到选中文字"
       >
-        {Object.keys(FONT_STACK).map((f) => (
+        {layoutFontFamilies.map((f) => (
           <option key={f} value={f}>
             {f}
           </option>
@@ -818,7 +838,13 @@ export default function ChapterEditor({
             <ContentEditable
               aria-label="章节正文编辑器"
               className={`lex-editor word-sheet mx-auto min-h-[620px] max-w-5xl rounded-sm px-10 py-10${applyTenderIndent ? " lex-tech" : ""}`}
-              style={writerLayoutCssVars(layout, applyTenderIndent) as CSSProperties}
+              style={
+                {
+                  ...writerLayoutCssVars(layout, applyTenderIndent, { font: fontFamily, sizeName: fontSize }),
+                  fontFamily: cssFontFamily(fontFamily),
+                  fontSize: FONT_SIZE_CSS[fontSize] || undefined,
+                } as CSSProperties
+              }
             />
           }
           placeholder={

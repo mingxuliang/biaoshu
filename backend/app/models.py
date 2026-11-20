@@ -15,7 +15,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import backref, relationship
 
-from .db import Base
+from .db import Base, PlatformBase
+from .secret_box import EncryptedText
 
 
 def gen_id(prefix: str) -> str:
@@ -36,7 +37,103 @@ class User(Base):
     position = Column(String, default="")
     role = Column(String, default="成员")
     disabled = Column(Boolean, default=False)
+    # 改密码、停用时递增，旧令牌随之失效
+    token_version = Column(Integer, default=0)
+    department_id = Column(String, nullable=True, index=True)
+    custom_role_id = Column(String, nullable=True)
+    # 每月可用积分上限，为空表示不单独限制（共享企业余额）
+    monthly_credit_limit = Column(Integer, nullable=True)
+    last_login_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Department(Base):
+    """企业内部门树。只存在于本企业 schema，别家企业无从得见。"""
+
+    __tablename__ = "departments"
+
+    id = Column(String, primary_key=True, default=lambda: gen_id("dept"))
+    name = Column(String, nullable=False)
+    parent_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True)
+    leader_id = Column(String, nullable=True)
+    sort_order = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CustomRole(Base):
+    """企业自定义角色：权限点集合 + 数据范围。"""
+
+    __tablename__ = "custom_roles"
+
+    id = Column(String, primary_key=True, default=lambda: gen_id("role"))
+    name = Column(String, nullable=False, unique=True)
+    perms_json = Column(JSON, default=list)
+    data_scope = Column(String, default="本人")  # 本人 | 本部门 | 全企业
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ChapterAssignment(Base):
+    """协作写标：章节分给谁写、谁审，version 用于乐观锁防互相覆盖。"""
+
+    __tablename__ = "chapter_assignments"
+
+    id = Column(String, primary_key=True, default=lambda: gen_id("chas"))
+    draft_id = Column(String, ForeignKey("writer_drafts.id"), index=True, nullable=False)
+    chapter_id = Column(String, nullable=False)
+    assignee_id = Column(String, nullable=True)
+    reviewer_id = Column(String, nullable=True)
+    status = Column(String, default="待撰写")  # 待撰写 | 撰写中 | 待审核 | 已完成
+    version = Column(Integer, default=0)
+    locked_by = Column(String, nullable=True)
+    locked_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("draft_id", "chapter_id", name="uq_chapter_assignment"),)
+
+
+class ProjectComment(Base):
+    """章节或项目评论，支持 @ 成员。"""
+
+    __tablename__ = "project_comments"
+
+    id = Column(String, primary_key=True, default=lambda: gen_id("cmt"))
+    project_id = Column(String, index=True, nullable=False)
+    draft_id = Column(String, nullable=True)
+    chapter_id = Column(String, nullable=True)
+    user_id = Column(String, nullable=False)
+    content = Column(Text, nullable=False)
+    mentions_json = Column(JSON, default=list)
+    resolved = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ProjectActivity(Base):
+    """项目动态流。"""
+
+    __tablename__ = "project_activities"
+
+    id = Column(String, primary_key=True, default=lambda: gen_id("act"))
+    project_id = Column(String, index=True, nullable=False)
+    user_id = Column(String, nullable=True)
+    user_name = Column(String, default="")
+    action = Column(String, nullable=False)
+    detail = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class Notification(Base):
+    """站内通知：@ 提醒、章节分配、余额预警、发票开具等。"""
+
+    __tablename__ = "notifications"
+
+    id = Column(String, primary_key=True, default=lambda: gen_id("ntf"))
+    user_id = Column(String, index=True, nullable=False)
+    kind = Column(String, default="system")
+    title = Column(String, nullable=False)
+    body = Column(Text, default="")
+    link = Column(String, default="")
+    read = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
 class Project(Base):
@@ -52,9 +149,12 @@ class Project(Base):
     code = Column(String, nullable=False)
     name = Column(String, nullable=False)
     type = Column(String, nullable=False)
-    category = Column(String, default="软件服务类")  # 软件服务类 | 工程类：决定招标解析用哪套指标骨架
+    category = Column(String, default="软件服务类")  # 软件服务类 | 工程类：按用户选择原样保存，决定招标解析骨架
+    specialty = Column(String, default="")  # 水利 | 房建 | 市政 | 公路 | ""：仅工程类生效，解析时自动识别回写，用户选过不覆盖
+    work_type = Column(String, default="")  # 新建 | 改建 | 扩建 | 除险加固 | 维修养护 | 其他
     owner = Column(String, default="")
     owner_id = Column(String, ForeignKey("users.id"), nullable=True)
+    department_id = Column(String, nullable=True, index=True)
     budget = Column(String, default="待定")
     deadline = Column(String, default="")
     progress = Column(Integer, default=0)
@@ -317,7 +417,8 @@ class KnowledgeDocument(Base):
     __tablename__ = "knowledge_documents"
 
     id = Column(String, primary_key=True, default=lambda: gen_id("kdoc"))
-    scope = Column(String, nullable=False)  # 企业库 | 项目库 | 个人库
+    scope = Column(String, nullable=False)  # 企业库 | 部门库 | 项目库 | 个人库
+    department_id = Column(String, nullable=True, index=True)  # scope=部门库 时必填
     type = Column(String, nullable=False)  # 历史中标标书 | 专项方案 | 施工工艺 | 规范条文 | 制度表单 | 图表模板
     title = Column(String, nullable=False)
     tags_json = Column(JSON, default=list)
@@ -328,6 +429,16 @@ class KnowledgeDocument(Base):
     size_bytes = Column(Integer, default=0)
     slice_count = Column(Integer, default=0)
     review_flag = Column(String, nullable=True)
+    content_sha256 = Column(String, default="", index=True)
+    # 正文 64 位 simhash（十六进制），用于提示近似重复
+    simhash = Column(String, default="")
+    duplicate_hint = Column(String, default="")
+    status = Column(String, default="done")  # queued | running | done | failed
+    error = Column(Text, nullable=True)
+    # 扫描件逐页识图的进度：{"done": 已完成页数, "total": 总页数}。给界面显示「第 n / 共 m 页」，
+    # worker 重启或超时后重新发起解析可以接着这个记录继续，不用整本重来。
+    progress_json = Column(JSON, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     slices = relationship(
@@ -373,6 +484,11 @@ class StandardClause(Base):
     specialty = Column(String, default="通用", index=True)  # 房建 | 市政 | 公路 | 水利 | 通用
     kind = Column(String, default="通用")  # 设计 | 施工 | 验收 | 通用
     text = Column(Text, nullable=False, default="")
+    # 与平台规范库（StdClause）对齐的判定字段，供预审强制性条文核对和话题检索使用。
+    mandatory = Column(Boolean, default=False)
+    is_commentary = Column(Boolean, default=False)
+    topics_json = Column(JSON, default=list)
+    table_text = Column(Text, default="")
     source_file = Column(String, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -419,6 +535,7 @@ class ProjectMember(Base):
     id = Column(String, primary_key=True, default=lambda: gen_id("pm"))
     project_id = Column(String, index=True, nullable=False)
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    project_role = Column(String, default="撰写")  # 负责人 | 撰写 | 审核 | 只读
     created_at = Column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (UniqueConstraint("project_id", "user_id", name="uq_project_member"),)
@@ -448,6 +565,9 @@ class QualificationAsset(Base):
     evidence_json = Column(JSON, default=list)
     field_conflict_json = Column(JSON, default=list)
     suspected_ids_json = Column(JSON, default=list)
+    attrs_json = Column(JSON, default=dict)  # 按材料类型的结构化字段，见 engines/qualification_schema.py
+    department_id = Column(String, nullable=True, index=True)
+    visibility = Column(String, default="企业")  # 企业 | 部门
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -481,6 +601,7 @@ class QualificationSourceDoc(Base):
     filename = Column(String, nullable=False)
     storage_path = Column(String, nullable=False)
     size_bytes = Column(Integer, default=0)
+    content_sha256 = Column(String, default="", index=True)
     status = Column(String, default="queued")  # queued | running | done | failed
     extracted = Column(Integer, default=0)
     merged = Column(Integer, default=0)
@@ -505,6 +626,7 @@ class WeightTemplate(Base):
     feasibility = Column(Float, default=15)
     standardization = Column(Float, default=10)
     scope = Column(String, default="全局默认")
+    category = Column(String, default="工程类")  # 工程类 | 软件服务类，每个类别各有一条 active
     active = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -573,7 +695,7 @@ class CatalogRule(Base):
     __tablename__ = "catalog_rules"
 
     id = Column(String, primary_key=True, default=lambda: gen_id("cr"))
-    kind = Column(String, index=True, nullable=False)  # business | tech | dup_check | dup_sim | strategy
+    kind = Column(String, index=True, nullable=False)  # business | tech | dup_check | dup_sim | strategy | anon
     key = Column(String, nullable=False)
     category = Column(String, nullable=False)
     point = Column(String, nullable=False)
@@ -588,6 +710,94 @@ class CatalogRule(Base):
     __table_args__ = (UniqueConstraint("kind", "key", name="uq_catalog_kind_key"),)
 
 
+class SwVetoRule(Base):
+    """软件服务类标书专用一票否决清单（预审规则页「软件服务标预审」/「一票否决」tab）。
+
+    与 VetoRule 字段形状一致、彻底分表，不与工程类一票否决清单混用。
+    """
+
+    __tablename__ = "sw_veto_rules"
+
+    id = Column(String, primary_key=True, default=lambda: gen_id("svt"))
+    key = Column(String, unique=True, nullable=False)
+    category = Column(String, nullable=False)
+    point = Column(String, nullable=False)
+    items_json = Column(JSON, default=list)
+    wired = Column(String, default="仅对照")
+    wired_note = Column(String, default="")
+    engine = Column(String, default="")
+    seq = Column(Integer, default=0)
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SwCatalogRule(Base):
+    """软件服务类标书专用目录：商务自查 / 技术评分 / 高分策略。
+
+    与 CatalogRule 字段形状一致、彻底分表，不与工程类目录混用。
+    """
+
+    __tablename__ = "sw_catalog_rules"
+
+    id = Column(String, primary_key=True, default=lambda: gen_id("scr"))
+    kind = Column(String, index=True, nullable=False)  # business | tech | strategy | dup_check | dup_sim | anon
+    key = Column(String, nullable=False)
+    category = Column(String, nullable=False)
+    point = Column(String, nullable=False)
+    items_json = Column(JSON, default=list)
+    wired = Column(String, default="仅对照")
+    wired_note = Column(String, default="")
+    engine = Column(String, default="")
+    seq = Column(Integer, default=0)
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("kind", "key", name="uq_sw_catalog_kind_key"),)
+
+
+class SwFillerWordRule(Base):
+    """软件服务类标书专用虚词表。字段与 FillerWordRule 一致，不与工程类虚词混用。"""
+
+    __tablename__ = "sw_filler_word_rules"
+
+    id = Column(String, primary_key=True, default=lambda: gen_id("sfw"))
+    category = Column(String, nullable=False)
+    level = Column(String, default="中危")
+    word = Column(String, nullable=False)
+    rewrite = Column(String, default="")
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SwThresholdRule(Base):
+    """软件服务类标书专用数值阈值。字段与 ThresholdRule 一致，不与工程类阈值混用。"""
+
+    __tablename__ = "sw_threshold_rules"
+
+    id = Column(String, primary_key=True, default=lambda: gen_id("sth"))
+    key = Column(String, unique=True, nullable=False)
+    label = Column(String, nullable=False)
+    value = Column(Float, nullable=False)
+    unit = Column(String, default="%")
+    description = Column(String, default="")
+
+
+class SwRulePackage(Base):
+    """软件服务类标书专用行业/属地合规包：启用后由 E2 在正文已写到对应主题时核验量化要求。
+
+    与 RulePackage 字段形状一致、彻底分表，不与工程类属地细则包混用。
+    """
+
+    __tablename__ = "sw_rule_packages"
+
+    id = Column(String, primary_key=True, default=lambda: gen_id("srp"))
+    name = Column(String, nullable=False)
+    region = Column(String, default="行业通用")
+    status = Column(String, default="启用")  # 启用 | 停用
+    items_json = Column(JSON, default=list)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class ProductLibrary(Base):
     """企业产品库：一个库对应一个可投标产品，功能点不跨库混用。"""
 
@@ -598,6 +808,8 @@ class ProductLibrary(Base):
     category = Column(String, default="软件系统")  # 软件系统 | 货物设备 | 综合方案
     description = Column(Text, default="")
     owner = Column(String, default="")
+    department_id = Column(String, nullable=True, index=True)
+    visibility = Column(String, default="企业")  # 企业 | 部门
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -619,6 +831,7 @@ class ProductSourceDoc(Base):
     filename = Column(String, nullable=False)
     storage_path = Column(String, nullable=False)
     size_bytes = Column(Integer, default=0)
+    content_sha256 = Column(String, default="", index=True)
     status = Column(String, default="queued")  # queued | running | done | failed
     extracted = Column(Integer, default=0)
     merged = Column(Integer, default=0)
@@ -645,6 +858,7 @@ class ProductFeature(Base):
     params = Column(Text, default="")
     intro = Column(Text, default="")
     bid_copy = Column(Text, default="")
+    source_text = Column(Text, default="")  # 源文档该章原文全文（表格为 Markdown 表），写标时优先使用
     brand = Column(String, default="")
     model = Column(String, default="")
     unit = Column(String, default="")
@@ -720,6 +934,8 @@ class ExportRecord(Base):
     revision_id = Column(String, ForeignKey("bid_revisions.id"), nullable=False)
     bid_document_id = Column(String, ForeignKey("bid_documents.id"), nullable=False)
     mode = Column(String, nullable=False)  # 明标 | 暗标
+    scope = Column(String, default="")  # business | tech；旧记录为空
+    category = Column(String, default="")  # 工程类 | 软件服务类
     operator = Column(String, default="")
     check_status = Column(String, nullable=False)  # 通过 | 阻断
     check_note = Column(Text, default="")
@@ -728,8 +944,9 @@ class ExportRecord(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
-class LlmProvider(Base):
-    """大模型接入凭据：平台秘钥 + Base URL。通义千问 / 硅基 / 自定义 / 本地共用 OpenAI 兼容协议。"""
+class LlmProvider(PlatformBase):
+    """大模型接入凭据：平台秘钥 + Base URL。通义千问 / 硅基 / 自定义 / 本地共用 OpenAI 兼容协议。
+    属于平台：密钥由平台后台统一管理，企业只能选用。"""
 
     __tablename__ = "llm_providers"
 
@@ -737,7 +954,7 @@ class LlmProvider(Base):
     name = Column(String, nullable=False)
     kind = Column(String, nullable=False)  # deepseek | doubao | qwen | siliconflow | openai | custom | local
     base_url = Column(String, default="")
-    api_key = Column(Text, default="")
+    api_key = Column(EncryptedText, default="")
     enabled = Column(Boolean, default=True)
     note = Column(String, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -745,7 +962,7 @@ class LlmProvider(Base):
     models = relationship("LlmModel", back_populates="provider", cascade="all, delete-orphan")
 
 
-class LlmModel(Base):
+class LlmModel(PlatformBase):
     """可在撰写工作台选用的具体模型；thinking 控制是否开启思维链。"""
 
     __tablename__ = "llm_models"

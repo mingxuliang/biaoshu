@@ -77,6 +77,16 @@ _STRATEGY_BY_THEME = {
     "code_cite": ("规范", "质量", "安全", "危大", "方案", "验收", "标准"),
     "structured_layout": ("组织", "施组", "目录", "总纲", "格式"),
 }
+_SW_STRATEGY_BY_THEME = {
+    "checklist_map": ("评分", "方案", "响应", "功能", "接口", "实施", "服务", "培训"),
+    "quantify": ("时限", "指标", "SLA", "可用性", "响应", "百分比", "并发"),
+    "originality": ("需求", "理解", "方案", "架构"),
+    "local_first": ("业绩", "团队", "售后", "驻场", "培训"),
+    "structured_layout": ("目录", "标题", "格式"),
+    "interface_consistency": ("接口", "数据", "架构", "调用"),
+    "compliance_evidence": ("等保", "信创", "安全", "适配", "测评"),
+    "code_cite": ("规范", "标准", "等保"),
+}
 
 
 def _group_of(dimension: str, label: str = "", source_item_id: str = "") -> str:
@@ -371,14 +381,22 @@ def _collect_grade_book(tree: list | None) -> str:
     return "\n".join(parts)
 
 
-def _pick_strategies(name: str, rule: str, strategy_keys: set[str] | None) -> list[dict]:
+def _pick_strategies(
+    name: str,
+    rule: str,
+    strategy_keys: set[str] | None,
+    strategy_catalog: list | None = None,
+) -> list[dict]:
     blob = f"{name}{rule}"
     picked: list[dict] = []
-    for strat in rules_data.HIGH_SCORE_STRATEGIES:
+    catalog = strategy_catalog if strategy_catalog is not None else rules_data.HIGH_SCORE_STRATEGIES
+    catalog_keys = {str(item.get("key") or "") for item in catalog if isinstance(item, dict)}
+    themes = _SW_STRATEGY_BY_THEME if "compliance_evidence" in catalog_keys else _STRATEGY_BY_THEME
+    for strat in catalog:
         key = strat["key"]
         if strategy_keys is not None and key not in strategy_keys:
             continue
-        hints = _STRATEGY_BY_THEME.get(key)
+        hints = themes.get(key)
         if key == "checklist_map" or (hints and any(h in blob for h in hints)):
             picked.append(
                 {
@@ -690,6 +708,7 @@ def run(
     headings: list[str] | None = None,
     strategy_keys: set[str] | None = None,
     paragraphs: list[dict] | None = None,
+    strategy_catalog: list | None = None,
 ) -> dict:
     bid = full_text or ""
     raw_items = expand_score_items(score_rules, tree)
@@ -762,7 +781,7 @@ def run(
 
     groups: dict[str, list[dict]] = {}
     for raw in raw_items:
-        strategies = _pick_strategies(raw["name"], raw["rule"], strategy_keys)
+        strategies = _pick_strategies(raw["name"], raw["rule"], strategy_keys, strategy_catalog)
         if raw["formula"]:
             entry = _formula_entry(raw, strategies)
         elif raw.get("coverOnly"):

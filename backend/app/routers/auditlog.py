@@ -6,6 +6,7 @@ from ..audit import format_cst, week_start_naive_utc
 from ..auth import get_current_user
 from ..db import get_db
 from ..models import AuditLog, BidDocument, KnowledgeDocument, Project, TenderDocument, User
+from ..permissions import PERM_SETTINGS, require_perm, visible_project_ids
 from ..schemas import (
     AuditLogListOut,
     AuditLogOut,
@@ -41,6 +42,7 @@ def list_audit_logs(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> AuditLogListOut:
+    require_perm(current_user, PERM_SETTINGS)  # 与前端「审计日志」页的权限一致
     query = db.query(AuditLog)
     if action and action != "全部" and action in VALID_ACTIONS:
         query = query.filter(AuditLog.action == action)
@@ -94,13 +96,12 @@ def global_search(
         return SearchOut()
     like = f"%{keyword}%"
 
-    projects = (
-        db.query(Project)
-        .filter(or_(Project.name.ilike(like), Project.code.ilike(like)))
-        .order_by(Project.created_at.desc())
-        .limit(8)
-        .all()
-    )
+    # 项目和项目文件只搜当前用户有权访问的项目，管理员不受限
+    visible = visible_project_ids(db, current_user)
+    project_q = db.query(Project).filter(or_(Project.name.ilike(like), Project.code.ilike(like)))
+    if visible is not None:
+        project_q = project_q.filter(Project.id.in_(visible or {""}))
+    projects = project_q.order_by(Project.created_at.desc()).limit(8).all()
     members = (
         db.query(User)
         .filter(
@@ -110,27 +111,24 @@ def global_search(
         .limit(8)
         .all()
     )
-    knowledge_docs = (
-        db.query(KnowledgeDocument)
-        .filter(or_(KnowledgeDocument.title.ilike(like), KnowledgeDocument.filename.ilike(like)))
-        .order_by(KnowledgeDocument.created_at.desc())
-        .limit(6)
-        .all()
+    knowledge_q = db.query(KnowledgeDocument).filter(
+        or_(KnowledgeDocument.title.ilike(like), KnowledgeDocument.filename.ilike(like))
     )
-    tender_docs = (
-        db.query(TenderDocument)
-        .filter(TenderDocument.filename.ilike(like))
-        .order_by(TenderDocument.uploaded_at.desc())
-        .limit(4)
-        .all()
-    )
-    bid_docs = (
-        db.query(BidDocument)
-        .filter(BidDocument.filename.ilike(like))
-        .order_by(BidDocument.uploaded_at.desc())
-        .limit(4)
-        .all()
-    )
+    if visible is not None:
+        # 个人库只搜自己的，项目库只搜可见项目的
+        knowledge_q = knowledge_q.filter(
+            (KnowledgeDocument.scope == "企业库")
+            | ((KnowledgeDocument.scope == "个人库") & (KnowledgeDocument.owner_id == current_user.id))
+            | ((KnowledgeDocument.scope == "项目库") & (KnowledgeDocument.project_id.in_(visible or {""})))
+        )
+    knowledge_docs = knowledge_q.order_by(KnowledgeDocument.created_at.desc()).limit(6).all()
+    tender_q = db.query(TenderDocument).filter(TenderDocument.filename.ilike(like))
+    bid_q = db.query(BidDocument).filter(BidDocument.filename.ilike(like))
+    if visible is not None:
+        tender_q = tender_q.filter(TenderDocument.project_id.in_(visible or {""}))
+        bid_q = bid_q.filter(BidDocument.project_id.in_(visible or {""}))
+    tender_docs = tender_q.order_by(TenderDocument.uploaded_at.desc()).limit(4).all()
+    bid_docs = bid_q.order_by(BidDocument.uploaded_at.desc()).limit(4).all()
 
     documents: list[SearchDocumentHit] = [
         SearchDocumentHit(

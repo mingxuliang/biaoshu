@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { OutlineNode } from "@/lib/api";
-import { displayOutlineTitle, renumberOutline } from "@/lib/outlineNum";
+import { nodeDisplayTitle, renumberOutline } from "@/lib/outlineNum";
 
 interface OutlineTreeProps {
   nodes: OutlineNode[];
@@ -130,7 +130,7 @@ export default function OutlineTree({
       switch (action) {
         case "rename":
           setEditingId(nodeId);
-          setEditValue(displayOutlineTitle(node.title, node.num));
+          setEditValue(nodeDisplayTitle(node));
           break;
         case "moveUp":
         case "moveDown": {
@@ -275,7 +275,7 @@ export default function OutlineTree({
                 />
               ) : (
                 <span className={`min-w-0 flex-1 whitespace-normal break-words text-xs leading-snug ${active ? "font-medium text-primary-700" : "text-foreground-700"}`}>
-                  {displayOutlineTitle(node.title, node.num)}
+                  {nodeDisplayTitle(node)}
                 </span>
               )}
 

@@ -2,13 +2,11 @@
 
 from datetime import datetime, timedelta, timezone
 
-import jwt
-from fastapi import Request
+from fastapi import HTTPException, Request
 from sqlalchemy.orm import Session
 
-from .auth import ALGORITHM
-from .config import get_settings
 from .models import AuditLog, Project, User
+from .tokens import decode_tenant_token
 
 CST = timezone(timedelta(hours=8))
 
@@ -20,10 +18,9 @@ def actor_from_request(db: Session, request: Request | None) -> str:
     if not auth.lower().startswith("bearer "):
         return "系统"
     token = auth.split(" ", 1)[1].strip()
-    settings = get_settings()
     try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
-    except jwt.PyJWTError:
+        payload = decode_tenant_token(token)
+    except HTTPException:
         return "系统"
     user_id = payload.get("sub")
     if not user_id:

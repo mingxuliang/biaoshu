@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.llm_catalog import PRESETS, SILICONFLOW_WRITER_MODELS
+from app.llm_catalog import PRESETS, SILICONFLOW_SCAN_MODEL, SILICONFLOW_WRITER_MODELS
 
 
 class SiliconFlowWriterModelsTest(unittest.TestCase):
@@ -22,6 +22,13 @@ class SiliconFlowWriterModelsTest(unittest.TestCase):
     def test_new_models_are_chat_only(self) -> None:
         tasks = {row.get("task", "chat") for row in SILICONFLOW_WRITER_MODELS}
         self.assertEqual(tasks, {"chat"})
+
+    def test_scan_model_is_cheap_vl_8b(self) -> None:
+        silicon = next(item for item in PRESETS if item["kind"] == "siliconflow")
+        apis = {row["api_model"] for row in silicon["sample_models"]}
+        self.assertEqual(SILICONFLOW_SCAN_MODEL["api_model"], "Qwen/Qwen3-VL-8B-Instruct")
+        self.assertIn(SILICONFLOW_SCAN_MODEL["api_model"], apis)
+        self.assertNotIn(SILICONFLOW_SCAN_MODEL, SILICONFLOW_WRITER_MODELS)
 
 
 if __name__ == "__main__":

@@ -1,28 +1,28 @@
 import json
-import logging
 import os
 import time
 import urllib.parse
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from ..audit import actor_from_request, project_label, write_audit
 from ..auth import get_current_user
-from ..db import SessionLocal, get_db
+from ..billing import require_credits
+from ..db import SessionLocal, get_db, tenant_session
 from ..engines import e_writer
 from ..engines.ark_image import ArkImageError, generate_and_save
 from ..engines.writer_diagram import DiagramError, create_diagram_png
 from ..engines.tender_form import extract_forms_from_storage, needs_form_recopy
-from ..engines.tender_style import extract_tender_typography_from_storage
-from ..engines.writer_export import chapters_to_docx
+from ..engines.writer_export import build_draft_export
+from ..engines.writer_layout import default_writing_layout
 from .. import storage
 from ..models import (
     BidDocument,
-    EvaluationChecklist,
     Project,
     TenderDocument,
     User,
@@ -35,6 +35,7 @@ from ..models import (
 from ..permissions import PERM_WRITER, require_perm, require_project
 from ..writer_tracks import DOC_KINDS as _DOC_KINDS
 from ..writer_tracks import branch_legacy_draft as _branch_legacy_draft
+from ..writer_tracks import merge_settings as _merge_settings
 from ..writer_tracks import mirror_shared_fields as _mirror_shared_fields
 from ..schemas import (
     GenerateAllChaptersIn,
@@ -64,8 +65,6 @@ from ..tasks import (
 )
 
 router = APIRouter(prefix="/api", tags=["writer"])
-logger = logging.getLogger(__name__)
-
 
 def _draft_to_out(draft: WriterDraft) -> WriterDraftOut:
     return WriterDraftOut(
@@ -119,12 +118,9 @@ def _require_writer_draft(db: Session, user: User, draft_id: str) -> WriterDraft
 
 
 def _project_tender_path(db: Session, project_id: str) -> str | None:
-    checklist = (
-        db.query(EvaluationChecklist)
-        .filter(EvaluationChecklist.project_id == project_id)
-        .order_by(EvaluationChecklist.version.desc())
-        .first()
-    )
+    from ..engines.rules_config import select_checklist
+
+    checklist = select_checklist(db, project_id)
     doc = None
     if checklist and checklist.tender_document_id:
         doc = db.get(TenderDocument, checklist.tender_document_id)
@@ -152,10 +148,9 @@ def _backfill_business_originals(db: Session, draft: WriterDraft) -> None:
         if not isinstance(n, dict):
             continue
         title = str(n.get("title") or "")
-        kind = e_writer.chapter_kind(
+        if not e_writer.should_paste_tender_original(
             title, n.get("part"), str(n.get("idea") or ""), str(n.get("requirement") or "")
-        )
-        if kind not in ("form", "business") and not e_writer.is_original_form_title(title):
+        ):
             continue
         titles.append(title)
         if needs_form_recopy(contents.get(n.get("id") or "") or ""):
@@ -180,23 +175,14 @@ def _backfill_business_originals(db: Session, draft: WriterDraft) -> None:
 
 
 def _ensure_tender_layout(db: Session, draft: WriterDraft) -> None:
-    """打开草稿时按本项目招标书补正文字体/字号/缩进；已识别过的不覆盖用户改动。"""
+    """打开草稿时补上默认技术标版式。招标书自动识别出的小字号不再覆盖章、节和正文。"""
     settings = dict(draft.settings_json or {}) if isinstance(draft.settings_json, dict) else {}
     layout = dict(settings.get("layout") or {}) if isinstance(settings.get("layout"), dict) else {}
-    if layout.get("fromTender") and layout.get("bodyFont"):
+    if layout.get("preset") and not layout.get("fromTender"):
         return
-    tender_path = _project_tender_path(db, draft.project_id)
-    if not tender_path:
+    if layout.get("bodyFont") and layout.get("headings") and not layout.get("fromTender"):
         return
-    try:
-        extracted = extract_tender_typography_from_storage(tender_path)
-    except Exception:  # noqa: BLE001 —— 识别失败不影响打开草稿
-        logger.exception("extract tender typography failed")
-        return
-    extracted.pop("margins", None)
-    layout.update(extracted)
-    layout["fromTender"] = True
-    settings["layout"] = layout
+    settings["layout"] = default_writing_layout()
     draft.settings_json = settings
     flag_modified(draft, "settings_json")
     db.commit()
@@ -267,7 +253,8 @@ def update_writer_draft(
             detail=f"撰写工作台引用知识切片 {n_refs} 处",
         )
     if "settings" in data:
-        draft.settings_json = data["settings"]
+        # 台账、附录登记表、应答记录由后端写入，前端回存设置时不能把它们冲掉
+        draft.settings_json = _merge_settings(draft.settings_json, data["settings"])
         flag_modified(draft, "settings_json")
     if "interpretSource" in data:
         draft.interpret_source = data["interpretSource"]
@@ -283,10 +270,31 @@ def update_writer_draft(
     return _draft_to_out(draft)
 
 
+@router.put("/writer-drafts/{draft_id}/eng-facts", response_model=WriterDraftOut)
+def save_engineering_facts(
+    draft_id: str,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> WriterDraftOut:
+    """工程技术标的工程事实（工期、质量、重难点、评分项等）手工修订。重新生成目录时沿用修订值。"""
+    from ..engines.engineering_writer import FACTS_KEY, normalize_facts
+
+    draft = _require_writer_draft(db, current_user, draft_id)
+    settings = dict(draft.settings_json or {}) if isinstance(draft.settings_json, dict) else {}
+    settings[FACTS_KEY] = {**normalize_facts(payload), "edited": True}
+    draft.settings_json = settings
+    flag_modified(draft, "settings_json")
+    db.commit()
+    db.refresh(draft)
+    return _draft_to_out(draft)
+
+
 @router.post("/writer-drafts/{draft_id}/outline-jobs", response_model=WriterJobOut)
 def create_outline_job(
     draft_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ) -> WriterJobOut:
+    require_credits("outline")
     _require_writer_draft(db, current_user, draft_id)
 
     job = WriterJob(draft_id=draft_id, kind="outline", status="queued", user_id=current_user.id)
@@ -305,6 +313,7 @@ def create_product_match_job(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> WriterJobOut:
+    require_credits("product_match")
     draft = _require_writer_draft(db, current_user, draft_id)
     if not draft.selected_product_library_id:
         raise HTTPException(400, "请先在标书设置中选择产品功能库")
@@ -342,11 +351,13 @@ def stream_writer_job_events(
     if job.kind == "chat" and job.user_id and job.user_id != current_user.id:
         raise HTTPException(404, "任务不存在")
 
+    tenant_id = db.info.get("tenant_id")
+
     def events():
         last = ""
         deadline = time.time() + 600
         while time.time() < deadline:
-            session = SessionLocal()
+            session = tenant_session(tenant_id) if tenant_id else SessionLocal()
             try:
                 row = session.get(WriterJob, job_id)
                 if row is None:
@@ -384,6 +395,7 @@ def create_chapter_generate_job(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> WriterJobOut:
+    require_credits("chapter")
     draft = _require_writer_draft(db, current_user, draft_id)
 
     outline = draft.outline_json or []
@@ -423,6 +435,7 @@ def create_generate_all_job(
     current_user: User = Depends(get_current_user),
 ) -> WriterJobOut:
     """按目录一次生成全部章节。默认只补还没有正文的章节，overwrite=true 全部重写。"""
+    require_credits("batch_chapter")
     draft = _require_writer_draft(db, current_user, draft_id)
     if not (draft.outline_json or []):
         raise HTTPException(400, "请先生成应标目录")
@@ -457,6 +470,9 @@ def save_chapter_content(
     current_user: User = Depends(get_current_user),
 ) -> WriterDraftOut:
     draft = _require_writer_draft(db, current_user, draft_id)
+    from ..collab import touch_chapter
+
+    touch_chapter(db, draft, chapter_id, current_user, payload.baseVersion)
 
     contents = dict(draft.chapter_contents_json or {})
     contents[chapter_id] = payload.content
@@ -470,32 +486,42 @@ def save_chapter_content(
 
 @router.get("/writer-drafts/{draft_id}/export")
 def export_writer_draft_docx(
-    draft_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    draft_id: str,
+    force: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> Response:
     draft = _require_writer_draft(db, current_user, draft_id)
     if not draft.outline_json:
         raise HTTPException(400, "尚无目录内容，请先生成目录后再导出")
+    from ..engines.engineering_check import blocking_message, run_water_check
 
     project = db.get(Project, draft.project_id)
-    project_name = project.name if project else ""
+    if not force and project is not None and (project.specialty or "").strip() == "水利" and draft.doc_kind == "tech":
+        settings = draft.settings_json if isinstance(draft.settings_json, dict) else {}
+        check = settings.get("waterCheckJson")
+        if not isinstance(check, dict):
+            check = run_water_check(
+                db, draft.project_id, settings.get("engFacts"), draft.outline_json or [], draft.chapter_contents_json or {}
+            )
+        message = blocking_message(check)
+        if message:
+            raise HTTPException(400, message)
+    from ..engines.submission_check import refresh_forms
 
-    images = db.query(WriterImage).filter(WriterImage.project_id == draft.project_id).all()
-    refs = {img.id: img.storage_path for img in images}
+    refresh_forms(db, draft)
 
-    layout = (draft.settings_json or {}).get("layout") if isinstance(draft.settings_json, dict) else None
-    with storage.as_local_map(refs) as image_paths:
-        docx_bytes = chapters_to_docx(
-            project_name, draft.outline_json or [], draft.chapter_contents_json or {}, image_paths, layout
-        )
+    # 技术册 / 商务册各自导出：文件名带分册，BidDocument.kind 跟 doc_kind，后续预审才能分对册
+    docx_bytes, display_name, doc_kind = build_draft_export(db, draft)
 
     key = storage.put_bytes(f"bid-documents/{draft.project_id}", docx_bytes, ".docx")
-    display_name = f"{project_name or '投标书'}-撰写工作台导出.docx"
     doc = BidDocument(
         project_id=draft.project_id,
         filename=display_name,
         storage_path=key,
         size_bytes=len(docx_bytes),
         source="writer",
+        kind=doc_kind,
     )
     db.add(doc)
     db.commit()
@@ -504,7 +530,104 @@ def export_writer_draft_docx(
     return Response(
         content=docx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f"attachment; filename=\"writer-export.docx\"; filename*=UTF-8''{encoded_name}"},
+        headers={
+            "Content-Disposition": f"attachment; filename=\"writer-export.docx\"; filename*=UTF-8''{encoded_name}",
+            # 前端据此直接带着这份文件去预审
+            "X-Bid-Document-Id": doc.id,
+        },
+    )
+
+
+class RenderPreviewIn(BaseModel):
+    chapterId: str | None = None
+
+
+@router.post("/writer-drafts/{draft_id}/render")
+def render_writer_preview(
+    draft_id: str,
+    payload: RenderPreviewIn | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """版式预览：用和导出同一条路径生成 docx，交给 LibreOffice 渲染成 PDF。
+
+    chapterId 给定时只渲染该章节及其子章节；不给就是整本（含封面和目录）。
+    结果按内容哈希缓存，文字和版式都没变时直接命中。
+    """
+    from ..engines.submission_check import refresh_forms
+    from ..engines.writer_export import build_draft_docx, subtree_ids
+    from ..engines.writer_render import RenderUnavailable, render_docx
+
+    draft = _require_writer_draft(db, current_user, draft_id)
+    outline = draft.outline_json or []
+    if not outline:
+        raise HTTPException(400, "尚无目录内容，请先生成目录")
+    chapter_id = (payload.chapterId if payload else None) or None
+    chapter_ids: set[str] | None = None
+    if chapter_id:
+        if not any(n.get("id") == chapter_id for n in outline):
+            raise HTTPException(404, "章节不存在")
+        chapter_ids = set(subtree_ids(outline, chapter_id))
+    if chapter_ids is None or any(n.get("formKeys") for n in outline if n.get("id") in chapter_ids):
+        refresh_forms(db, draft)
+    try:
+        docx_bytes, _name, _kind = build_draft_docx(db, draft, chapter_ids)
+        info = render_docx(draft.id, docx_bytes)
+    except RenderUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    info["chapterId"] = chapter_id
+    return info
+
+
+@router.get("/writer-drafts/{draft_id}/render/{key}/pages/{page}.png")
+def get_writer_preview_page(
+    draft_id: str,
+    key: str,
+    page: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    from ..engines.writer_render import is_valid_hash, render_page_png
+
+    draft = _require_writer_draft(db, current_user, draft_id)
+    if not is_valid_hash(key):
+        raise HTTPException(400, "预览编号不正确")
+    try:
+        png = render_page_png(draft.id, key, page)
+    except FileNotFoundError:
+        raise HTTPException(404, "预览已过期，请重新渲染") from None
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+@router.get("/writer-drafts/{draft_id}/self-check")
+def writer_self_check(
+    draft_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+) -> dict:
+    """提交前五项自查（缺项、矛盾、有效性、形式、补遗）和追溯矩阵。"""
+    from ..engines.submission_check import refresh_forms, run_self_check
+
+    draft = _require_writer_draft(db, current_user, draft_id)
+    refresh_forms(db, draft)
+    return run_self_check(db, draft)
+
+
+@router.get("/writer-drafts/{draft_id}/trace-matrix.csv")
+def writer_trace_matrix(
+    draft_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+) -> Response:
+    from ..engines.submission_check import matrix_csv, run_self_check
+
+    draft = _require_writer_draft(db, current_user, draft_id)
+    report = run_self_check(db, draft)
+    name = urllib.parse.quote("追溯矩阵.csv")
+    return Response(
+        content=matrix_csv(report["matrix"]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename=\"trace-matrix.csv\"; filename*=UTF-8''{name}"},
     )
 
 
@@ -854,6 +977,7 @@ def writer_chat(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> WriterChatOut:
+    require_credits("writer_chat")
     draft = _require_writer_draft(db, current_user, draft_id)
     message = (payload.message or "").strip()
     file_ids = [item for item in (payload.fileIds or []) if item]

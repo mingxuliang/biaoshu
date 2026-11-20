@@ -1,6 +1,7 @@
 // AI 预审引擎后端 API 封装（对应 backend/app/routers）。
 // 五引擎相关请求全部走这里，页面组件不直接拼 URL。
 
+import { normalizeCategory } from "@/mocks/projects";
 import type { PreReviewIssue, PreReviewLevel } from "@/mocks/preReview";
 import type {
   ProductItem,
@@ -48,6 +49,7 @@ export interface TenderRuleItem {
   reason: string;
   suggestion: string;
   strategies: TenderStrategyRef[];
+  sourceItemId?: string;
 }
 
 export interface TenderRuleGroup {
@@ -154,6 +156,8 @@ export interface ReviewReport {
   customRules?: CustomRuleReview[] | null;
   standardReview?: StandardReview | null;
   issues: PreReviewIssue[];
+  bidDocumentId?: string;
+  checklistLocked?: boolean;
 }
 
 export interface ReviewReportPair {
@@ -306,10 +310,13 @@ export interface Checklist {
     omittedCount?: Record<string, number>;
     filledRows?: number;
     bidRequirementNote?: string;
+    engineeringWarnings?: string[];
   };
   omittedCount?: Record<string, number>;
   techBidResponseRequirements?: string;
   businessBidResponse?: string;
+  projectRules?: ProjectRule[];
+  drawingFacts?: DrawingFact[];
 }
 
 class ApiError extends Error {
@@ -321,6 +328,43 @@ class ApiError extends Error {
   }
 }
 
+/** 余额不足（402）与企业停用/到期（403 tenant_inactive）广播给全局提示组件，引导去费用中心。 */
+export const BILLING_EVENT = "zhbiao:billing";
+
+export interface BillingEventDetail {
+  kind: "insufficient" | "inactive";
+  message: string;
+}
+
+const TOKEN_KEY = "zhbiao_token";
+export const TOKEN_EVENT = "zhbiao:token";
+export const UNAUTHORIZED_EVENT = "zhbiao:unauthorized";
+const AUTH_NOTICE_KEY = "zhbiao_auth_notice";
+
+function rememberRenewedToken(res: Response) {
+  const next = res.headers.get("X-Access-Token");
+  if (!next || next === localStorage.getItem(TOKEN_KEY)) return;
+  localStorage.setItem(TOKEN_KEY, next);
+  window.dispatchEvent(new CustomEvent(TOKEN_EVENT, { detail: next }));
+}
+
+function expireSession(path: string) {
+  if (/\/api\/auth\/(login|register|signup|send-code|options)/.test(path)) return;
+  if (!localStorage.getItem(TOKEN_KEY)) return;
+  localStorage.removeItem(TOKEN_KEY);
+  sessionStorage.setItem(AUTH_NOTICE_KEY, "登录已过期，请重新登录。未保存的修改需要重新提交。");
+  window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+}
+
+function emitBillingEvent(status: number, message: string, code?: string) {
+  if (typeof window === "undefined") return;
+  let kind: BillingEventDetail["kind"] | null = null;
+  if (status === 402) kind = "insufficient";
+  else if (status === 403 && code === "tenant_inactive") kind = "inactive";
+  if (!kind) return;
+  window.dispatchEvent(new CustomEvent<BillingEventDetail>(BILLING_EVENT, { detail: { kind, message } }));
+}
+
 async function request<T>(path: string, init?: Parameters<typeof fetch>[1]): Promise<T> {
   const headers = new Headers(init?.headers);
   const token = localStorage.getItem("zhbiao_token");
@@ -330,15 +374,36 @@ async function request<T>(path: string, init?: Parameters<typeof fetch>[1]): Pro
   const res = await fetch(path, { ...init, headers });
   if (!res.ok) {
     let message = `请求失败（${res.status}）`;
+    let code: string | undefined;
+    if (res.status === 413) message = "上传内容过大，请压缩或拆分后重试";
+    else if (res.status === 502 || res.status === 503 || res.status === 504) {
+      message = "服务暂时不可用或处理超时，请稍后重试";
+    }
     try {
       const body = await res.json();
-      if (body?.detail) message = body.detail;
+      const detail = body?.detail;
+      code = typeof body?.code === "string" ? body.code : undefined;
+      if (typeof detail === "string" && detail) message = detail;
+      else if (Array.isArray(detail) && detail.length) {
+        // FastAPI 校验错误：取第一条的说明
+        const first = detail[0];
+        message = typeof first?.msg === "string" ? `参数有误：${first.msg}` : message;
+      }
     } catch {
-      // ignore json parse error, use default message
+      // 响应不是 JSON（如网关错误页），沿用上面的默认文案
     }
+    emitBillingEvent(res.status, message, code);
     throw new ApiError(message, res.status);
   }
-  return res.json() as Promise<T>;
+  // 204 或空响应体没有 JSON，直接返回 undefined，避免 res.json() 抛出难懂的解析错误
+  if (res.status === 204) return undefined as T;
+  const text = await res.text();
+  if (!text) return undefined as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new ApiError("服务返回的内容无法识别，请刷新页面后重试", res.status);
+  }
 }
 
 export async function uploadBidDocument(
@@ -490,6 +555,26 @@ export interface DrawingReviewRule {
   axis: string;
 }
 
+export interface ProjectRule {
+  id: string;
+  source: string;
+  title: string;
+  requirement: string;
+  checkType: string;
+  severity: string;
+  evidence: string;
+  enabled: boolean;
+}
+
+export interface DrawingFact {
+  object: string;
+  field: string;
+  value: string;
+  drawingNo: string;
+  page: number | null;
+  evidence: string;
+}
+
 export interface ProjectStandardRules {
   projectId: string;
   version: number | null;
@@ -497,14 +582,28 @@ export interface ProjectStandardRules {
   note: string;
   tenderRules: TenderLeafRule[];
   drawingRules: DrawingReviewRule[];
+  projectRules?: ProjectRule[];
+  drawingFacts?: DrawingFact[];
 }
 
 export async function getProjectStandardRules(projectId: string): Promise<ProjectStandardRules> {
   return request<ProjectStandardRules>(`/api/projects/${projectId}/standard-rules`);
 }
 
+export async function setProjectRuleEnabled(projectId: string, ruleId: string, enabled: boolean): Promise<Checklist> {
+  return request<Checklist>(`/api/projects/${projectId}/project-rules/${ruleId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+}
+
 export async function lockChecklist(projectId: string, checklistId: string): Promise<Checklist> {
   return request<Checklist>(`/api/projects/${projectId}/checklist/${checklistId}/lock`, { method: "POST" });
+}
+
+export async function unlockChecklist(projectId: string, checklistId: string): Promise<Checklist> {
+  return request<Checklist>(`/api/projects/${projectId}/checklist/${checklistId}/unlock`, { method: "POST" });
 }
 
 /** 轮询招标解析任务直至完成/失败。 */
@@ -533,6 +632,52 @@ export interface AuthUser {
   company: string;
   position: string;
   role: string;
+  departmentId?: string | null;
+  /** 后端按内置角色或自定义角色解析好的权限点 */
+  perms?: string[];
+  dataScope?: string;
+  tenant?: { id: string; name: string; kind?: TenantKind; status: string; plan?: string; verifyStatus?: string } | null;
+  /** 改密码后后端签发的新令牌，旧令牌已作废 */
+  token?: string | null;
+}
+
+/** 企业：成员共享一个积分池；个人：只有本人，可升级为企业 */
+export type TenantKind = "企业" | "个人";
+
+export const isPersonal = (user?: { tenant?: { kind?: TenantKind } | null } | null) => user?.tenant?.kind === "个人";
+
+export interface AuthOptions {
+  allowRegister: boolean;
+  allowTenantSignup?: boolean;
+  signupCodeRequired?: boolean;
+}
+
+export async function getAuthOptions(): Promise<AuthOptions> {
+  return request<AuthOptions>("/api/auth/options");
+}
+
+export async function sendSignupCode(target: string): Promise<void> {
+  await request<{ ok: boolean }>("/api/auth/send-code", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ target }),
+  });
+}
+
+export async function apiTenantSignup(payload: {
+  kind: TenantKind;
+  companyName: string;
+  name: string;
+  account: string;
+  password: string;
+  code: string;
+  phone?: string;
+}): Promise<AuthResult> {
+  return request<AuthResult>("/api/auth/signup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 }
 
 export interface AuthResult {
@@ -556,6 +701,11 @@ export interface TeamMember {
   disabled?: boolean;
   projectCount?: number;
   joinedAt?: string;
+  departmentId?: string | null;
+  departmentName?: string;
+  customRoleId?: string | null;
+  monthlyCreditLimit?: number | null;
+  lastLoginAt?: string;
 }
 
 export interface ProjectDto {
@@ -563,7 +713,9 @@ export interface ProjectDto {
   code: string;
   name: string;
   type: "工程" | "政采" | "医疗" | "交通" | "IT" | "能源";
-  category: "软件服务类" | "工程类";
+  category: "软件服务类" | "工程类" | "产品标" | "工程标";
+  specialty?: string;
+  workType?: string;
   owner: string;
   budget: string;
   deadline: string;
@@ -580,6 +732,8 @@ export interface CreateProjectPayload {
   code: string;
   type: ProjectDto["type"];
   category?: ProjectDto["category"];
+  specialty?: string;
+  workType?: string;
   budget?: string;
   deadline?: string;
   owner?: string;
@@ -623,7 +777,15 @@ export async function apiGetMe(token: string): Promise<AuthUser> {
 
 export async function apiUpdateProfile(
   token: string,
-  patch: Partial<{ name: string; email: string; phone: string; company: string; position: string; password: string }>,
+  patch: Partial<{
+    name: string;
+    email: string;
+    phone: string;
+    company: string;
+    position: string;
+    password: string;
+    currentPassword: string;
+  }>,
 ): Promise<AuthUser> {
   return request<AuthUser>("/api/auth/me", {
     method: "PATCH",
@@ -632,20 +794,27 @@ export async function apiUpdateProfile(
   });
 }
 
+function withNormalizedCategory(project: ProjectDto): ProjectDto {
+  return { ...project, category: normalizeCategory(project.category) };
+}
+
 export async function listProjects(token: string): Promise<ProjectDto[]> {
-  return request<ProjectDto[]>("/api/projects", { headers: authHeaders(token) });
+  const list = await request<ProjectDto[]>("/api/projects", { headers: authHeaders(token) });
+  return list.map(withNormalizedCategory);
 }
 
 export async function getProjectApi(token: string, id: string): Promise<ProjectDto> {
-  return request<ProjectDto>(`/api/projects/${id}`, { headers: authHeaders(token) });
+  const project = await request<ProjectDto>(`/api/projects/${id}`, { headers: authHeaders(token) });
+  return withNormalizedCategory(project);
 }
 
 export async function createProject(token: string, payload: CreateProjectPayload): Promise<ProjectDto> {
-  return request<ProjectDto>("/api/projects", {
+  const project = await request<ProjectDto>("/api/projects", {
     method: "POST",
     headers: authHeaders(token),
     body: JSON.stringify(payload),
   });
+  return withNormalizedCategory(project);
 }
 
 export async function updateProjectApi(
@@ -653,11 +822,12 @@ export async function updateProjectApi(
   id: string,
   patch: UpdateProjectPayload,
 ): Promise<ProjectDto> {
-  return request<ProjectDto>(`/api/projects/${id}`, {
+  const project = await request<ProjectDto>(`/api/projects/${id}`, {
     method: "PATCH",
     headers: authHeaders(token),
     body: JSON.stringify(patch),
   });
+  return withNormalizedCategory(project);
 }
 
 // AI 撰写工作台真实后端接入相关请求。
@@ -681,6 +851,71 @@ export interface OutlineNode {
   sourceIndex?: number | null;
   part?: "tech" | "business" | "form" | null;
   requirement?: string;
+  sourceRefs?: string[];
+  formKeys?: number[];
+  /** 工程类技术标：box 一格框表 / pairs 项目内容两列表 / grid 多列数据表 / figure 图 / group 分组 */
+  engKind?: "box" | "pairs" | "grid" | "figure" | "group" | null;
+  /** 工程类技术标的重难点来源：招标点名 / 补充 */
+  engSource?: string | null;
+}
+
+export interface EngineeringFacts {
+  projectName?: string;
+  location?: string;
+  scale?: string;
+  scope?: string;
+  duration?: string;
+  milestones?: string;
+  quality?: string;
+  greenBuilding?: string;
+  smartSite?: string;
+  civilization?: string;
+  environment?: string;
+  formatNote?: string;
+  pageLimit?: number | null;
+  scoreItems?: { title: string; weight?: number | null; points?: string; sections?: string[] }[];
+  difficulties?: { title: string; text?: string }[];
+  extraDifficulties?: { title: string; text?: string }[];
+  hazards?: { name: string; text?: string }[];
+  attachments?: string[];
+  majorWorks?: string[];
+  buildings?: string[];
+  edited?: boolean;
+  regionTotalLength?: string;
+  regions?: { name: string; length?: string; mainQuantities?: string }[];
+  controlNodes?: { name: string; window?: string; note?: string }[];
+  floodSeason?: { spansFlood?: boolean; diversionMethod?: string; stopWorkRule?: string };
+  standardsRefs?: string[];
+  projectGrade?: { projectLevel?: string; structureLevel?: string; floodStandard?: string; source?: string };
+  structures?: { name: string; count?: string; spec?: string }[];
+  siteSurvey?: {
+    boundaries?: string;
+    sensitivePoints?: { name: string; kind?: string; note?: string }[];
+    access?: string;
+    crsNote?: string;
+  };
+}
+
+export interface WaterCheckItem {
+  axis: string;
+  chapterId: string;
+  title: string;
+  message: string;
+}
+
+export interface WaterCheck {
+  ok: boolean;
+  blocking: WaterCheckItem[];
+  advisory: WaterCheckItem[];
+  siteGaps?: string[];
+}
+
+export async function saveEngineeringFacts(draftId: string, facts: EngineeringFacts): Promise<WriterDraft> {
+  return request<WriterDraft>(`/api/writer-drafts/${draftId}/eng-facts`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(facts),
+  });
 }
 
 export type KnowledgeRefSource = "knowledge" | "product" | "qualification";
@@ -733,7 +968,37 @@ export interface WriterJob {
     engine?: string;
     trace?: WriterChatTraceStep[];
     edits?: WriterChatEdit[];
+    coverage?: OutlineCoverage;
   } & GenerateAllProgress) | null;
+}
+
+export interface OutlineCoverage {
+  total?: number;
+  boundByModel?: number;
+  titleMatched?: number;
+  backfilled?: number;
+  noSource?: string[];
+  mergedLeaves?: number;
+  reviewIssues?: string[];
+  placementNotes?: string[];
+  formMapped?: string[];
+  noKnowledgeSource?: boolean;
+  fallbackOutline?: boolean;
+  ledger?: { total: number; cited: number; mandatory: number; uncited: string[] };
+  engineering?: boolean;
+  scoreItems?: number;
+  difficulties?: number;
+  extraDifficulties?: number;
+  hazards?: number;
+  defaultSkeleton?: boolean;
+  water?: boolean;
+  regions?: number;
+  controlNodes?: number;
+  spansFlood?: boolean;
+  specialty?: string;
+  subtypes?: string[];
+  siteGaps?: string[];
+  structures?: number;
 }
 
 export interface WriterChatEdit {
@@ -853,7 +1118,6 @@ async function streamWriterJobUntilDone(
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";
-    let last: WriterJob | null = null;
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -869,13 +1133,18 @@ async function streamWriterJobUntilDone(
         } catch {
           continue;
         }
-        last = job;
         onUpdate?.(job);
         if (job.status === "done" || job.status === "failed") return job;
       }
     }
-    if (last) return last;
-    throw new ApiError("对话中断，请稍后重试", 408);
+    // 流提前结束（网关断开或服务端 600 秒到期）时任务可能仍在跑，改用轮询拿最终结果
+    window.clearTimeout(timer);
+    return await pollWriterJobUntilDone(jobId, { timeoutMs, onUpdate });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new ApiError("等待结果超时，任务可能仍在后台运行，请稍后刷新查看", 408);
+    }
+    throw err;
   } finally {
     window.clearTimeout(timer);
   }
@@ -901,6 +1170,7 @@ export interface GenerateAllProgress {
   skipped?: number;
   items?: GenerateAllItem[];
   failed?: GenerateAllItem[];
+  waterCheck?: WaterCheck;
 }
 
 /** 按目录一次生成全部章节。默认只补空章节，overwrite=true 全部重写。 */
@@ -937,8 +1207,46 @@ export async function downloadChecklistReport(projectId: string, checklistId: st
   return fetchBlob(`/api/projects/${projectId}/checklist/${checklistId}/export`);
 }
 
-export async function exportWriterDraftDocx(draftId: string): Promise<Blob> {
-  const res = await fetch(`/api/writer-drafts/${draftId}/export`);
+export interface WriterRenderInfo {
+  hash: string;
+  pages: number;
+  cached: boolean;
+  ms: number;
+  chapterId: string | null;
+}
+
+/** 版式预览：后端按和导出相同的路径生成 docx，用 LibreOffice 渲染。chapterId 不传为整本。 */
+export async function renderWriterPreview(draftId: string, chapterId?: string): Promise<WriterRenderInfo> {
+  return request<WriterRenderInfo>(`/api/writer-drafts/${draftId}/render`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chapterId: chapterId || null }),
+  });
+}
+
+export async function fetchWriterPreviewPage(draftId: string, hash: string, page: number): Promise<Blob> {
+  return fetchBlob(`/api/writer-drafts/${draftId}/render/${hash}/pages/${page}.png`);
+}
+
+export interface WriterSelfCheck {
+  ok: boolean;
+  checks: { name: string; ok: boolean; problems: string[] }[];
+  matrix: Record<string, string>[];
+}
+
+export async function getWriterSelfCheck(draftId: string): Promise<WriterSelfCheck> {
+  return request<WriterSelfCheck>(`/api/writer-drafts/${draftId}/self-check`);
+}
+
+export async function downloadWriterTraceMatrix(draftId: string): Promise<Blob> {
+  return fetchBlob(`/api/writer-drafts/${draftId}/trace-matrix.csv`);
+}
+
+export async function exportWriterDraftDocx(draftId: string, force = false): Promise<{ blob: Blob; bidDocumentId: string }> {
+  const token = localStorage.getItem("zhbiao_token");
+  const res = await fetch(`/api/writer-drafts/${draftId}/export${force ? "?force=true" : ""}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
   if (!res.ok) {
     let message = `导出失败（${res.status}）`;
     try {
@@ -949,7 +1257,7 @@ export async function exportWriterDraftDocx(draftId: string): Promise<Blob> {
     }
     throw new ApiError(message, res.status);
   }
-  return res.blob();
+  return { blob: await res.blob(), bidDocumentId: res.headers.get("X-Bid-Document-Id") || "" };
 }
 
 export type WriterImageMode = "normal" | "flow" | "arch";
@@ -1146,12 +1454,20 @@ export async function writerChat(
 
 // 文档知识库真实后端接入相关请求。
 
-export const KNOWLEDGE_SCOPES = ["全部", "企业库", "项目库", "个人库"] as const;
+export const KNOWLEDGE_SCOPES = ["全部", "企业库", "部门库", "项目库", "个人库"] as const;
 export const KNOWLEDGE_TYPES = ["历史中标标书", "专项方案", "施工工艺", "规范条文", "制度表单", "图表模板"] as const;
+
+/** 文件名像「SL 775-2018」「GB/T 51280-2018」这类规范编号时，上传弹窗默认选「规范条文」。
+ * 与后端 engines/standard_ingest.py 的 looks_like_standard_filename 保持一致，只看文件名前缀。 */
+const STANDARD_FILENAME_RE = /\b(JGJ|JG|GB|CJJ|JTG|SL|NB)\s*[-/／∕]?\s*T?\s*\d{2,6}/i;
+export function looksLikeStandardFilename(filename: string): boolean {
+  const stem = filename.replace(/\.[^.]+$/, "");
+  return STANDARD_FILENAME_RE.test(stem);
+}
 
 export interface KnowledgeDoc {
   id: string;
-  scope: "企业库" | "项目库" | "个人库";
+  scope: "企业库" | "部门库" | "项目库" | "个人库";
   type: string;
   title: string;
   tags: string[];
@@ -1160,6 +1476,12 @@ export interface KnowledgeDoc {
   sliceCount: number;
   reviewFlag: string | null;
   updatedAt: string;
+  status?: "queued" | "running" | "done" | "failed" | string;
+  error?: string | null;
+  /** 规范扫描件的进度。total 为 0 表示整本正在识别，大于 0 表示按页进度。 */
+  progress?: { done: number; total: number } | null;
+  duplicateHint?: string;
+  duplicate?: boolean;
 }
 
 export interface KnowledgeSliceImage {
@@ -1234,12 +1556,40 @@ export async function uploadKnowledgeDocument(
   });
 }
 
+export async function getKnowledgeDocument(id: string): Promise<KnowledgeDoc> {
+  return request<KnowledgeDoc>(`/api/knowledge-documents/${id}`);
+}
+
+/** 上传后后台解析，轮询到 done / failed 为止。 */
+export async function pollKnowledgeDocumentUntilDone(id: string, timeoutMs = 15 * 60 * 1000): Promise<KnowledgeDoc> {
+  const start = Date.now();
+  for (;;) {
+    const doc = await getKnowledgeDocument(id);
+    if (doc.status === "failed") throw new ApiError(doc.error || "文档解析失败", 500);
+    if (!doc.status || doc.status === "done") return doc;
+    if (Date.now() - start > timeoutMs) throw new ApiError("文档解析超时，请稍后刷新查看", 504);
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+}
+
 export async function deleteKnowledgeDocument(id: string): Promise<void> {
   await request(`/api/knowledge-documents/${id}`, { method: "DELETE" });
 }
 
 export async function rechunkKnowledgeDocument(id: string): Promise<KnowledgeDoc> {
   return request<KnowledgeDoc>(`/api/knowledge-documents/${id}/rechunk`, { method: "POST" });
+}
+
+/** 改类型、标题或标签，不自动触发重新解析——改完类型要另外点「重新发起解析」。 */
+export async function patchKnowledgeDocument(
+  id: string,
+  payload: { type?: string; title?: string; tags?: string[] },
+): Promise<KnowledgeDoc> {
+  return request<KnowledgeDoc>(`/api/knowledge-documents/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function getKnowledgeChapters(docId: string): Promise<KnowledgeChapter[]> {
@@ -1323,6 +1673,12 @@ export interface BidRevision {
   layout?: BidLayout | null;
   resolvedIds?: string[];
   runSwitched?: boolean;
+  /** 工程类 / 软件服务类 */
+  category?: string;
+  /** 工程标 / 软件服务标 */
+  categoryLabel?: string;
+  /** 该册没有单独预审，问题取自合订轮次 */
+  fromFullRun?: boolean;
 }
 
 export interface BidRevisionVersion {
@@ -1408,24 +1764,12 @@ export async function listBidRevisionVersions(revisionId: string): Promise<BidRe
 export async function restoreBidRevisionVersion(
   revisionId: string,
   versionId: string,
-): Promise<{ contentState: Record<string, unknown> }> {
+): Promise<{ contentState: Record<string, unknown>; versionId?: string; bidDocumentId?: string }> {
   return request(`/api/bid-revisions/${revisionId}/versions/${versionId}/restore`, { method: "POST" });
 }
 
-export async function exportBidRevisionDocx(revisionId: string): Promise<Blob> {
-  const res = await fetch(`/api/bid-revisions/${revisionId}/export`);
-  if (!res.ok) {
-    let message = `导出失败（${res.status}）`;
-    try {
-      const body = await res.json();
-      if (body?.detail) message = body.detail;
-    } catch {
-      // ignore json parse error, use default message
-    }
-    throw new ApiError(message, res.status);
-  }
-  return res.blob();
-}
+// 导出统一走导出中心（/api/projects/{id}/exports）：按分册、按类别复检后才能导出，
+// 这里不再提供绕过复检的「直接下载最近版本」。
 
 // Word 导出中心真实后端接入相关请求。
 
@@ -1444,11 +1788,30 @@ export interface ExportChecks {
   items: ExportCheckItem[];
   blocked: boolean;
   blockReason: string;
+  scope: ExportScope;
+  /** 工程类 / 软件服务类 */
+  category: string;
+  /** 工程标 / 软件服务标 */
+  categoryLabel: string;
+  /** 本次复检实际使用的模式 */
+  mode: "明标" | "暗标";
+  /** 跟随招标文件的默认模式 */
+  defaultMode: "明标" | "暗标";
+  /** 招标文件是否要求暗标 */
+  anonymityRequired: boolean;
+  /** 当前分册能否选暗标（只有技术标可以） */
+  blindAllowed: boolean;
+  checklistLocked?: boolean;
 }
+
+export type ExportScope = "business" | "tech";
 
 export interface ExportRecord {
   id: string;
   projectId: string;
+  /** business | tech；旧记录为空 */
+  scope?: string;
+  category?: string;
   mode: "明标" | "暗标";
   operator: string;
   checkStatus: "通过" | "阻断";
@@ -1459,12 +1822,16 @@ export interface ExportRecord {
   createdAt: string;
 }
 
+/** mode 不传时由后端按招标文件的暗标要求决定（只有技术标可能是暗标）。 */
 export async function getExportChecks(
   token: string,
   projectId: string,
-  mode: "明标" | "暗标" = "明标",
+  scope: ExportScope,
+  mode?: "明标" | "暗标",
 ): Promise<ExportChecks> {
-  return request<ExportChecks>(`/api/projects/${projectId}/export-checks?mode=${encodeURIComponent(mode)}`, {
+  const query = new URLSearchParams({ scope });
+  if (mode) query.set("mode", mode);
+  return request<ExportChecks>(`/api/projects/${projectId}/export-checks?${query.toString()}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 }
@@ -1472,12 +1839,13 @@ export async function getExportChecks(
 export async function createExport(
   token: string,
   projectId: string,
-  mode: "明标" | "暗标",
+  scope: ExportScope,
+  mode?: "明标" | "暗标",
 ): Promise<ExportRecord> {
   return request<ExportRecord>(`/api/projects/${projectId}/exports`, {
     method: "POST",
     headers: authHeaders(token),
-    body: JSON.stringify({ mode }),
+    body: JSON.stringify({ scope, ...(mode ? { mode } : {}) }),
   });
 }
 
@@ -1533,7 +1901,16 @@ export async function listUsers(token: string): Promise<TeamMember[]> {
 
 export async function inviteUser(
   token: string,
-  payload: { name: string; email: string; phone?: string; role: string; password: string },
+  payload: {
+    name: string;
+    email: string;
+    phone?: string;
+    role: string;
+    password: string;
+    departmentId?: string | null;
+    customRoleId?: string | null;
+    monthlyCreditLimit?: number | null;
+  },
 ): Promise<TeamMember & { initialPassword: string }> {
   return request<TeamMember & { initialPassword: string }>("/api/users", {
     method: "POST",
@@ -1545,7 +1922,15 @@ export async function inviteUser(
 export async function updateUser(
   token: string,
   userId: string,
-  payload: { name?: string; phone?: string; role?: string; disabled?: boolean },
+  payload: {
+    name?: string;
+    phone?: string;
+    role?: string;
+    disabled?: boolean;
+    departmentId?: string;
+    customRoleId?: string;
+    monthlyCreditLimit?: number;
+  },
 ): Promise<TeamMember> {
   return request<TeamMember>(`/api/users/${userId}`, {
     method: "PATCH",
@@ -1591,6 +1976,7 @@ export interface QualificationAsset {
   evidence?: { heading?: string; excerpt?: string }[];
   fieldConflict?: string[];
   suspectedIds?: string[];
+  attrs?: Record<string, string>;
   images?: QualificationImage[];
   updatedAt: string;
 }
@@ -1607,6 +1993,7 @@ export interface QualificationParseJob {
   uploadedAt: string;
   note: string;
   error?: string | null;
+  duplicate?: boolean;
 }
 
 export interface QualificationExtractJob {
@@ -1634,11 +2021,13 @@ export async function createQualification(
     validUntil?: string;
     owner?: string;
     detail?: string;
+    attrs?: Record<string, string>;
     file?: File | null;
   },
 ): Promise<QualificationAsset> {
   const form = new FormData();
   form.append("kind", payload.kind);
+  if (payload.attrs) form.append("attrs", JSON.stringify(payload.attrs));
   form.append("name", payload.name);
   form.append("level", payload.level || "");
   form.append("number", payload.number || "");
@@ -1665,10 +2054,12 @@ export async function updateQualification(
     owner?: string;
     detail?: string;
     reviewStatus?: "待审核" | "已入库";
+    attrs?: Record<string, string>;
     file?: File | null;
   },
 ): Promise<QualificationAsset> {
   const form = new FormData();
+  if (payload.attrs) form.append("attrs", JSON.stringify(payload.attrs));
   if (payload.kind) form.append("kind", payload.kind);
   if (payload.name != null) form.append("name", payload.name);
   if (payload.level != null) form.append("level", payload.level);
@@ -1682,6 +2073,13 @@ export async function updateQualification(
     method: "PATCH",
     headers: { Authorization: `Bearer ${token}` },
     body: form,
+  });
+}
+
+export async function reextractQualifications(token: string): Promise<{ removed: number; queued: number }> {
+  return request<{ removed: number; queued: number }>("/api/qualification-source-docs/reextract", {
+    method: "POST",
+    headers: authHeaders(token),
   });
 }
 
@@ -1846,6 +2244,7 @@ export interface WeightTemplate {
   feasibility: number;
   standardization: number;
   scope: string;
+  category?: string;
   active: boolean;
 }
 
@@ -1857,6 +2256,7 @@ export interface WeightTemplatePayload {
   feasibility: number;
   standardization: number;
   scope?: string;
+  category?: "工程类" | "软件服务类";
 }
 
 export interface FillerWordRule {
@@ -1910,9 +2310,12 @@ export interface VetoRule {
   engine: string;
   seq: number;
   enabled: boolean;
+  specialties?: string[];
+  workTypes?: string[];
+  itemSpecialties?: Record<string, string[]>;
 }
 
-export type CatalogKind = "business" | "tech" | "dup_check" | "dup_sim" | "strategy";
+export type CatalogKind = "business" | "tech" | "dup_check" | "dup_sim" | "strategy" | "anon";
 
 export interface CatalogRule extends VetoRule {
   kind: CatalogKind;
@@ -2022,6 +2425,96 @@ export async function listCatalogRules(kind?: CatalogKind): Promise<CatalogRule[
 
 export async function updateCatalogRule(id: string, patch: { enabled: boolean }): Promise<CatalogRule> {
   return request<CatalogRule>(`/api/rules/catalog/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 软件服务类标书专属规则目录：一票否决 / 商务自查 / 技术评分 / 高分策略 / 行业合规包。
+// 与上面工程类的同名函数彻底独立，读写 /api/rules/sw/* 下的独立表，不与工程类数据混用。
+// ---------------------------------------------------------------------------
+
+export type SwCatalogKind = "business" | "tech" | "strategy" | "dup_check" | "dup_sim" | "anon";
+
+export async function listSwWordRules(): Promise<FillerWordRule[]> {
+  return request<FillerWordRule[]>("/api/rules/sw/word-rules");
+}
+
+export async function createSwWordRule(payload: FillerWordRulePayload): Promise<FillerWordRule> {
+  return request<FillerWordRule>("/api/rules/sw/word-rules", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateSwWordRule(
+  id: string,
+  patch: Partial<FillerWordRulePayload & { enabled: boolean }>,
+): Promise<FillerWordRule> {
+  return request<FillerWordRule>(`/api/rules/sw/word-rules/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function listSwThresholds(): Promise<ThresholdRule[]> {
+  return request<ThresholdRule[]>("/api/rules/sw/thresholds");
+}
+
+export async function updateSwThreshold(id: string, value: number): Promise<ThresholdRule> {
+  return request<ThresholdRule>(`/api/rules/sw/thresholds/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value }),
+  });
+}
+
+export async function listSwVetoRules(): Promise<VetoRule[]> {
+  return request<VetoRule[]>("/api/rules/sw/veto-points");
+}
+
+export async function updateSwVetoRule(id: string, patch: { enabled: boolean }): Promise<VetoRule> {
+  return request<VetoRule>(`/api/rules/sw/veto-points/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function listSwCatalogRules(kind?: SwCatalogKind): Promise<CatalogRule[]> {
+  const query = kind ? `?kind=${kind}` : "";
+  return request<CatalogRule[]>(`/api/rules/sw/catalog${query}`);
+}
+
+export async function updateSwCatalogRule(id: string, patch: { enabled: boolean }): Promise<CatalogRule> {
+  return request<CatalogRule>(`/api/rules/sw/catalog/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function listSwRulePackages(): Promise<RulePackage[]> {
+  return request<RulePackage[]>("/api/rules/sw/packages");
+}
+
+export async function createSwRulePackage(payload: RulePackagePayload): Promise<RulePackage> {
+  return request<RulePackage>("/api/rules/sw/packages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateSwRulePackage(
+  id: string,
+  patch: Partial<RulePackagePayload & { status: "启用" | "停用" }>,
+): Promise<RulePackage> {
+  return request<RulePackage>(`/api/rules/sw/packages/${id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
@@ -2247,7 +2740,7 @@ export async function pollProductExtractJobUntilDone(
   }
 }
 
-export { ApiError };
+export { ApiError, request as apiRequest };
 
 export type LlmProviderKind = "deepseek" | "doubao" | "qwen" | "siliconflow" | "openai" | "custom" | "local";
 

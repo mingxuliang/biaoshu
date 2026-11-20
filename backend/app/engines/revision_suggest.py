@@ -33,8 +33,9 @@ def fallback_suggestion(issue: dict) -> str:
     return f"请按预审规则「{rule}」补全可核验的响应内容。"
 
 
-def llm_write_suggestion(issue: dict) -> str:
+def llm_write_suggestion(issue: dict, category: str | None = None) -> str:
     """预审未给出建议时，按该条预审规则补一条可执行的改写建议。"""
+    from .category_profile import rewrite_context
     from .llm import LlmError, chat_complete, get_default_model_id
 
     rule = str(issue.get("rule") or "").strip()
@@ -45,6 +46,7 @@ def llm_write_suggestion(issue: dict) -> str:
     prompt = (
         "你是投标文件预审整改编辑。请只根据【本条 AI 预审规则】给出一条可执行的修改建议，不要引用「高分策略库」。\n"
         "要求：指出改哪一句、改成什么样（尽量带数量、时限、频次、百分比或规范条文号）；不要输出标题或前缀。\n"
+        f"{rewrite_context(category)}\n"
         f"层级/严重度：{issue.get('level') or ''} / {severity}\n"
         f"定位：{location}\n"
         f"预审规则：{rule}\n"
@@ -70,9 +72,15 @@ def llm_write_suggestion(issue: dict) -> str:
     return text[:500]
 
 
-def enrich_issue(issue: dict) -> dict:
-    """沿用预审规则与建议；去掉高分策略库字段；缺建议时给出按该条规则的修改说明。"""
+def enrich_issue(issue: dict, category: str | None = None) -> dict:
+    """沿用预审规则与建议；去掉高分策略库字段；缺建议时给出按该条规则的修改说明。
+
+    同时按标书类别判断这条问题能不能靠改正文解决（fixMode / fixHint）。
+    """
+    from .category_profile import classify_fix_mode
+
     out = dict(issue)
+    out["fixMode"], out["fixHint"] = classify_fix_mode(out, category)
     sk = str(out.get("strategyKey") or "")
     out["strategyKey"] = sk
     out["strategyCategory"] = str(out.get("strategyCategory") or "")
@@ -123,8 +131,11 @@ def apply_text_to_paragraph(paragraph: str, excerpt: str, suggestion: str, apply
     return replace_in_paragraph(paragraph, excerpt, replacement)
 
 
-def llm_rewrite_paragraph(paragraph: str, excerpt: str, suggestion: str, issue: dict | None = None) -> str:
+def llm_rewrite_paragraph(
+    paragraph: str, excerpt: str, suggestion: str, issue: dict | None = None, category: str | None = None
+) -> str:
     """按本条预审规则把建议落成可替换的整段正文；失败时返回空串。"""
+    from .category_profile import rewrite_context
     from .llm import LlmError, chat_complete, get_default_model_id
 
     info = issue or {}
@@ -137,6 +148,7 @@ def llm_rewrite_paragraph(paragraph: str, excerpt: str, suggestion: str, issue: 
         "2. 用数量、时限、频次、百分比、规范条文号等可核验表述替换空话。\n"
         "3. 只改与 excerpt 相关的句子，其余事实、项目名称、已有数据不得编造或删除。\n"
         "4. 不要输出目录行、不要输出「建议：」前缀。\n"
+        f"5. {rewrite_context(category)}\n"
         f"预审规则：{rule or '（未标注规则名）'}\n"
         f"招标对标原文：{quote or '（无，按预审建议自洽修改）'}\n"
         f"问题摘录：{excerpt}\n"

@@ -1,8 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
-import { globalSearch, type SearchResult } from "@/lib/api";
+import { globalSearch, isPersonal, type SearchResult } from "@/lib/api";
+import {
+  getBillingSummary,
+  listNotifications,
+  markNotificationsRead,
+  tokensLabel,
+  type NotificationItem,
+} from "@/lib/saasApi";
 import ProfileModal from "./ProfileModal";
+
+const POLL_MS = 60_000;
 
 interface TopbarProps {
   title: string;
@@ -22,6 +31,9 @@ export default function Topbar({ title, onMenuOpen }: TopbarProps) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState<SearchResult>(emptySearch);
+  const [notices, setNotices] = useState<NotificationItem[]>([]);
+  const [unread, setUnread] = useState(0);
+  const [credits, setCredits] = useState<{ available: number; low: boolean; tokensPerCredit: number } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const noticeRef = useRef<HTMLDivElement>(null);
   const helpRef = useRef<HTMLDivElement>(null);
@@ -55,6 +67,43 @@ export default function Topbar({ title, onMenuOpen }: TopbarProps) {
     }, 280);
     return () => window.clearTimeout(handle);
   }, [query, token]);
+
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    const refresh = () => {
+      listNotifications()
+        .then((res) => {
+          if (cancelled) return;
+          setNotices(res.items);
+          setUnread(res.unread);
+        })
+        .catch(() => undefined);
+      getBillingSummary()
+        .then((s) => {
+          if (!cancelled) setCredits({ available: s.wallet.available, low: s.lowBalance, tokensPerCredit: s.tokensPerCredit });
+        })
+        .catch(() => undefined);
+    };
+    refresh();
+    const timer = window.setInterval(refresh, POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [token]);
+
+  const openNotice = (n: NotificationItem) => {
+    if (!n.read) {
+      markNotificationsRead([n.id]).catch(() => undefined);
+      setNotices((list) => list.map((x) => (x.id === n.id ? { ...x, read: true } : x)));
+      setUnread((c) => Math.max(0, c - 1));
+    }
+    if (n.link) {
+      setNoticeOpen(false);
+      navigate(n.link.startsWith("/console") ? n.link : `/console${n.link}`);
+    }
+  };
 
   const handleLogout = () => {
     setMenuOpen(false);
@@ -182,6 +231,22 @@ export default function Topbar({ title, onMenuOpen }: TopbarProps) {
           )}
         </div>
 
+        {credits && (
+          <button
+            type="button"
+            onClick={() => navigate("/console/billing")}
+            title={`${isPersonal(user) ? "可用积分" : "企业积分池可用"}，${tokensLabel(credits.available, credits.tokensPerCredit)}`}
+            className={`hidden h-8 cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors sm:flex ${
+              credits.low
+                ? "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
+                : "border-background-300 bg-background-50 text-foreground-700 hover:bg-background-200"
+            }`}
+          >
+            <i className="ri-coin-line text-sm"></i>
+            {credits.available.toLocaleString("zh-CN")} 积分
+          </button>
+        )}
+
         <div className="relative" ref={noticeRef}>
           <button
             type="button"
@@ -193,13 +258,53 @@ export default function Topbar({ title, onMenuOpen }: TopbarProps) {
             aria-label="通知"
           >
             <i className="ri-notification-3-line text-lg"></i>
+            {unread > 0 && (
+              <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium text-white">
+                {unread > 99 ? "99+" : unread}
+              </span>
+            )}
           </button>
           {noticeOpen && (
-            <div className="absolute right-0 top-[calc(100%+8px)] w-72 rounded-xl border border-background-300 bg-background-100 p-4 shadow-lg">
-              <div className="text-sm font-medium text-foreground-900">通知</div>
-              <p className="mt-2 text-xs leading-5 text-foreground-600">
-                暂无站内推送。导出阻断、预审完成等结果请在对应模块查看；操作留痕见「审计日志」。
-              </p>
+            <div className="absolute right-0 top-[calc(100%+8px)] w-80 overflow-hidden rounded-xl border border-background-300 bg-background-100 shadow-lg">
+              <div className="flex items-center justify-between border-b border-background-300 px-4 py-2.5">
+                <span className="text-sm font-medium text-foreground-900">通知</span>
+                {unread > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      markNotificationsRead("all").catch(() => undefined);
+                      setNotices((list) => list.map((x) => ({ ...x, read: true })));
+                      setUnread(0);
+                    }}
+                    className="cursor-pointer text-xs text-primary-600 hover:underline"
+                  >
+                    全部已读
+                  </button>
+                )}
+              </div>
+              {notices.length === 0 ? (
+                <p className="px-4 py-6 text-center text-xs text-foreground-500">
+                  暂无通知。章节分配、@ 提醒、支付到账、余额预警和发票开具会出现在这里。
+                </p>
+              ) : (
+                <div className="max-h-96 overflow-y-auto py-1">
+                  {notices.map((n) => (
+                    <button
+                      key={n.id}
+                      type="button"
+                      onClick={() => openNotice(n)}
+                      className="flex w-full cursor-pointer gap-2 px-4 py-2.5 text-left hover:bg-background-200"
+                    >
+                      <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${n.read ? "bg-transparent" : "bg-primary-500"}`} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm text-foreground-900">{n.title}</span>
+                        {n.body && <span className="mt-0.5 line-clamp-2 block text-xs text-foreground-500">{n.body}</span>}
+                        <span className="mt-0.5 block text-[11px] text-foreground-400">{n.createdAt}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -266,6 +371,12 @@ export default function Topbar({ title, onMenuOpen }: TopbarProps) {
               <div className="border-b border-background-300 px-4 py-3">
                 <div className="text-sm font-semibold text-foreground-900">{user?.name || "未登录"}</div>
                 <div className="mt-0.5 truncate text-xs text-foreground-500">{user?.email || "—"}</div>
+                {user?.tenant?.name && (
+                  <div className="mt-1.5 flex items-center gap-1 truncate text-xs text-foreground-600">
+                    <i className="ri-building-line"></i>
+                    {user.tenant.name}
+                  </div>
+                )}
               </div>
               <div className="p-1.5">
                 <button

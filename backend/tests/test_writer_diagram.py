@@ -12,6 +12,7 @@ from app.engines.writer_diagram import (
     fitz,
     layout_diagram,
     normalize_diagram,
+    _new_page,
     render_diagram_png,
     route_between,
 )
@@ -169,6 +170,12 @@ class WriterDiagramTest(unittest.TestCase):
         png = render_diagram_png(spec)
         self.assertTrue(png.startswith(b"\x89PNG"))
         self.assertGreater(len(png), 1000)
+        doc, page = _new_page(480, 160, "功能架构", find_cjk_font())
+        try:
+            self.assertIn("功能架构", page.get_text())
+            self.assertNotIn("?", page.get_text())
+        finally:
+            doc.close()
 
 
 if __name__ == "__main__":

@@ -1,18 +1,17 @@
 """密码哈希与 JWT 会话（P0：项目/认证真正落库）。"""
 
-from datetime import datetime, timedelta, timezone
+import secrets
+import string
 
 import bcrypt
-import jwt
 from fastapi import Depends, Header, HTTPException
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
-from .config import get_settings
 from .db import get_db
 from .models import User
-
-ALGORITHM = "HS256"
+from .tenancy import DEFAULT_TENANT, current_tenant
+from .tokens import bearer, create_tenant_token, decode_tenant_token
 
 
 def normalize_account(value: str) -> str:
@@ -38,35 +37,51 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-def create_access_token(user_id: str) -> str:
-    settings = get_settings()
-    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.access_token_expire_minutes)
-    payload = {"sub": user_id, "exp": expire}
-    return jwt.encode(payload, settings.secret_key, algorithm=ALGORITHM)
+def random_password(length: int = 12) -> str:
+    alphabet = string.ascii_letters + string.digits
+    while True:
+        pwd = "".join(secrets.choice(alphabet) for _ in range(length))
+        if any(c.isdigit() for c in pwd) and any(c.isalpha() for c in pwd):
+            return pwd
 
 
-def _decode_token(token: str) -> str:
-    settings = get_settings()
-    try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
-    except jwt.PyJWTError as exc:
-        raise HTTPException(401, "登录状态已失效，请重新登录") from exc
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(401, "登录状态已失效，请重新登录")
-    return user_id
+def _tenant_of(user: User, tenant_id: str | None = None) -> str:
+    if tenant_id:
+        return tenant_id
+    session = object_session(user)
+    if session is not None and session.info.get("tenant_id"):
+        return session.info["tenant_id"]
+    return current_tenant() or DEFAULT_TENANT
+
+
+def create_access_token(user_id: str, token_version: int = 0, tenant_id: str | None = None) -> str:
+    return create_tenant_token(user_id, tenant_id or current_tenant() or DEFAULT_TENANT, token_version)
+
+
+def token_for(user: User, tenant_id: str | None = None) -> str:
+    return create_tenant_token(user.id, _tenant_of(user, tenant_id), getattr(user, "token_version", 0) or 0)
+
+
+def revoke_tokens(user: User) -> None:
+    user.token_version = int(getattr(user, "token_version", 0) or 0) + 1
 
 
 def get_current_user(
     authorization: str | None = Header(default=None), db: Session = Depends(get_db)
 ) -> User:
-    if not authorization or not authorization.lower().startswith("bearer "):
+    token = bearer(authorization)
+    if not token:
         raise HTTPException(401, "缺少登录凭证，请先登录")
-    token = authorization.split(" ", 1)[1].strip()
-    user_id = _decode_token(token)
+    claims = decode_tenant_token(token)
+    user_id, version = claims["sub"], int(claims.get("ver") or 0)
+    session_tenant = db.info.get("tenant_id")
+    if session_tenant and session_tenant != claims["tid"]:
+        raise HTTPException(401, "登录状态已失效，请重新登录")
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(401, "用户不存在，请重新登录")
+    if version != int(getattr(user, "token_version", 0) or 0):
+        raise HTTPException(401, "登录状态已失效，请重新登录")
     if getattr(user, "disabled", False):
         raise HTTPException(401, "账号已停用，请联系管理员")
     return user

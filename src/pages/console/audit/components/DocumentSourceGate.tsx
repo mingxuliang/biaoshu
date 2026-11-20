@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listProjectBidDocuments, uploadBidDocument, type BidDocumentSummary } from "@/lib/api";
+import { isEngineeringCategory } from "@/mocks/projects";
 
 export type BidSlot = "business" | "tech";
 
@@ -24,6 +25,7 @@ interface DocumentSourceGateProps {
   projectId: string;
   projectName: string;
   projectCode: string;
+  category?: string;
   onContinue: (docs: PreReviewDocs) => void;
 }
 
@@ -32,6 +34,7 @@ const SOURCE_LABELS: Record<string, string> = {
   workbench: "预审示例文档",
   writer: "撰写工作台导出",
   revision: "修改闭环保存版本",
+  export: "导出中心（明标版）",
   "export-anon": "导出中心（暗标版）",
 };
 
@@ -39,6 +42,8 @@ const SLOT_META: Record<BidSlot, { label: string; hint: string; icon: string }> 
   business: { label: "商务标", hint: "投标函、资质、业绩、财务、人员", icon: "ri-briefcase-line" },
   tech: { label: "技术标", hint: "施工组织设计、技术方案、暗标正文", icon: "ri-tools-line" },
 };
+
+const SOFTWARE_TECH_HINT = "系统架构、功能设计、实施与运维方案";
 
 function sourceLabel(source: string): string {
   return SOURCE_LABELS[source] || source;
@@ -81,7 +86,7 @@ function docsForSlot(docs: BidDocumentSummary[], slot: BidSlot): BidDocumentSumm
 const ACCEPT = ".docx,.pdf,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const MISSING = "未能上传该类型文件";
 
-export default function DocumentSourceGate({ projectId, projectName, projectCode, onContinue }: DocumentSourceGateProps) {
+export default function DocumentSourceGate({ projectId, projectName, projectCode, category, onContinue }: DocumentSourceGateProps) {
   const [existingDocs, setExistingDocs] = useState<BidDocumentSummary[]>([]);
   const [docsLoading, setDocsLoading] = useState(true);
   const [picked, setPicked] = useState<PreReviewDocs>({});
@@ -188,6 +193,7 @@ export default function DocumentSourceGate({ projectId, projectName, projectCode
 
   const renderSlot = (slot: BidSlot) => {
     const meta = SLOT_META[slot];
+    const hint = slot === "tech" && category && !isEngineeringCategory(category) ? SOFTWARE_TECH_HINT : meta.hint;
     const selected = picked[slot];
     const inputRef = slot === "business" ? businessInput : techInput;
     return (
@@ -198,7 +204,7 @@ export default function DocumentSourceGate({ projectId, projectName, projectCode
           </span>
           <div className="min-w-0">
             <div className="text-sm font-medium text-foreground-800">{meta.label}</div>
-            <div className="text-[11px] text-foreground-500">{meta.hint}</div>
+            <div className="text-[11px] text-foreground-500">{hint}</div>
           </div>
           {selected && (
             <button

@@ -5,6 +5,69 @@ import Toast from "../components/Toast";
 import { useAuth } from "@/context/AuthContext";
 import { ApiError, inviteUser, listUsers, updateUser, type TeamMember } from "@/lib/api";
 import { hasPerm } from "@/lib/permissions";
+import { listCustomRoles, listDepartments, type CustomRole, type Department } from "@/lib/saasApi";
+
+interface OrgFieldValues {
+  departmentId: string;
+  customRoleId: string;
+  monthlyCreditLimit: string;
+}
+
+const emptyOrgFields: OrgFieldValues = { departmentId: "", customRoleId: "", monthlyCreditLimit: "" };
+
+function OrgFields({
+  value,
+  onChange,
+  departments,
+  customRoles,
+  inputCls,
+  labelCls,
+}: {
+  value: OrgFieldValues;
+  onChange: (v: OrgFieldValues) => void;
+  departments: Department[];
+  customRoles: CustomRole[];
+  inputCls: string;
+  labelCls: string;
+}) {
+  return (
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <div>
+        <label className={labelCls}>所属部门</label>
+        <select value={value.departmentId} onChange={(e) => onChange({ ...value, departmentId: e.target.value })} className={`${inputCls} cursor-pointer`}>
+          <option value="">未分配</option>
+          {departments.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <label className={labelCls}>自定义角色</label>
+        <select value={value.customRoleId} onChange={(e) => onChange({ ...value, customRoleId: e.target.value })} className={`${inputCls} cursor-pointer`}>
+          <option value="">不使用（按内置角色）</option>
+          {customRoles.map((r) => (
+            <option key={r.id} value={r.id}>
+              {r.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <label className={labelCls}>月度积分额度</label>
+        <input
+          type="text"
+          inputMode="numeric"
+          value={value.monthlyCreditLimit}
+          onChange={(e) => onChange({ ...value, monthlyCreditLimit: e.target.value.replace(/\D/g, "") })}
+          placeholder="留空不限"
+          className={inputCls}
+        />
+      </div>
+    </div>
+  );
+}
 
 type MemberRole = "管理员" | "项目经理" | "撰写专家" | "评标专家";
 
@@ -51,7 +114,7 @@ interface ToastState {
 
 export default function TeamPage() {
   const { token, user: me } = useAuth();
-  const canManage = hasPerm(me?.role, "members");
+  const canManage = hasPerm(me, "members");
   const [memberList, setMemberList] = useState<TeamMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState("");
@@ -70,6 +133,16 @@ export default function TeamPage() {
   });
   const [showInvitePwd, setShowInvitePwd] = useState(false);
   const [editForm, setEditForm] = useState({ name: "", phone: "", role: "撰写专家" as string });
+  const [inviteOrg, setInviteOrg] = useState<OrgFieldValues>(emptyOrgFields);
+  const [editOrg, setEditOrg] = useState<OrgFieldValues>(emptyOrgFields);
+  const [departments, setDepartments] = useState<Department[]>([]);
+  const [customRoles, setCustomRoles] = useState<CustomRole[]>([]);
+  const roleNames = useMemo(() => new Map(customRoles.map((r) => [r.id, r.name])), [customRoles]);
+
+  useEffect(() => {
+    listDepartments().then(setDepartments).catch(() => setDepartments([]));
+    listCustomRoles().then(setCustomRoles).catch(() => setCustomRoles([]));
+  }, []);
 
   const showToast = (message: string, type: ToastState["type"] = "success") => {
     setToast({ message, type, visible: true });
@@ -126,8 +199,8 @@ export default function TeamPage() {
       showToast("请填写姓名与账号", "error");
       return;
     }
-    if (form.password.trim().length < 6) {
-      showToast("请设置至少 6 位登录密码", "error");
+    if (form.password.trim() && form.password.trim().length < 8) {
+      showToast("登录密码至少 8 位；留空则由系统生成随机密码", "error");
       return;
     }
     setSubmitting(true);
@@ -138,12 +211,20 @@ export default function TeamPage() {
         phone: form.phone.trim(),
         role: form.role,
         password: form.password.trim(),
+        departmentId: inviteOrg.departmentId || null,
+        customRoleId: inviteOrg.customRoleId || null,
+        monthlyCreditLimit: inviteOrg.monthlyCreditLimit ? Number(inviteOrg.monthlyCreditLimit) : null,
       });
       setInviteOpen(false);
       setForm({ name: "", email: "", phone: "", password: "", role: "撰写专家" });
+      setInviteOrg(emptyOrgFields);
       setShowInvitePwd(false);
       await reload();
-      showToast(`已创建账号 ${created.email}，请将密码告知对方（系统不发送邮件）`);
+      if (form.password.trim()) {
+        showToast(`已创建账号 ${created.email}，请将密码告知对方（系统不发送邮件）`);
+      } else {
+        window.alert(`已创建账号 ${created.email}\n初始密码：${created.initialPassword}\n仅显示这一次，请立即告知对方`);
+      }
     } catch (err) {
       showToast(err instanceof ApiError ? err.message : "邀请失败", "error");
     } finally {
@@ -160,6 +241,9 @@ export default function TeamPage() {
         name: editForm.name.trim(),
         phone: editForm.phone.trim(),
         role: editForm.role,
+        departmentId: editOrg.departmentId,
+        customRoleId: editOrg.customRoleId,
+        monthlyCreditLimit: editOrg.monthlyCreditLimit ? Number(editOrg.monthlyCreditLimit) : -1,
       });
       setEditMember(null);
       await reload();
@@ -201,7 +285,7 @@ export default function TeamPage() {
     <div>
       <PageHeader
         title="团队与账号管理"
-        description="按角色强制鉴权：管理员可邀请、改角色与停用账号；其他角色无法进入本页。"
+        description="按角色强制鉴权：管理员、项目经理可邀请、改角色与停用账号（授予或调整管理员仅限管理员）；其他角色无法进入本页。"
         actions={
           canManage ? (
           <button
@@ -270,9 +354,10 @@ export default function TeamPage() {
               <tr className="font-label border-b border-background-300 bg-background-50 text-xs text-foreground-500">
                 <th className="px-4 py-3 font-medium">成员</th>
                 <th className="px-3 py-3 font-medium">角色</th>
+                <th className="px-3 py-3 font-medium">部门</th>
                 <th className="px-3 py-3 font-medium">参与项目</th>
                 <th className="px-3 py-3 font-medium">账号状态</th>
-                <th className="px-3 py-3 font-medium">加入时间</th>
+                <th className="px-3 py-3 font-medium">加入 / 最近登录</th>
                 <th className="px-3 py-3 text-right font-medium">操作</th>
               </tr>
             </thead>
@@ -303,6 +388,15 @@ export default function TeamPage() {
                     >
                       {member.role}
                     </span>
+                    {member.customRoleId && roleNames.get(member.customRoleId) && (
+                      <div className="mt-1 text-[11px] text-foreground-500">{roleNames.get(member.customRoleId)}</div>
+                    )}
+                  </td>
+                  <td className="px-3 py-3.5 text-sm text-foreground-600">
+                    {member.departmentName || "—"}
+                    {member.monthlyCreditLimit != null && (
+                      <div className="text-[11px] text-foreground-500">月额度 {member.monthlyCreditLimit.toLocaleString("zh-CN")}</div>
+                    )}
                   </td>
                   <td className="font-label px-3 py-3.5 text-sm text-foreground-500">{member.projectCount ?? 0}</td>
                   <td className="px-3 py-3.5">
@@ -311,7 +405,10 @@ export default function TeamPage() {
                       {member.disabled ? "已停用" : "启用"}
                     </span>
                   </td>
-                  <td className="px-3 py-3.5 whitespace-nowrap text-sm text-foreground-500">{member.joinedAt || "—"}</td>
+                  <td className="px-3 py-3.5 whitespace-nowrap text-sm text-foreground-500">
+                    {member.joinedAt || "—"}
+                    <div className="text-[11px]">{member.lastLoginAt ? member.lastLoginAt.replace("T", " ") : "从未登录"}</div>
+                  </td>
                   <td className="px-3 py-3.5">
                     <div className="flex items-center justify-end gap-0.5">
                       <button
@@ -323,6 +420,11 @@ export default function TeamPage() {
                             name: member.name,
                             phone: member.phone || "",
                             role: (memberRoles.includes(member.role as MemberRole) ? member.role : "撰写专家") as string,
+                          });
+                          setEditOrg({
+                            departmentId: member.departmentId || "",
+                            customRoleId: member.customRoleId || "",
+                            monthlyCreditLimit: member.monthlyCreditLimit != null ? String(member.monthlyCreditLimit) : "",
                           });
                         }}
                         className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-foreground-500 transition-all hover:scale-110 hover:bg-primary-50 hover:text-primary-600"
@@ -343,7 +445,7 @@ export default function TeamPage() {
               ))}
               {!loading && filtered.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="px-4 py-16 text-center">
+                  <td colSpan={7} className="px-4 py-16 text-center">
                     <i className="ri-user-unfollow-line text-3xl text-foreground-400"></i>
                     <p className="mt-3 text-sm text-foreground-500">没有找到匹配的成员</p>
                   </td>
@@ -360,7 +462,7 @@ export default function TeamPage() {
             <i className="ri-shield-check-line text-primary-500 text-sm"></i>
             角色说明
           </h3>
-          <p className="text-xs text-foreground-500">对照表仅作职责说明，当前未做接口级强制鉴权</p>
+          <p className="text-xs text-foreground-500">内置角色权限如下；需要更细的组合可在「企业与组织 → 自定义角色」中配置</p>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[720px] text-left">
@@ -472,7 +574,7 @@ export default function TeamPage() {
                 type={showInvitePwd ? "text" : "password"}
                 value={form.password}
                 onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
-                placeholder="至少 6 位，创建后请告知对方"
+                placeholder="至少 8 位；留空自动生成，创建后请告知对方"
                 autoComplete="new-password"
                 className={`${inputCls} pr-10`}
               />
@@ -486,6 +588,7 @@ export default function TeamPage() {
               </button>
             </div>
           </div>
+          <OrgFields value={inviteOrg} onChange={setInviteOrg} departments={departments} customRoles={customRoles} inputCls={inputCls} labelCls={labelCls} />
           <div className="flex items-center justify-end gap-2 pt-2">
             <button
               type="button"
@@ -554,6 +657,7 @@ export default function TeamPage() {
               ))}
             </select>
           </div>
+          <OrgFields value={editOrg} onChange={setEditOrg} departments={departments} customRoles={customRoles} inputCls={inputCls} labelCls={labelCls} />
           <div className="flex items-center justify-end gap-2 pt-2">
             <button
               type="button"

@@ -59,6 +59,17 @@ def convert_office(path: str, target: str) -> str:
         shutil.rmtree(profile, ignore_errors=True)
 
 
+def looks_like_pdf(path: str) -> bool:
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf":
+        return True
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(5).startswith(b"%PDF-")
+    except OSError:
+        return False
+
+
 def looks_like_docx_zip(path: str) -> bool:
     try:
         with open(path, "rb") as fh:

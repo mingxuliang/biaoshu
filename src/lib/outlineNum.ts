@@ -107,18 +107,28 @@ export function displayOutlineTitle(title: string, num?: string): string {
   return compactCatalogTitle(stripTitleNum(title, num));
 }
 
+export function nodeDisplayTitle(node: Pick<OutlineNode, "title" | "num" | "engKind">): string {
+  return node.engKind ? stripTitleNum(node.title, node.num) : displayOutlineTitle(node.title, node.num);
+}
+
 export function isOriginalFormTitle(title: string, num?: string): boolean {
   const t = stripTitleNum(title, num).replace(/\s+/g, "");
   if (!t) return false;
-  if (t === "报价" || t === "投标报价") return true;
-  return /承诺书|承诺函|授权委托|报价文件|报价表|开标一览|分项报价|投标报价|报价部分|商务.{0,8}技术.{0,6}偏差|商务偏差|技术偏差|偏差表/.test(
-    t,
-  );
+  return /承诺书|承诺函|授权委托|投标函|开标一览/.test(t);
 }
 
-export function isBusinessSkipChapter(node: Pick<OutlineNode, "title" | "num" | "part">): boolean {
+export function isCertificateTitle(title: string, num?: string): boolean {
+  const t = stripTitleNum(title, num).replace(/\s+/g, "");
+  return /营业执照|资质证书|财务报告|财务报表|审计报告|业绩证明|类似业绩/.test(t);
+}
+
+export function isBusinessSkipChapter(
+  node: Pick<OutlineNode, "title" | "num" | "part" | "requirement">,
+): boolean {
   if (isOriginalFormTitle(node.title, node.num) || node.part === "form") return false;
   if (node.part === "tech") return false;
+  if (isCertificateTitle(node.title, node.num)) return true;
+  if ((node.requirement || "").trim()) return false;
   if (node.part === "business") return true;
   const t = stripTitleNum(node.title, node.num).replace(/\s+/g, "");
   return /商务标|商务部分|商务文件|资格审查|资格证明|资格文件|投标函|法定代表人|企业资质|营业执照|财务报告|类似业绩|投标文件组成|响应文件组成|响应文件格式|投标文件格式/.test(
@@ -126,11 +136,19 @@ export function isBusinessSkipChapter(node: Pick<OutlineNode, "title" | "num" | 
   );
 }
 
-export function isSkipAiWrite(node: Pick<OutlineNode, "title" | "num" | "part" | "status">): boolean {
-  return node.status === "用原文" || isOriginalFormTitle(node.title, node.num) || isBusinessSkipChapter(node);
+export function isSkipAiWrite(
+  node: Pick<OutlineNode, "title" | "num" | "part" | "status" | "requirement">,
+): boolean {
+  if (isOriginalFormTitle(node.title, node.num) || node.part === "form" || isCertificateTitle(node.title, node.num)) {
+    return true;
+  }
+  if ((node.requirement || "").trim()) return false;
+  return node.status === "用原文" || isBusinessSkipChapter(node);
 }
 
 export function compactOutlineTitles(nodes: OutlineNode[]): OutlineNode[] {
+  // 工程施工组织设计的章名就是评分项原文，不能截短
+  if (isEngineeringOutline(nodes)) return nodes;
   const compacted = nodes.map((n) => ({
     ...n,
     title: displayOutlineTitle(n.title, n.num),
@@ -153,6 +171,10 @@ export function compactOutlineTitles(nodes: OutlineNode[]): OutlineNode[] {
         ? { ...n, status: "用原文" as const, expanded: false }
         : n,
     );
+}
+
+export function isEngineeringOutline(nodes: Pick<OutlineNode, "engKind">[]): boolean {
+  return nodes.length > 0 && nodes.some((n) => !!n.engKind);
 }
 
 export function formatOutlineNum(depth: number, index: number, parentNum: string): string {

@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Checklist } from "@/lib/api";
+import { getTenderParagraphs, setProjectRuleEnabled, type Checklist, type TenderParagraph } from "@/lib/api";
 import { countFilledRows, mergeParseDimensions, type ParseSection } from "@/lib/parseDimensions";
 import { parseTargetForKind } from "@/lib/tenderPackage";
-import type { LocateTarget } from "@/lib/tenderAnchor";
+import { isEngineeringCategory } from "@/mocks/projects";
+import { findRequirementQuote, type LocateTarget } from "@/lib/tenderAnchor";
 
 const BOQ_COLS = ["项目名称", "计量单位", "工程数量", "备注"] as const;
 const RISK_COLS = ["风险点", "详细描述", "风险等级", "来源/依据"] as const;
@@ -207,11 +208,77 @@ function alignedLineItems(sec: ParseSection, cols: readonly string[], field: "co
   return rows;
 }
 
-function ResponseField({ title, text, note }: { title: string; text: string; note?: string }) {
+const ITEM_MARKER = /^(?:（\d{1,2}）|\(\d{1,2}\)|\d{1,2})[、.．]\s*/;
+
+function splitRequirementItems(text: string): string[] {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return [];
+  const lines = normalized.split("\n").map((line) => line.trim()).filter(Boolean);
+  const markedLines = lines.filter((line) => ITEM_MARKER.test(line));
+  if (lines.length > 1 && markedLines.length >= Math.ceil(lines.length / 2)) {
+    return lines.map((line) => line.replace(ITEM_MARKER, "").trim()).filter(Boolean);
+  }
+  const parts = normalized
+    .split(/(?<=^|[\s。；\n）)])(?=\d{1,2}[、.．](?!\d))/)
+    .map((part) => part.trim().replace(/^[。；\s]+/, "").replace(ITEM_MARKER, "").trim())
+    .filter(Boolean);
+  return parts.length >= 2 ? parts : [normalized];
+}
+
+function ResponseField({
+  title,
+  text,
+  note,
+  itemized = false,
+  paragraphs = [],
+  onLocate,
+}: {
+  title: string;
+  text: string;
+  note?: string;
+  itemized?: boolean;
+  paragraphs?: TenderParagraph[];
+  onLocate?: (target: LocateTarget) => void;
+}) {
+  const items = itemized ? splitRequirementItems(text) : [];
   return (
     <section className="space-y-3">
       <h3 className="text-sm font-semibold text-foreground-900">{title}</h3>
-      {text ? (
+      {text && itemized && items.length > 0 ? (
+        <ol className="space-y-2">
+          {items.map((item, index) => {
+            const quote = findRequirementQuote(item, paragraphs);
+            const locateText = quote?.text || item;
+            return (
+              <li key={`${index}-${item.slice(0, 24)}`} className="flex gap-2.5 rounded-lg border border-background-200 bg-background-50 px-3 py-2.5">
+                <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded bg-primary-50 text-[11px] font-semibold text-primary-700">
+                  {index + 1}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <button
+                    type="button"
+                    onClick={() => onLocate?.({ content: locateText, label: quote?.heading })}
+                    title="定位到招标原文对应条款并高亮"
+                    className="w-full cursor-pointer rounded-sm text-left transition-colors hover:bg-primary-50/80"
+                  >
+                    <p className="text-[13px] leading-6 text-foreground-800">{item}</p>
+                  </button>
+                  {quote ? (
+                    <details className="mt-1.5" onClick={(event) => event.stopPropagation()}>
+                      <summary className="cursor-pointer select-none text-[11px] text-foreground-400 hover:text-foreground-600">
+                        招标原文{quote.heading ? ` · ${quote.heading}` : ""}
+                      </summary>
+                      <div className="mt-1 whitespace-pre-wrap rounded bg-background-100 px-2 py-1.5 text-[12px] leading-5 text-foreground-600">
+                        {quote.text}
+                      </div>
+                    </details>
+                  ) : null}
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      ) : text ? (
         <pre className="whitespace-pre-wrap rounded-lg border border-background-200 bg-background-50 px-3 py-3 text-[13px] leading-6 text-foreground-800">
           {text}
         </pre>
@@ -421,13 +488,17 @@ interface ParseResultsProps {
   checklist: Checklist | null;
   parsing: boolean;
   locking: boolean;
-  category?: "软件服务类" | "工程类" | string;
+  category?: "软件服务类" | "工程类" | "产品标" | "工程标" | string;
   focusKind?: string;
   focusFileId?: string;
   onLock: () => void;
+  onUnlock?: () => void;
+  onGoWriter?: () => void;
   onShare: () => void;
   onDownload: () => void;
   onLocate?: (target: LocateTarget) => void;
+  projectId?: string;
+  onChecklist?: (checklist: Checklist) => void;
 }
 
 const DIM_ICONS: Record<string, string> = {
@@ -458,18 +529,43 @@ export default function ParseResults({
   focusKind,
   focusFileId,
   onLock,
+  onUnlock,
+  onGoWriter,
   onShare,
   onDownload,
   onLocate,
+  projectId,
+  onChecklist,
 }: ParseResultsProps) {
   const dimensions = useMemo(() => mergeParseDimensions(checklist?.dimensions, category), [checklist, category]);
+  const [sourceParagraphs, setSourceParagraphs] = useState<TenderParagraph[]>([]);
   const [activeKey, setActiveKey] = useState("basic");
   const [activeItemId, setActiveItemId] = useState("");
+  const [ruleBusy, setRuleBusy] = useState("");
   const jumpedFor = useRef("");
 
   const responseTab = RESPONSE_TABS.find((tab) => tab.key === activeKey);
-  const currentDim = responseTab ? undefined : dimensions.find((d) => d.key === activeKey) ?? dimensions[0];
+  const extraTab = activeKey === "project-rules" || activeKey === "drawing-facts";
+  const currentDim = responseTab || extraTab ? undefined : dimensions.find((d) => d.key === activeKey) ?? dimensions[0];
   const currentItem = currentDim?.items.find((i) => i.id === activeItemId) ?? currentDim?.items[0];
+
+  useEffect(() => {
+    if (!focusFileId) {
+      setSourceParagraphs([]);
+      return;
+    }
+    let cancelled = false;
+    getTenderParagraphs(focusFileId)
+      .then((list) => {
+        if (!cancelled) setSourceParagraphs(list);
+      })
+      .catch(() => {
+        if (!cancelled) setSourceParagraphs([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [focusFileId]);
 
   const hasChecklist = !!checklist && checklist.status === "done";
   const { filled, total } = countFilledRows(dimensions);
@@ -516,6 +612,16 @@ export default function ParseResults({
               </button>
             );
           })}
+          {isEngineeringCategory(category) ? (
+            <>
+              <button type="button" onClick={() => setActiveKey("project-rules")} className={`flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-medium transition-all ${activeKey === "project-rules" ? "bg-primary-500 text-background-50" : "border border-background-300 bg-background-50 text-foreground-600 hover:bg-background-200"}`}>
+                本项目规则 {checklist?.projectRules?.length ?? 0}
+              </button>
+              <button type="button" onClick={() => setActiveKey("drawing-facts")} className={`flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-medium transition-all ${activeKey === "drawing-facts" ? "bg-primary-500 text-background-50" : "border border-background-300 bg-background-50 text-foreground-600 hover:bg-background-200"}`}>
+                图纸特征 {checklist?.drawingFacts?.length ?? 0}
+              </button>
+            </>
+          ) : null}
           {RESPONSE_TABS.map((tab) => {
             const isActive = activeKey === tab.key;
             return (
@@ -580,17 +686,61 @@ export default function ParseResults({
         {parsing && (
           <div className="mb-3 flex items-center gap-2 rounded-md border border-primary-100 bg-primary-50/60 px-3 py-2 text-xs text-primary-700">
             <i className="ri-loader-4-line animate-spin"></i>
-            AI 正在按固定指标逐项抽取，并提取施工图纸中的设计说明，请稍候…
+            {isEngineeringCategory(category)
+              ? "AI 正在按固定指标逐项抽取，并提取施工图纸中的设计说明，请稍候…"
+              : "AI 正在按软件服务类固定指标逐项抽取，请稍候…"}
                 </div>
         )}
         {checklist?.error && (
           <div className="mb-3 rounded-md border border-accent-200 bg-accent-50 px-3 py-2 text-xs text-accent-700">{checklist.error}</div>
         )}
-        {responseTab ? (
+        {activeKey === "project-rules" ? (
+          <div className="space-y-2">
+            {(checklist?.projectRules?.length ?? 0) === 0 ? (
+              <p className="py-10 text-center text-sm text-foreground-500">重新解析后，这里列出招标、清单、图纸和水利规则池合成的规则。关闭后预审不再使用该条。</p>
+            ) : checklist?.projectRules?.map((rule) => (
+              <article key={rule.id || rule.title} className={`rounded-lg border border-background-300 bg-background-50 p-3 ${rule.enabled === false ? "opacity-60" : ""}`}>
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="text-[11px] text-foreground-500">{rule.source} · {rule.checkType} · {rule.severity}</div>
+                    <h3 className="text-sm font-semibold text-foreground-900">{rule.title}</h3>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={!projectId || !rule.id || ruleBusy === rule.id}
+                    onClick={() => {
+                      if (!projectId || !rule.id) return;
+                      setRuleBusy(rule.id);
+                      setProjectRuleEnabled(projectId, rule.id, rule.enabled === false)
+                        .then((next) => onChecklist?.(next))
+                        .finally(() => setRuleBusy(""));
+                    }}
+                    className="shrink-0 rounded border border-background-300 px-2 py-0.5 text-[11px] text-foreground-700"
+                  >
+                    {rule.enabled === false ? "启用" : "关闭"}
+                  </button>
+                          </div>
+                <p className="mt-1 text-sm text-foreground-800">{rule.requirement}</p>
+                {rule.evidence ? <p className="mt-1 text-xs text-foreground-500">依据：{rule.evidence}</p> : null}
+              </article>
+                    ))}
+              </div>
+        ) : activeKey === "drawing-facts" ? (
+          <ul className="space-y-1 text-sm text-foreground-800">
+            {(checklist?.drawingFacts?.length ?? 0) === 0 ? (
+              <li className="py-10 text-center text-foreground-500">这版解析没有抽出图纸特征。</li>
+            ) : checklist?.drawingFacts?.map((fact, index) => (
+              <li key={`${fact.drawingNo}-${index}`}>{fact.drawingNo || "图纸"} {fact.object} {fact.field} {fact.value} · {fact.evidence}</li>
+            ))}
+          </ul>
+        ) : responseTab ? (
           <ResponseField
             title={responseTab.label}
             text={(checklist?.[responseTab.field] || "").trim()}
             note={checklist?.extractStats?.bidRequirementNote}
+            itemized
+            paragraphs={sourceParagraphs}
+            onLocate={onLocate}
           />
         ) : currentItem ? (
           <div className="space-y-4">
@@ -621,20 +771,44 @@ export default function ParseResults({
         >
           <i className="ri-download-2-line text-sm"></i>
           下载解读结果
-          </button>
+        </button>
           <span className="hidden text-[11px] text-foreground-400 sm:inline">
             已填 {filled}/{total} 项
           </span>
         </div>
-        <button
-          type="button"
-          disabled={!hasChecklist || locking || checklist?.locked}
-          onClick={onLock}
-          className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-3 text-xs font-medium text-background-50 transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          <i className={`${locking ? "ri-loader-4-line animate-spin" : checklist?.locked ? "ri-lock-line" : "ri-lock-unlock-line"} text-sm`}></i>
-          {checklist?.locked ? `已锁定评标尺子 v${checklist.version}` : locking ? "锁定中…" : "锁定评标尺子"}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {checklist?.locked && onUnlock && (
+            <button
+              type="button"
+              disabled={locking}
+              onClick={onUnlock}
+              title="招标补遗或改了项目类别时，先解除锁定再重新解析"
+              className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-background-300 px-3 text-xs font-medium text-foreground-600 transition-colors hover:bg-background-200 disabled:opacity-50"
+            >
+              <i className="ri-lock-unlock-line text-sm"></i>
+              解除锁定
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={!hasChecklist || locking || checklist?.locked}
+            onClick={onLock}
+            className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-3 text-xs font-medium text-background-50 transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <i className={`${locking ? "ri-loader-4-line animate-spin" : checklist?.locked ? "ri-lock-line" : "ri-lock-unlock-line"} text-sm`}></i>
+            {checklist?.locked ? `已锁定评标尺子 v${checklist.version}` : locking ? "锁定中…" : "锁定评标尺子"}
+          </button>
+          {checklist?.locked && onGoWriter && (
+            <button
+              type="button"
+              onClick={onGoWriter}
+              className="flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-primary-300 px-3 text-xs font-medium text-primary-600 transition-colors hover:bg-primary-50"
+            >
+              <i className="ri-quill-pen-line text-sm"></i>
+              下一步：去撰写
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

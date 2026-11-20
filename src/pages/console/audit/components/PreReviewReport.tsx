@@ -2,11 +2,14 @@ import { useState } from "react";
 import type { PreReviewLevel, PreReviewIssue } from "@/mocks/preReview";
 import type { BidScope, CustomRuleReview, DimensionScore, StandardReview, TechModuleScore, TenderRuleReport } from "@/lib/api";
 import { GRADE_BADGE_CLASS, GRADE_LABEL, GRADE_TEXT_CLASS, LIGHT_LABEL } from "@/lib/grade";
-import { BID_EXCERPT_HIT_LABEL, BID_EXCERPT_MISS_LABEL, issueChapter, issueRuleKind, issueRuleLabel, issueRuleSourceLabel, NO_BID_EXCERPT_HINT, NO_TENDER_CLAUSE_HINT, splitBidAndTender, type IssueRuleKind } from "@/lib/excerpt";
+import { BID_EXCERPT_HIT_LABEL, BID_EXCERPT_MISS_LABEL, isLegacyTenderParseIssue, isTechScoreRulerItem, issueChapter, issueRuleKind, issueRuleLabel, issueRuleSourceLabel, NO_BID_EXCERPT_HINT, NO_TENDER_CLAUSE_HINT, splitBidAndTender, type IssueRuleKind } from "@/lib/excerpt";
+import { isEngineeringCategory } from "@/mocks/projects";
 
 interface PreReviewReportProps {
   projectName: string;
   projectCode: string;
+  /** 项目标书类别（工程类 / 软件服务类），用于报告头部展示对应的预审版本徽标。 */
+  category?: string | null;
   levels: PreReviewLevel[];
   issues: PreReviewIssue[];
   dimensions: DimensionScore[];
@@ -205,8 +208,8 @@ function StandardReviewTabs({
       {shown.length === 0 ? (
         <p className="rounded-lg border border-dashed border-background-300 bg-background-50 px-3 py-6 text-center text-xs text-foreground-500">
           {tab === "招标书" && counts.图纸 > 0
-            ? "招标书规则这次没有抽出。图纸上的施工说明在「图纸」页签。重新做一次技术标预审后，才会按补上的招标书规则核对投标书。"
-            : "这一类没有抽出查核点。请重新解析招标文件包后再做预审。对上的施工图会出现在「图纸」页签。"}
+            ? "本轮没有写出招标书查核点。图纸上的施工说明在「图纸」页签。招标书和技术评分的逐条核对只在规范对标里做。"
+            : "这一类本轮没有写出查核点。招标书和技术评分的逐条核对只在规范对标里做，对上的施工图会出现在「图纸」页签。"}
         </p>
       ) : (
         <div className="space-y-2.5">
@@ -305,6 +308,7 @@ function StandardReviewTabs({
 export default function PreReviewReport({
   projectName,
   projectCode,
+  category = null,
   levels,
   issues,
   dimensions,
@@ -331,7 +335,9 @@ export default function PreReviewReport({
   const isCustomIssue = (issue: PreReviewIssue) =>
     (issue.rule || "").startsWith("自定义规则") || (issue.location || "").startsWith("自定义规则");
   const shownLevels = levels.filter((level) => levelKeys.includes(level.key));
-  const shownIssues = issues.filter((issue) => levelKeys.includes(issue.level) || isCustomIssue(issue));
+  const shownIssues = issues.filter(
+    (issue) => !isLegacyTenderParseIssue(issue) && (levelKeys.includes(issue.level) || isCustomIssue(issue)),
+  );
   const [issueKind, setIssueKind] = useState<IssueRuleKind>("tender");
   const isTechScoreIssue = (issue: { rule?: string; location?: string }) =>
     /技术标评分/.test(`${issue.rule || ""}\n${issue.location || ""}`);
@@ -339,13 +345,17 @@ export default function PreReviewReport({
     (issue) => issueRuleKind(issue) === "tender" && !isTechScoreIssue(issue),
   );
   const reviewIssues = shownIssues.filter((issue) => issueRuleKind(issue) === "review");
-  const rulerItems = (tenderRules?.groups ?? [])
-    .filter((group) => /技术标评分/.test(`${group.key || ""}${group.label || ""}`))
-    .flatMap((group) => (group.items || []).map((item) => ({ ...item, groupLabel: group.label })));
+  const rulerItems = (tenderRules?.groups ?? []).flatMap((group) =>
+    (group.items || [])
+      .filter((item) => isTechScoreRulerItem(item, group))
+      .map((item) => ({ ...item, groupLabel: group.label })),
+  );
   const listedIssues = issueKind === "tender" ? tenderIssues : reviewIssues;
   const tenderCount = tenderIssues.length + rulerItems.length;
   const coverage = tenderRules?.coverage;
   const scopeLabel = scope === "business" ? "商务标" : "技术标";
+  const isEngineering = isEngineeringCategory(category);
+  const categoryBadgeLabel = category ? (isEngineering ? "工程类标书版" : "软件服务类标书版") : null;
 
   return (
     <div className="mx-auto max-w-4xl overflow-hidden rounded-lg border border-background-300 bg-background-100">
@@ -356,8 +366,19 @@ export default function PreReviewReport({
             <i className="ri-shield-check-line text-lg"></i>
           </span>
           <div>
-            <h3 className="font-heading text-base font-semibold tracking-wide text-foreground-950">
+            <h3 className="flex items-center gap-2 font-heading text-base font-semibold tracking-wide text-foreground-950">
               {scope === "business" ? "商务标预审报告" : "技术标预审报告"}
+              {categoryBadgeLabel && (
+                <span
+                  className={`font-label inline-flex items-center rounded px-2 py-0.5 text-[11px] font-medium ${
+                    isEngineering
+                      ? "bg-secondary-50 text-secondary-600"
+                      : "bg-primary-50 text-primary-600"
+                  }`}
+                >
+                  {categoryBadgeLabel}
+                </span>
+              )}
             </h3>
             <p className="text-xs text-foreground-500">
               智标云 AI · {scope === "business" ? "商务分册" : "技术分册"} · 第 {round} 轮预审{isSecondReview ? "（修改后）" : ""}
@@ -555,7 +576,7 @@ export default function PreReviewReport({
             review={
               standardReview ?? {
                 specialty: "通用",
-                note: "请重新解析招标书后再做技术标预审",
+                note: "本轮没有写出规范对标",
                 points: [],
               }
             }
@@ -610,11 +631,16 @@ export default function PreReviewReport({
                 <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${severityStyle[issue.severity]}`}>{issue.severity}</span>
                 <span className="font-label text-[11px] text-foreground-500">章节：{chapter || "未标注章节"}</span>
               </div>
+              {issue.basis ? (
+                <div className="border-b border-background-200 bg-background-50 px-3 py-2 text-xs text-foreground-700">
+                  <span className="font-medium text-foreground-800">依据：</span>{issue.basis}
+                </div>
+              ) : null}
               <div className="grid grid-cols-1 gap-3 p-3 sm:grid-cols-2">
                 <div className="rounded-md border border-accent-200 bg-accent-50/40 p-3">
                   <div className="mb-1.5 flex items-center gap-1 text-[11px] font-medium text-accent-600">
                     <i className="ri-file-text-line"></i>
-                    {excerpt ? BID_EXCERPT_HIT_LABEL : BID_EXCERPT_MISS_LABEL}
+                    {excerpt ? (issue.basis ? "标书现状" : BID_EXCERPT_HIT_LABEL) : BID_EXCERPT_MISS_LABEL}
                   </div>
                   <p className="text-sm leading-relaxed text-foreground-800">
                     {excerpt ? `「${excerpt}」` : NO_BID_EXCERPT_HINT}
@@ -623,7 +649,7 @@ export default function PreReviewReport({
                 <div className="rounded-md border border-primary-200 bg-primary-50/40 p-3">
                   <div className="mb-1.5 flex items-center gap-1 text-[11px] font-medium text-primary-600">
                     <i className="ri-file-search-line"></i>
-                    招标书要求原文（对标条款）
+                    {issue.basis ? "规则" : "招标书要求原文（对标条款）"}
                   </div>
                   <p className="text-sm leading-relaxed text-foreground-800">
                     {tenderQuote ? `「${tenderQuote}」` : NO_TENDER_CLAUSE_HINT}

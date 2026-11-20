@@ -9,9 +9,12 @@ import { useAuth } from "@/context/AuthContext";
 import { hasPerm } from "@/lib/permissions";
 import {
   ApiError,
+  KNOWLEDGE_TYPES,
   getKnowledgeChapterDetail,
   getKnowledgeChapters,
+  getKnowledgeDocument,
   listKnowledgeDocuments,
+  patchKnowledgeDocument,
   rechunkKnowledgeDocument,
   type KnowledgeChapter,
   type KnowledgeChapterDetail,
@@ -54,7 +57,7 @@ export default function KnowledgeDocumentDetailPage() {
   const { docId = "" } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
-  const canEdit = hasPerm(user?.role, "writer");
+  const canEdit = hasPerm(user, "writer");
   const [doc, setDoc] = useState<KnowledgeDoc | null>(null);
   const [chapters, setChapters] = useState<KnowledgeChapter[]>([]);
   const [ready, setReady] = useState(false);
@@ -124,23 +127,43 @@ export default function KnowledgeDocumentDetailPage() {
 
   const reloadChapters = () => {
     if (!docId) return Promise.resolve();
-    return Promise.all([listKnowledgeDocuments(), getKnowledgeChapters(docId)]).then(([docs, chs]) => {
-      setDoc(docs.find((d) => d.id === docId) || null);
+    return Promise.all([getKnowledgeDocument(docId), getKnowledgeChapters(docId)]).then(([fresh, chs]) => {
+      setDoc(fresh);
       setChapters(chs);
     });
   };
+
+  const parsing = doc?.status === "queued" || doc?.status === "running";
+  useEffect(() => {
+    if (!docId || !parsing) return;
+    const timer = window.setInterval(() => {
+      reloadChapters().catch(() => undefined);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [docId, parsing]);
 
   const handleRechunk = async () => {
     if (!docId) return;
     setRechunking(true);
     try {
-      await rechunkKnowledgeDocument(docId);
-      await reloadChapters();
-      showToast("已按目录重新切片", "success");
+      const fresh = await rechunkKnowledgeDocument(docId);
+      setDoc(fresh);
+      showToast("已重新发起解析，完成后这里会自动更新", "info");
     } catch (err) {
-      showToast(err instanceof ApiError ? err.message : "重新切片失败，请稍后重试", "error");
+      showToast(err instanceof ApiError ? err.message : "重新解析失败，请稍后重试", "error");
     } finally {
       setRechunking(false);
+    }
+  };
+
+  const handleTypeChange = async (type: string) => {
+    if (!docId || !doc || type === doc.type) return;
+    try {
+      const fresh = await patchKnowledgeDocument(docId, { type });
+      setDoc(fresh);
+      showToast(type === "规范条文" ? "已改为规范条文。点「重新解析条文」后按条入库" : `已改为${type}。点重新解析后按新类型入库`, "info");
+    } catch (err) {
+      showToast(err instanceof ApiError ? err.message : "修改类型失败", "error");
     }
   };
 
@@ -185,18 +208,25 @@ export default function KnowledgeDocumentDetailPage() {
     );
   }
 
-  const statCards = [
-    { key: "primary", label: "一级章节", value: stats.primary, icon: "ri-bookmark-3-line", gradient: "from-primary-400 to-primary-600", bar: "from-primary-500 to-primary-400" },
-    { key: "secondary", label: "二级小节", value: stats.secondary, icon: "ri-node-tree", gradient: "from-secondary-400 to-secondary-500", bar: "from-secondary-400 to-secondary-300" },
-    { key: "tertiary", label: "三级条目", value: stats.tertiary, icon: "ri-list-check-2", gradient: "from-primary-400 to-primary-600", bar: "from-primary-500 to-primary-400" },
-    { key: "withImage", label: "已配图", value: stats.withImage, icon: "ri-image-line", gradient: "from-accent-400 to-accent-500", bar: "from-accent-500 to-accent-400" },
-  ];
+  const standard = doc.type === "规范条文";
+  const statCards = standard
+    ? [{ key: "primary", label: "条文", value: stats.primary, icon: "ri-book-2-line", gradient: "from-primary-400 to-primary-600", bar: "from-primary-500 to-primary-400" }]
+    : [
+        { key: "primary", label: "一级章节", value: stats.primary, icon: "ri-bookmark-3-line", gradient: "from-primary-400 to-primary-600", bar: "from-primary-500 to-primary-400" },
+        { key: "secondary", label: "二级小节", value: stats.secondary, icon: "ri-node-tree", gradient: "from-secondary-400 to-secondary-500", bar: "from-secondary-400 to-secondary-300" },
+        { key: "tertiary", label: "三级条目", value: stats.tertiary, icon: "ri-list-check-2", gradient: "from-primary-400 to-primary-600", bar: "from-primary-500 to-primary-400" },
+        { key: "withImage", label: "已配图", value: stats.withImage, icon: "ri-image-line", gradient: "from-accent-400 to-accent-500", bar: "from-accent-500 to-accent-400" },
+      ];
 
   return (
     <div>
       <PageHeader
         title={doc.title}
-        description={`${doc.type} · ${doc.scope} · 按文档目录切到三级：3.1 一级，3.1.1 二级，3.1.1.1 三级，配图随章节保留。`}
+        description={
+          doc.type === "规范条文"
+            ? `${doc.type} · ${doc.scope} · 按条入库，供预审检索，不按施工组织目录切片。`
+            : `${doc.type} · ${doc.scope} · 按文档目录切到三级：3.1 一级，3.1.1 二级，3.1.1.1 三级，配图随章节保留。`
+        }
         actions={
           <div className="flex items-center gap-2">
             <button
@@ -210,17 +240,54 @@ export default function KnowledgeDocumentDetailPage() {
             {canEdit && (
               <button
                 type="button"
-                disabled={rechunking}
+                disabled={rechunking || parsing}
                 onClick={handleRechunk}
                 className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-primary-500 px-4 text-sm font-medium text-background-50 transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                <i className={`${rechunking ? "ri-loader-4-line animate-spin" : "ri-node-tree"} text-sm`}></i>
-                {rechunking ? "正在按目录切片…" : "按目录重新切片"}
+                <i className={`${rechunking || parsing ? "ri-loader-4-line animate-spin" : "ri-node-tree"} text-sm`}></i>
+                {parsing ? "正在解析…" : doc.type === "规范条文" ? "重新解析条文" : "按目录重新切片"}
               </button>
             )}
           </div>
         }
       />
+
+      {canEdit && (
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-background-300 bg-background-100 px-3.5 py-3">
+          <label className="text-xs text-foreground-500" htmlFor="doc-type">
+            文档类型
+          </label>
+          <select
+            id="doc-type"
+            value={doc.type}
+            disabled={parsing}
+            onChange={(e) => handleTypeChange(e.target.value)}
+            className="h-8 cursor-pointer rounded-md border border-background-300 bg-background-50 px-2 text-sm text-foreground-900 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {KNOWLEDGE_TYPES.map((t) => (
+              <option key={t}>{t}</option>
+            ))}
+          </select>
+          <span className="text-xs text-foreground-500">规范按条入库，历史标书才按章节切片。改类型后要点重新解析。</span>
+        </div>
+      )}
+
+      {parsing && (
+        <div className="mb-4 flex items-center gap-1.5 rounded-lg bg-primary-50 px-3.5 py-2.5 text-sm text-primary-700">
+          <i className="ri-loader-4-line animate-spin"></i>
+          {doc.progress && doc.progress.total > 0
+            ? `正在识别第 ${doc.progress.done} / ${doc.progress.total} 页，中断后重新解析会从这一页继续`
+            : doc.progress
+              ? "正在识别整本，完成后按条入库"
+              : "已排队，正在后台解析"}
+        </div>
+      )}
+      {doc.status === "failed" && doc.error && (
+        <div className="mb-4 flex items-center gap-1.5 rounded-lg bg-red-50 px-3.5 py-2.5 text-sm text-red-600">
+          <i className="ri-error-warning-line"></i>
+          {doc.error}
+        </div>
+      )}
 
       <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {statCards.map((card) => (
@@ -261,7 +328,7 @@ export default function KnowledgeDocumentDetailPage() {
             type="text"
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
-            placeholder="搜索一级、二级或三级章节…"
+            placeholder={standard ? "搜索条号…" : "搜索一级、二级或三级章节…"}
             className={`${inputCls} pl-9`}
           />
         </div>
@@ -272,10 +339,10 @@ export default function KnowledgeDocumentDetailPage() {
             <table className="w-full min-w-[1080px] text-left">
               <thead>
                 <tr className="font-label border-b border-background-300 bg-background-50 text-xs text-foreground-500">
-                  <th className="px-4 py-3 font-medium">一级章节</th>
-                  <th className="px-3 py-3 font-medium">二级目录</th>
-                  <th className="px-3 py-3 font-medium">正文摘要</th>
-                  <th className="px-3 py-3 font-medium">附图</th>
+                  <th className="px-4 py-3 font-medium">{standard ? "条号" : "一级章节"}</th>
+                  {!standard && <th className="px-3 py-3 font-medium">二级目录</th>}
+                  <th className="px-3 py-3 font-medium">{standard ? "条文" : "正文摘要"}</th>
+                  {!standard && <th className="px-3 py-3 font-medium">附图</th>}
                   <th className="px-3 py-3 text-right font-medium">操作</th>
                 </tr>
               </thead>
@@ -303,7 +370,7 @@ export default function KnowledgeDocumentDetailPage() {
                       </div>
                     </div>
                   </td>
-                  <td className="max-w-[420px] px-3 py-3 align-top">
+                  {!standard && <td className="max-w-[420px] px-3 py-3 align-top">
                     {(ch.children || []).length === 0 ? (
                       <span className="text-xs text-foreground-400">无二级目录</span>
                     ) : (
@@ -330,13 +397,13 @@ export default function KnowledgeDocumentDetailPage() {
                         </div>
                       </div>
                     )}
-                  </td>
-                  <td className="max-w-[280px] px-3 py-3 align-top">
+                  </td>}
+                  <td className={`${standard ? "max-w-[720px]" : "max-w-[280px]"} px-3 py-3 align-top`}>
                     <div className="line-clamp-3 text-xs leading-relaxed text-foreground-600">
-                      {ch.excerpt || "点开查看本章正文、表格与配图。"}
+                      {ch.excerpt || (standard ? "点开查看条文全文。" : "点开查看本章正文、表格与配图。")}
                     </div>
                   </td>
-                  <td className="px-3 py-3 align-top">
+                  {!standard && <td className="px-3 py-3 align-top">
                     {imageCountOf(ch) === 0 ? (
                       <span className="text-xs text-foreground-400">无图</span>
                     ) : (
@@ -345,7 +412,7 @@ export default function KnowledgeDocumentDetailPage() {
                         {imageCountOf(ch)} 张
                       </span>
                     )}
-                  </td>
+                  </td>}
                   <td className="px-3 py-3 text-right align-top">
                     <button
                       type="button"
@@ -360,8 +427,8 @@ export default function KnowledgeDocumentDetailPage() {
               ))}
               {paged.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="px-4 py-16 text-center text-sm text-foreground-500">
-                    该文档还没有识别出章节切片
+                  <td colSpan={standard ? 3 : 5} className="px-4 py-16 text-center text-sm text-foreground-500">
+                    {standard ? "还没有识别到条文" : "该文档还没有识别出章节切片"}
                   </td>
                 </tr>
               )}

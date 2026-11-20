@@ -10,6 +10,7 @@ import { hasPerm } from "@/lib/permissions";
 import {
   ApiError,
   createQualification,
+  reextractQualifications,
   deleteQualification,
   listQualifications,
   listQualificationSourceDocs,
@@ -71,11 +72,59 @@ const emptyForm = {
   validUntil: "长期",
   owner: "",
   detail: "",
+  attrs: {} as Record<string, string>,
+};
+
+// 与后端 engines/qualification_schema.py 的 KIND_FIELDS 保持一致
+const projectFields: [string, string][] = [
+  ["projectName", "项目名称"],
+  ["client", "客户"],
+  ["contractNo", "合同编号"],
+  ["amount", "合同金额"],
+  ["signDate", "签订日期"],
+  ["startDate", "开始日期"],
+  ["endDate", "结束日期"],
+  ["category", "项目类型"],
+  ["scope", "建设内容"],
+  ["contact", "客户联系人"],
+];
+const kindFields: Record<string, [string, string][]> = {
+  cert: [
+    ["certName", "证书名称"],
+    ["issuer", "发证机构"],
+    ["number", "证书编号"],
+    ["level", "等级"],
+    ["validFrom", "发证日期"],
+    ["validUntil", "有效期至"],
+  ],
+  people: [
+    ["name", "姓名"],
+    ["role", "拟任角色"],
+    ["title", "职称"],
+    ["certificates", "持有证书"],
+    ["education", "学历"],
+    ["years", "从业年限"],
+  ],
+  contract: projectFields,
+  achievement: projectFields,
+  financial: [
+    ["year", "年度"],
+    ["docType", "材料种类"],
+  ],
+  credit: [
+    ["docType", "材料种类"],
+    ["issuer", "出具机构"],
+    ["issueDate", "出具日期"],
+  ],
+  equipment: [
+    ["model", "型号"],
+    ["quantity", "数量"],
+  ],
 };
 
 export default function QualificationsPage() {
   const { token, user } = useAuth();
-  const canEditQual = hasPerm(user?.role, "qual_edit");
+  const canEditQual = hasPerm(user, "qual_edit");
   const [items, setItems] = useState<QualificationAsset[]>([]);
   const [jobs, setJobs] = useState<QualificationParseJob[]>([]);
   const [pageTab, setPageTab] = useState<PageTab>("library");
@@ -184,6 +233,7 @@ export default function QualificationsPage() {
           validUntil: form.validUntil.trim() || "长期",
           owner: form.owner.trim(),
           detail: form.detail.trim(),
+          attrs: form.attrs,
           file,
         });
         showToast("已保存");
@@ -196,6 +246,7 @@ export default function QualificationsPage() {
           validUntil: form.validUntil.trim() || "长期",
           owner: form.owner.trim(),
           detail: form.detail.trim(),
+          attrs: form.attrs,
           file,
         });
         showToast("证照已录入");
@@ -229,6 +280,7 @@ export default function QualificationsPage() {
       validUntil: item.validUntil,
       owner: item.owner,
       detail: item.detail,
+      attrs: { ...(item.attrs || {}) },
     });
     setFile(null);
     setCreateOpen(true);
@@ -245,9 +297,16 @@ export default function QualificationsPage() {
     setUploadOpen(false);
     setPageTab("parse");
     try {
-      const created = await uploadQualificationSourceDocs(token, uploadFiles);
+      const result = await uploadQualificationSourceDocs(token, uploadFiles);
+      const created = result.filter((job) => !job.duplicate);
+      const dupes = result.length - created.length;
       await reload();
-      showToast(`已上传 ${created.length} 份，正在抽取…`, "info");
+      showToast(
+        dupes
+          ? `已上传 ${created.length} 份；${dupes} 份与库中已有文件内容完全相同，已跳过`
+          : `已上传 ${created.length} 份，正在抽取…`,
+        "info",
+      );
       await Promise.all(
         created.map((job) =>
           pollQualificationExtractJobUntilDone(token, job.id).catch((err) => {
@@ -265,6 +324,19 @@ export default function QualificationsPage() {
       setParsing(false);
       setUploadFiles([]);
       if (parseFileRef.current) parseFileRef.current.value = "";
+    }
+  };
+
+  const handleReextract = async () => {
+    if (!token) return;
+    if (!window.confirm("将清空现有全部条目及扫描图，并对已上传的商务标重新抽取，抽取结果进入待审核。确定继续？")) return;
+    try {
+      const res = await reextractQualifications(token);
+      showToast(`已清空 ${res.removed} 条，${res.queued} 份商务标正在重新抽取`, "info");
+      setPageTab("parse");
+      await reload();
+    } catch (err) {
+      showToast(err instanceof ApiError ? err.message : "重新抽取失败", "error");
     }
   };
 
@@ -353,6 +425,15 @@ export default function QualificationsPage() {
         actions={
           canEditQual ? (
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleReextract}
+                disabled={parsing}
+                className="flex h-9 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-background-300 bg-background-100 px-4 text-sm font-medium text-foreground-700 transition-colors hover:bg-background-200 disabled:opacity-50"
+              >
+                <i className="ri-refresh-line text-sm"></i>
+                重新抽取
+              </button>
               <button
                 type="button"
                 onClick={() => setUploadOpen(true)}
@@ -880,6 +961,24 @@ export default function QualificationsPage() {
               />
             </div>
           </div>
+          {(kindFields[form.kind] || []).length > 0 && (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              {(kindFields[form.kind] || []).map(([key, label]) => (
+                <div key={key}>
+                  <label className={labelCls} htmlFor={`q-attr-${key}`}>
+                    {label}
+                  </label>
+                  <input
+                    id={`q-attr-${key}`}
+                    type="text"
+                    value={form.attrs[key] || ""}
+                    onChange={(e) => setForm((f) => ({ ...f, attrs: { ...f.attrs, [key]: e.target.value } }))}
+                    className={inputCls}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
           <div>
             <label className={labelCls} htmlFor="q-detail">
               备注

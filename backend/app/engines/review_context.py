@@ -8,6 +8,7 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..models import BidDocument, KnowledgeSlice, Project, QualificationAsset, TenderDocument
@@ -35,6 +36,7 @@ class QualSnap:
 class ReviewContext:
     project_id: str
     project_name: str
+    category: str = ""
     other_project_names: list[str] = field(default_factory=list)
     other_sentences: list[tuple[str, str]] = field(default_factory=list)
     other_full_texts: list[tuple[str, str]] = field(default_factory=list)
@@ -128,7 +130,8 @@ def _sentences(text: str) -> list[str]:
 def load_review_context(db: Session, project_id: str, current_path: str | None = None) -> ReviewContext:
     project = db.get(Project, project_id)
     name = project.name if project else ""
-    ctx = ReviewContext(project_id=project_id, project_name=name)
+    category = (project.category if project else "") or ""
+    ctx = ReviewContext(project_id=project_id, project_name=name, category=category)
     if current_path:
         ctx.current_hash = _file_md5(current_path)
         ctx.encrypted, ctx.scanned_pdf = inspect_document(current_path)
@@ -139,6 +142,7 @@ def load_review_context(db: Session, project_id: str, current_path: str | None =
     other_docs = (
         db.query(BidDocument)
         .filter(BidDocument.project_id != project_id)
+        .filter(or_(BidDocument.source.is_(None), BidDocument.source != "revision-working"))
         .order_by(BidDocument.uploaded_at.desc())
         .limit(OTHER_DOC_LIMIT)
         .all()
@@ -174,7 +178,8 @@ def load_review_context(db: Session, project_id: str, current_path: str | None =
     checklist = load_project_checklist(db, project_id)
     ctx.checklist_version = checklist.version
     ctx.extract_stats = checklist.extract_stats or {}
-    ctx.weight_name = load_active_weight_name(db)
+    project_row = db.get(Project, project_id) if project_id else None
+    ctx.weight_name = load_active_weight_name(db, (project_row.category if project_row else None) or "")
     if checklist.tender_corpus.strip():
         ctx.tender_text = checklist.tender_corpus[:120_000]
     else:

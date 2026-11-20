@@ -438,10 +438,18 @@ def _wrap(text: str, width: float, size: float, max_lines: int) -> str:
     return "\n".join(lines[:max_lines])
 
 
+def _ensure_cjk(page, font: str) -> None:
+    # fontfile 直接传给 insert_textbox 时，ttc 里的汉字会被画成问号。先注册字体名再写。
+    names = {item[4] for item in (page.get_fonts() or []) if len(item) > 4}
+    if "cjk" not in names:
+        page.insert_font(fontname="cjk", fontfile=font)
+
+
 def _text(page, rect: fitz.Rect, text: str, font: str, size: float, color: tuple[float, float, float]) -> None:
     if not text:
         return
-    page.insert_textbox(rect, text, fontfile=font, fontsize=size, color=color, align=fitz.TEXT_ALIGN_CENTER)
+    _ensure_cjk(page, font)
+    page.insert_textbox(rect, text, fontname="cjk", fontsize=size, color=color, align=fitz.TEXT_ALIGN_CENTER)
 
 
 def _box(page, rect: fitz.Rect, font: str, label: str, note: str = "") -> None:

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response
 from pathlib import Path
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from ..audit import actor_from_request, project_label, write_audit
 from ..auth import get_current_user
@@ -28,7 +28,8 @@ from ..engines.revision_suggest import (
     strip_strategy_overlay,
 )
 from ..engines.tender_style import extract_bid_typography
-from ..models import BidDocument, BidRevision, BidRevisionVersion, ReviewFinding, ReviewRun, User
+from ..engines.category_profile import FIX_MANUAL, category_key, category_label
+from ..models import BidDocument, BidRevision, BidRevisionVersion, Project, ReviewFinding, ReviewRun, User
 from ..permissions import PERM_WRITER, require_project
 from .. import storage
 from ..schemas import (
@@ -43,12 +44,21 @@ from ..schemas import (
 router = APIRouter(prefix="/api", tags=["revision"])
 
 
-def _finding_to_issue_dict(f: ReviewFinding) -> dict:
+WORKING_SOURCE = "revision-working"  # 修改闭环的当前工作稿，每份草稿只保留一份
+
+
+def _project_category(db: Session, project_id: str) -> str:
+    project = db.get(Project, project_id)
+    return category_key(project.category if project else None)
+
+
+def _finding_to_issue_dict(f: ReviewFinding, category: str | None = None) -> dict:
     extra = f.evidence_json if isinstance(f.evidence_json, dict) else {}
     excerpt, quote = split_bid_and_tender(f.excerpt or "", f.tender_quote or "", f.rule or "")
     excerpt = source_visible_text(excerpt) or excerpt
     return enrich_issue(
         {
+            "issueClass": extra.get("issueClass") or "",
             "id": f.id,
             "level": f.level,
             "severity": f.severity,
@@ -59,12 +69,13 @@ def _finding_to_issue_dict(f: ReviewFinding) -> dict:
             "suggestion": f.suggestion or "",
             "applyText": extra.get("applyText") or "",
             "strategyKey": extra.get("strategyKey") or "",
-        }
+        },
+        category,
     )
 
 
-def _enrich_stored_issues(raw_issues: list) -> list[dict]:
-    return [enrich_issue(dict(item)) for item in raw_issues if isinstance(item, dict)]
+def _enrich_stored_issues(raw_issues: list, category: str | None = None) -> list[dict]:
+    return [enrich_issue(dict(item), category) for item in raw_issues if isinstance(item, dict)]
 
 
 def _reanchor_sections(sections: list[dict], issues: list[dict]) -> list[dict]:
@@ -111,21 +122,78 @@ def _revision_filename(revision: BidRevision, suffix: str) -> str:
     return f"{label}{suffix}"
 
 
-def _sync_revision_to_run(revision: BidRevision, run: ReviewRun, sections: list[dict], issues: list[dict], layout: dict) -> bool:
-    """把修改闭环草稿对齐到指定预审轮次。换轮次时清掉旧编辑器状态与已修复标记。"""
+def _release_working_doc(db: Session, doc: BidDocument | None) -> str | None:
+    """草稿要回到预审原文时，丢掉旧工作稿。返回要在提交后删除的存储 key。
+
+    工作稿只属于这份草稿；被预审轮次引用的文件（比如用户上传的原稿）不会删。
+    调用前草稿的 bid_document_id 必须已经指向别处并 flush，否则会撞外键。
+    """
+    if not doc or doc.source != WORKING_SOURCE:
+        return None
+    if db.query(ReviewRun.id).filter(ReviewRun.bid_document_id == doc.id).first():
+        return None
+    stale = doc.storage_path
+    db.delete(doc)
+    return stale
+
+
+def _store_working_doc(db: Session, revision: BidRevision, base_doc: BidDocument, docx_bytes: bytes) -> str | None:
+    """把采纳后的 docx 存成这份草稿唯一的工作稿。
+
+    第一次采纳新建工作稿；之后原地替换文件，不再每采纳一条就多出一份「修改稿」。
+    返回提交后需要删除的旧文件 key（新建时没有）。
+    """
+    key = storage.put_bytes(f"bid-documents/{revision.project_id}", docx_bytes, ".docx")
+    if base_doc.source == WORKING_SOURCE:
+        stale = base_doc.storage_path
+        base_doc.storage_path = key
+        base_doc.size_bytes = len(docx_bytes)
+        return stale
+    working = BidDocument(
+        project_id=revision.project_id,
+        filename=_revision_filename(revision, "修改稿.docx"),
+        storage_path=key,
+        size_bytes=len(docx_bytes),
+        source=WORKING_SOURCE,
+        kind=_revision_kind(revision),
+    )
+    db.add(working)
+    db.flush()
+    revision.bid_document_id = working.id
+    return None
+
+
+def _sync_revision_to_run(
+    db: Session,
+    revision: BidRevision,
+    run: ReviewRun,
+    sections: list[dict],
+    issues: list[dict],
+    layout: dict,
+    force: bool = False,
+) -> tuple[bool, str | None]:
+    """把修改闭环草稿对齐到指定预审轮次。
+
+    只有换了轮次、或用户明确点了「重新生成」才会回到预审原文并清掉改动；
+    同一轮次下不能再覆盖工作稿，否则刷新一次页面，已采纳的改写就丢了。
+    返回 (是否换了轮次, 提交后要删除的旧工作稿 key)。
+    """
     switched = revision.review_run_id != run.id
-    revision.bid_document_id = run.bid_document_id
-    revision.review_run_id = run.id
-    revision.sections_json = sections
-    revision.issues_json = issues
-    revision.layout_json = layout
-    if switched:
+    stale_ref: str | None = None
+    if switched or force:
+        old_doc = db.get(BidDocument, revision.bid_document_id) if revision.bid_document_id else None
+        revision.bid_document_id = run.bid_document_id
+        revision.review_run_id = run.id
+        revision.sections_json = sections
+        revision.issues_json = issues
+        revision.layout_json = layout
         revision.content_state_json = None
         revision.resolved_ids_json = []
-    else:
-        keep = {i.get("id") for i in issues if i.get("id")}
-        revision.resolved_ids_json = [x for x in (revision.resolved_ids_json or []) if x in keep]
-    return switched
+        for column in ("sections_json", "issues_json", "layout_json"):
+            flag_modified(revision, column)
+        db.flush()
+        stale_ref = _release_working_doc(db, old_doc if old_doc and old_doc.id != run.bid_document_id else None)
+    return switched, stale_ref
 
 
 def _build_revision_content(db: Session, run: ReviewRun, scope: str) -> tuple[list[dict], list[dict], dict]:
@@ -141,8 +209,9 @@ def _build_revision_content(db: Session, run: ReviewRun, scope: str) -> tuple[li
                 layout = {}
     except FileNotFoundError:
         raise HTTPException(404, "预审对应的投标文件不存在")
+    category = _project_category(db, run.project_id)
     issues = [
-        _finding_to_issue_dict(f)
+        _finding_to_issue_dict(f, category)
         for f in _findings_for_scope(run, scope)
         if not is_transport_stub_finding(f.location or "", f.suggestion or "")
     ]
@@ -161,9 +230,13 @@ def _revision_to_out(
 ) -> BidRevisionOut:
     resolved = [x for x in (revision.resolved_ids_json or []) if isinstance(x, str)]
     resolved_set = set(resolved)
+    category = _project_category(db, revision.project_id) if db is not None else ""
+    if run is None and db is not None and revision.review_run_id:
+        run = db.get(ReviewRun, revision.review_run_id)
     issues = []
     for raw in revision.issues_json or []:
-        item = dict(raw)
+        # 旧草稿里存的问题没有 fixMode，读出来时按类别补上
+        item = enrich_issue(dict(raw), category or None) if category else dict(raw)
         item["resolved"] = item.get("id") in resolved_set
         issues.append(item)
     source_id = (run.bid_document_id if run is not None else "") or revision.bid_document_id
@@ -187,6 +260,9 @@ def _revision_to_out(
         layout=revision.layout_json,
         resolvedIds=resolved,
         runSwitched=run_switched,
+        category=category,
+        categoryLabel=category_label(category) if category else "",
+        fromFullRun=bool(run is not None and (getattr(run, "scope", None) or "full") == "full"),
     )
 
 
@@ -215,11 +291,14 @@ def get_or_create_bid_revision(
         .filter(BidRevision.project_id == project_id, BidRevision.scope == booklet)
         .first()
     )
+    if revision and revision.review_run_id == run.id and revision.sections_json:
+        # 同一轮预审：工作稿、已采纳的改写、已修复标记都以库里为准，不重新解析原文
+        return _revision_to_out(revision, run, False, db)
     sections, issues, layout = _build_revision_content(db, run, booklet)
-    switched = False
     if revision:
-        switched = _sync_revision_to_run(revision, run, sections, issues, layout)
+        switched, stale_ref = _sync_revision_to_run(db, revision, run, sections, issues, layout, force=True)
         db.commit()
+        storage.delete(stale_ref)
         db.refresh(revision)
         return _revision_to_out(revision, run, switched, db)
 
@@ -250,9 +329,7 @@ def regenerate_bid_revision(
     booklet = _revision_kind(revision)
     run = _latest_done_run(db, revision.project_id, booklet)
     sections, issues, layout = _build_revision_content(db, run, booklet)
-    switched = _sync_revision_to_run(revision, run, sections, issues, layout)
-    revision.content_state_json = None
-    revision.resolved_ids_json = []
+    switched, stale_ref = _sync_revision_to_run(db, revision, run, sections, issues, layout, force=True)
     write_audit(
         db,
         action="AI 改写",
@@ -262,6 +339,7 @@ def regenerate_bid_revision(
         detail=f"根据第 {run.round} 轮预审结果重新生成对照稿，待编写人确认",
     )
     db.commit()
+    storage.delete(stale_ref)
     db.refresh(revision)
     return _revision_to_out(revision, run, switched, db)
 
@@ -290,10 +368,14 @@ def apply_issue_suggestion(
 ) -> BidRevisionOut:
     """把该条 AI 整改建议写回正文段落（跳过目录），并尽量同步编辑器状态与工作稿。"""
     revision = _require_revision(db, current_user, revision_id)
-    issues = _enrich_stored_issues(revision.issues_json or [])
+    category = _project_category(db, revision.project_id)
+    issues = _enrich_stored_issues(revision.issues_json or [], category)
     issue = next((i for i in issues if i.get("id") == issue_id), None)
     if not issue:
         raise HTTPException(404, "问题项不存在")
+    if issue.get("fixMode") == FIX_MANUAL:
+        # 工程量、清单、图纸、证书、软著等材料类问题，改正文没有用，也不会让预审通过
+        raise HTTPException(400, issue.get("fixHint") or "这一项不能在正文里改写，请到对应文件或证件中处理后手动标记已修复")
 
     sections = _reanchor_sections(list(revision.sections_json or []), issues)
     target = None
@@ -312,18 +394,34 @@ def apply_issue_suggestion(
 
     old_text = target.get("text") or ""
     old_highlight = (target.get("problem") or {}).get("highlight") or issue.get("excerpt") or ""
+    if target.get("isHeading") and (not old_highlight or old_highlight not in old_text):
+        # 只因为章节名对上而锚到了标题，改写句会把整个标题顶掉；标题不让自动改
+        raise HTTPException(400, "这一项锚定在章节标题上，不能自动改写标题，请在原文中核对后手工修改")
     suggestion = strip_strategy_overlay(issue.get("suggestion") or "")
     if len(suggestion) < 8:
-        suggestion = llm_write_suggestion(issue) or fallback_suggestion(issue)
+        suggestion = llm_write_suggestion(issue, category) or fallback_suggestion(issue)
         issue["suggestion"] = suggestion
     apply_text = (issue.get("applyText") or "").strip() or heuristic_apply_text(old_highlight, suggestion)
     new_text = apply_text_to_paragraph(old_text, old_highlight, suggestion, apply_text)
     if new_text.strip() == old_text.strip() or not new_text.strip():
-        rewritten = llm_rewrite_paragraph(old_text, old_highlight, suggestion, issue)
+        rewritten = llm_rewrite_paragraph(old_text, old_highlight, suggestion, issue, category)
         if rewritten:
             new_text = rewritten
     if not new_text.strip() or new_text.strip() == old_text.strip():
         raise HTTPException(400, "未能生成可写入原文的改写句，请核对建议后手工修改源文件")
+
+    # 先写回源文件，写成功了才改草稿状态、标记已修复；写不进去就如实报错，不能假装成功
+    base_doc = db.get(BidDocument, revision.bid_document_id) if revision.bid_document_id else None
+    if not base_doc or not storage.exists(base_doc.storage_path):
+        raise HTTPException(400, "找不到这份草稿对应的源文件，无法写回，请重新生成对照稿")
+    try:
+        with storage.as_local(base_doc.storage_path) as path:
+            docx_bytes, hit = patch_docx_paragraph(path, old_text, new_text)
+    except Exception as exc:  # noqa: BLE001 —— 源文件损坏等，转成可读错误
+        raise HTTPException(400, f"写回源文件失败：{exc}") from exc
+    if not hit:
+        raise HTTPException(400, "没有在源文件里找到这一段文字，未做任何修改，请在原文中核对后手工修改")
+    stale_ref = _store_working_doc(db, revision, base_doc, docx_bytes)
 
     target["text"] = new_text
     new_highlight = apply_text if apply_text and apply_text in new_text else new_text
@@ -343,26 +441,10 @@ def apply_issue_suggestion(
     revision.resolved_ids_json = resolved
     revision.sections_json = sections
     revision.issues_json = issues
-
-    base_doc = db.get(BidDocument, revision.bid_document_id)
-    if base_doc and storage.exists(base_doc.storage_path):
-        try:
-            with storage.as_local(base_doc.storage_path) as path:
-                docx_bytes = patch_docx_paragraph(path, old_text, new_text)
-            key = storage.put_bytes(f"bid-documents/{revision.project_id}", docx_bytes, ".docx")
-            new_doc = BidDocument(
-                project_id=revision.project_id,
-                filename=_revision_filename(revision, "修改稿.docx"),
-                storage_path=key,
-                size_bytes=len(docx_bytes),
-                source="revision",
-                kind=_revision_kind(revision),
-            )
-            db.add(new_doc)
-            db.flush()
-            revision.bid_document_id = new_doc.id
-        except Exception:
-            pass
+    flag_modified(revision, "sections_json")
+    flag_modified(revision, "issues_json")
+    if isinstance(revision.content_state_json, dict):
+        flag_modified(revision, "content_state_json")
 
     write_audit(
         db,
@@ -373,6 +455,7 @@ def apply_issue_suggestion(
         detail=f"已将问题 {issue_id} 的整改建议写入正文",
     )
     db.commit()
+    storage.delete(stale_ref)
     db.refresh(revision)
     run = db.get(ReviewRun, revision.review_run_id)
     return _revision_to_out(revision, run, db=db)
@@ -518,30 +601,35 @@ def restore_bid_revision_version(
     if not version or version.revision_id != revision_id:
         raise HTTPException(404, "版本记录不存在")
 
-    revision.content_state_json = version.content_state_json
-    db.commit()
-    return RestoreVersionOut(contentState=version.content_state_json or {})
-
-
-@router.get("/bid-revisions/{revision_id}/export")
-def export_bid_revision_docx(
-    revision_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
-) -> Response:
-    revision = _require_revision(db, current_user, revision_id)
-
-    latest_version = (
-        db.query(BidRevisionVersion)
-        .filter(BidRevisionVersion.revision_id == revision_id, BidRevisionVersion.bid_document_id.isnot(None))
-        .order_by(BidRevisionVersion.created_at.desc())
-        .first()
-    )
-    if not latest_version:
-        raise HTTPException(400, "暂无已保存的版本，请先点击「保存版本」")
-
-    doc = db.get(BidDocument, latest_version.bid_document_id)
-    if not doc or not storage.exists(doc.storage_path):
-        raise HTTPException(404, "导出文件不存在")
+    # 编辑器状态和工作稿要一起回到该版本，否则之后「采纳」「保存」都会在新内容上继续改
+    version_doc = db.get(BidDocument, version.bid_document_id) if version.bid_document_id else None
+    if not version_doc or not storage.exists(version_doc.storage_path):
+        raise HTTPException(404, "该版本对应的文件不存在，无法恢复")
+    docx_bytes = storage.get_bytes(version_doc.storage_path)
+    base_doc = db.get(BidDocument, revision.bid_document_id) if revision.bid_document_id else None
+    if base_doc is None:
+        base_doc = version_doc
+    stale_ref = _store_working_doc(db, revision, base_doc, docx_bytes)
     try:
-        return storage.http_response(doc.storage_path, filename=doc.filename)
-    except FileNotFoundError:
-        raise HTTPException(404, "导出文件不存在")
+        with storage.as_local(version_doc.storage_path) as path:
+            sections = build_sections(extract_paragraphs(path))
+    except Exception:
+        sections = list(revision.sections_json or [])
+    category = _project_category(db, revision.project_id)
+    issues = _enrich_stored_issues(revision.issues_json or [], category)
+    revision.sections_json = _reanchor_sections(sections, issues)
+    revision.issues_json = issues
+    revision.content_state_json = version.content_state_json
+    flag_modified(revision, "sections_json")
+    flag_modified(revision, "issues_json")
+    db.commit()
+    storage.delete(stale_ref)
+    return RestoreVersionOut(
+        contentState=version.content_state_json or {},
+        versionId=version.id,
+        bidDocumentId=version.bid_document_id or "",
+    )
+
+
+# 注意：这里曾有一个 GET /bid-revisions/{id}/export，直接下载最近保存的版本，不做任何复检也不留记录，
+# 等于绕过了导出中心的闸门。已删除，导出统一走 /projects/{id}/exports（按分册、按类别复检）。

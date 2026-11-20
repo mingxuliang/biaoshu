@@ -20,7 +20,7 @@ export default function RequirePerm({
     );
   }
 
-  if (!user || !hasAnyPerm(user.role, anyOf)) {
+  if (!user || !hasAnyPerm(user, anyOf)) {
     return <Navigate to="/console/projects" replace />;
   }
 

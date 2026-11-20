@@ -17,9 +17,11 @@ import {
   fileIcon,
   formatOf,
 } from "@/lib/tenderPackage";
+import { isEngineeringCategory } from "@/mocks/projects";
 
 interface ProjectDocumentsProps {
   projectId: string;
+  category?: string;
 }
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -27,6 +29,7 @@ const SOURCE_LABELS: Record<string, string> = {
   workbench: "预审示例文档",
   writer: "撰写工作台导出",
   revision: "修改闭环保存版本",
+  export: "导出中心（明标版）",
   "export-anon": "导出中心（暗标版）",
 };
 
@@ -50,7 +53,7 @@ type PreviewDoc = {
   updated: string;
 };
 
-export default function ProjectDocuments({ projectId }: ProjectDocumentsProps) {
+export default function ProjectDocuments({ projectId, category }: ProjectDocumentsProps) {
   const { token } = useAuth();
   const [tenderDocs, setTenderDocs] = useState<TenderDocumentSummary[]>([]);
   const [bidDocs, setBidDocs] = useState<BidDocumentSummary[]>([]);
@@ -97,14 +100,16 @@ export default function ProjectDocuments({ projectId }: ProjectDocumentsProps) {
     {
       key: "tender",
       label: "招标文件",
-      desc: "本项目招标文件包：正文、答疑补遗、工程量清单、其他材料、施工图纸",
+      desc: isEngineeringCategory(category)
+        ? "本项目招标文件包：正文、答疑补遗、工程量清单、其他材料、施工图纸"
+        : "本项目招标文件包：正文、答疑补遗、其他材料",
       icon: "ri-file-list-3-line",
       color: "bg-primary-50 text-primary-600",
       docs: tenderDocs.map((d) => ({
         id: d.id,
         name: d.filename,
         kind: "tender" as const,
-        sourceLabel: TENDER_KIND_LABELS[effectiveTenderKind(d.kind, d.filename)] || "招标文件",
+        sourceLabel: TENDER_KIND_LABELS[effectiveTenderKind(d.kind, d.filename, category)] || "招标文件",
         size: formatSize(d.sizeBytes),
         updated: formatTime(d.uploadedAt),
       })),

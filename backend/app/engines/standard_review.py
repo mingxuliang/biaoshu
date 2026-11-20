@@ -10,12 +10,16 @@ from __future__ import annotations
 import json
 import logging
 import re
+from concurrent.futures import as_completed
+
+from ..ctx_executor import ContextThreadPoolExecutor as ThreadPoolExecutor
 
 from sqlalchemy.orm import Session
 
 from ..models import KnowledgeDocument, KnowledgeSlice, StandardClause
 from .e_tender_score import expand_score_items
 from .llm import LlmError, chat_complete, get_default_model_id
+from .parse_schema import is_engineering_category
 from .qty_boq import rows_from_dimensions
 from .standard_ingest import detect_specialty
 
@@ -25,7 +29,8 @@ MAX_POINTS = 108
 MAX_CLAUSES = 3
 KNOWLEDGE_LIMIT = 3
 KNOWLEDGE_EXCERPT = 400
-BATCH = 2
+BATCH = 8  # 每次判断塞入的查核点数：标书片段本身才是主要的 token 成本，多塞几个点省的是往返次数
+JUDGE_WORKERS = 4  # 跟 e3/e4 并行度一致；chat_complete 每次调用自建连接，可以安全并发
 _BANDS = (100, 90, 80, 70, 60)
 _BAND_LABEL = {100: "优", 90: "良", 80: "中等", 70: "一般", 60: "差", 0: "未提供"}
 _OFFTOPIC = ("学员", "积分", "激励中心", "学分", "登录密码", "软件平台")
@@ -57,6 +62,7 @@ _JUDGE_SYSTEM = """你是工程标预审员。调用方给出的是投标书全�
 评审计分规则里的权重、去掉最高最低分、评委人数、计算公式，不是投标人要写进施工组织设计的内容，全文没抄这些计分办法不能判应有未写。
 做法冲突：全文写了与给出规范条文相反的做法。没有条文时不要下这个结论。
 已响应：全文已经覆盖必须写到的施工内容，或材料不足以判断。
+规则若带 checkType：必须有看方案是否写到；参数一致看标书是否低于给出的设计值；量与资源一致看人数、工期、机械和工程量是否对得上；建议不要判应有未写。
 按本条招标文件的赋分档打分，不要只写已响应。五维用来说明为什么是这一档：完整性看事项有没有写全，针对性看是否针对本工程，合规性看是否符合给出的规范和知识库，可落地性看措施能否施工，规范性看依据和数据是否具体。
 score 只能落在给出的赋分档。档次为 100/90/80/70/60 时，只能给其中一档；关键内容没写到时不得给 100 或 90；全文没有这项时给 0。
 本条写明不单独赋分时，score 置空，grade 只写「符合」或「不符合」。
@@ -68,6 +74,32 @@ noncompliance 只写与给出的知识库条文或规范条文相反的做法，
 strategy 写针对本工程的高分写法。这是预审模拟分，不是评标委员会最终得分。
 返回 JSON 对象 {"items":[{"id","verdict","score","grade","scoreRule","checks","excerpts","strengths","revisions","noncompliance","strategy","reason","clauseKey"}]}。
 checks 项为 {"item","bid","result"}。clauseKey 必须照抄给出的「标准号 条号」。做法冲突和与规范不符必须有 clauseKey。"""
+
+# 软件服务类标书版：与上面的工程类系统提示词结构一一对应，只是把施工/工程量语境
+# 换成系统功能/接口/部署/服务条款语境，不出现"施工""工程量"等措辞。
+_JUDGE_SYSTEM_SW = """你是软件服务类标书预审员。调用方给出的是投标书全文，你必须通读全文后再下结论，不能只看开头的编制依据或编制原则。
+知识库摘录是检索到的技术/行业知识，用来理解做法；不得编造其中没有的标准号，不得另算总分。
+结论只能是：参数不一致、应有未写、做法冲突、已响应。
+参数不一致：全文里的技术指标、数量、规格和已挂参数、知识库摘录或条文矛盾。
+应有未写：通读全文后，必须写到的系统功能、接口、部署或服务条款仍然没有出现。后面章节已经写了相关方案或参数，就不要判应有未写。允许投标人换一种说法。
+评审计分规则里的权重、去掉最高最低分、评委人数、计算公式，不是投标人要写进技术方案的内容，全文没抄这些计分办法不能判应有未写。
+做法冲突：全文写了与给出规范条文相反的做法。没有条文时不要下这个结论。
+已响应：全文已经覆盖必须写到的系统功能/接口/部署/服务内容，或材料不足以判断。
+按本条招标文件的赋分档打分，不要只写已响应。五维用来说明为什么是这一档：完整性看事项有没有写全，针对性看是否针对本项目业务场景，合规性看是否符合给出的规范和知识库，可落地性看方案能否落地实施，规范性看依据和数据是否具体。
+score 只能落在给出的赋分档。档次为 100/90/80/70/60 时，只能给其中一档；关键内容没写到时不得给 100 或 90；全文没有这项时给 0。
+本条写明不单独赋分时，score 置空，grade 只写「符合」或「不符合」。
+先用本条招标原文写清 scoreRule：权重、优100/良90/中等80/一般70/差60 各档要写到什么程度。去掉最高最低分、评委人数这些计分过程不要要求投标人照抄。
+checks 最多 8 条，逐项对标。每条 item 是要核对的事项，bid 必须是投标书原句，result 只能是：已对上、部分写到、未见、与规范不符。
+excerpts 列出这些原句，必须逐字来自投标书全文，不要写招标书或知识库的句子。
+strengths 写好的地方，并点明对应哪条原文。revisions 写需要修改的地方，指出缺了哪一项、改哪一节。
+noncompliance 只写与给出的知识库条文或规范条文相反的做法，并照抄标准号和条号。没有检索到条文时，写「知识库未命中对应条文，本节不判规范冲突」，不要编造标准号。
+strategy 写针对本项目的高分写法。这是预审模拟分，不是评标委员会最终得分。
+返回 JSON 对象 {"items":[{"id","verdict","score","grade","scoreRule","checks","excerpts","strengths","revisions","noncompliance","strategy","reason","clauseKey"}]}。
+checks 项为 {"item","bid","result"}。clauseKey 必须照抄给出的「标准号 条号」。做法冲突和与规范不符必须有 clauseKey。"""
+
+
+def _judge_system_for(is_engineering: bool) -> str:
+    return _JUDGE_SYSTEM if is_engineering else _JUDGE_SYSTEM_SW
 
 
 def _norm(text: str) -> str:
@@ -220,6 +252,13 @@ def _cap_source(items: list[dict], start: int) -> list[dict]:
     return picked
 
 
+def _cap_project_tech(items: list[dict]) -> list[dict]:
+    """规则池条数少，但排在大量招标叶子后面时会被 108 条上限截掉。先留规则池。"""
+    pinned = [item for item in items if item.get("source") == "规则池"]
+    rest = [item for item in items if item.get("source") != "规则池"]
+    return _cap_source(pinned + rest, 0)
+
+
 def _as_list(value) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
@@ -274,20 +313,51 @@ def drawing_review_points(drawing_rules: list | None) -> list[dict]:
     return points
 
 
+def project_rule_points(project_rules: list | None) -> list[dict]:
+    """本项目规则清单优先于把图纸说明原文当成必须照抄。"""
+    points: list[dict] = []
+    for rule in project_rules or []:
+        if not isinstance(rule, dict) or rule.get("enabled") is False:
+            continue
+        title = str(rule.get("title") or "").strip()
+        requirement = str(rule.get("requirement") or "").strip()
+        if len(title) < 2 or len(requirement) < 4:
+            continue
+        point = _point(str(rule.get("source") or "规则"), title, requirement)
+        point["booklet"] = "商务标" if rule.get("source") in {"资格", "商务"} or str(rule.get("evidence") or "") in {"资格", "商务"} else "技术标"
+        if str(rule.get("evidence") or "") in {"资格", "商务"}:
+            point["booklet"] = "商务标"
+        point["mustWrite"] = requirement[:400]
+        point["checkType"] = str(rule.get("checkType") or "必须有")
+        point["parameters"] = str(rule.get("parameters") or "")[:200]
+        point["evidence"] = str(rule.get("evidence") or "")[:200]
+        point["basis"] = str(rule.get("basis") or "")[:120]
+        point["severityHint"] = str(rule.get("severity") or "")[:8]
+        points.append(point)
+    return points
+
+
 def build_points(
     score_rules: list | None,
     dimensions: list | None,
     scope: str = "full",
     tech_rules: list | None = None,
     drawing_rules: list | None = None,
+    project_rules: list | None = None,
 ) -> list[dict]:
-    """技术标用叶子规则和图纸规则。商务标仍用评分点。"""
+    """有本项目规则清单时用它代替招标叶子加图纸说明。商务标评分点仍保留。"""
     del dimensions
     business = [item for item in score_points(score_rules) if item.get("booklet") == "商务标"]
+    pooled = project_rule_points(project_rules)
     if scope == "business":
-        return _cap_source(business, 0)
-    picked = _cap_source(leaf_points(tech_rules), 0)
-    picked.extend(_cap_source(drawing_review_points(drawing_rules), len(picked)))
+        extra = [item for item in pooled if item.get("booklet") == "商务标"]
+        return _cap_source(extra + business, 0)
+    if project_rules:
+        tech = [item for item in pooled if item.get("booklet") == "技术标"]
+        picked = _cap_project_tech(tech)
+    else:
+        picked = _cap_source(leaf_points(tech_rules), 0)
+        picked.extend(_cap_source(drawing_review_points(drawing_rules), len(picked)))
     if scope == "tech":
         return picked
     picked.extend(_cap_source(business, len(picked)))
@@ -296,6 +366,24 @@ def build_points(
 
 def _clause_key(code: str, clause_no: str) -> str:
     return f"{(code or '').strip()} {(clause_no or '').strip()}".strip()
+
+
+def _topics_of(row) -> list[str]:
+    raw = row.get("topics") if isinstance(row, dict) else getattr(row, "topics_json", None)
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            raw = []
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw if str(item).strip()]
+
+
+def search_terms(tokens: list[str], limit: int = 4) -> list[str]:
+    """多词检索用的词，按长度取前几个，不再只留最长的一个。"""
+    ranked = sorted({token for token in tokens if len(token) >= 2}, key=len, reverse=True)
+    return ranked[:limit]
 
 
 def _as_hit(row) -> dict:
@@ -315,11 +403,14 @@ def _as_hit(row) -> dict:
         "specialty": specialty,
         "excerpt": text[:280],
         "key": _clause_key(code, clause_no),
+        "topics": _topics_of(row),
     }
 
 
 def select_clauses(rows: list, query: str, specialty: str, limit: int = MAX_CLAUSES) -> list[dict]:
-    """同专业加通用。通用项目不按专业截断。没有词命中则不返回，避免拿无关条文充数。"""
+    """同专业加通用。先按标准号，再按词重合。没有命中则不返回，避免拿无关条文充数。"""
+    from .standard_ingest import parse_standard_code
+
     pool = list(rows or [])
     if specialty and specialty != "通用":
         pool = [
@@ -328,13 +419,27 @@ def select_clauses(rows: list, query: str, specialty: str, limit: int = MAX_CLAU
             if (row.get("specialty") if isinstance(row, dict) else row.specialty) in {specialty, "通用"}
         ]
     tokens = _tokens(query)
-    if not tokens or not pool:
+    wanted = set()
+    for match in re.findall(r"(?:GB/T|GB|SL/T|SL|JGJ|JTG|CJJ)\s*\d+(?:\.\d+)?(?:-\d{4})?", query or "", flags=re.I):
+        code = parse_standard_code(match + "-2000") if "-" not in match else parse_standard_code(match)
+        # parse_standard_code expects a year; keep the raw compact form when the query already has one
+        compact = re.sub(r"\s+", "", match).upper().replace("—", "-")
+        wanted.add(compact)
+        if code:
+            wanted.add(code.upper())
+    if not tokens and not wanted:
         return []
     ranked: list[tuple[int, dict]] = []
     for row in pool:
         hit = _as_hit(row)
         blob = f"{hit['code']} {hit['clauseNo']} {hit['excerpt']}"
         score = sum(1 for token in tokens if token in blob)
+        for topic in hit.get("topics") or []:
+            if topic and topic in (query or ""):
+                score += 30
+        code = re.sub(r"\s+", "", str(hit.get("code") or "")).upper()
+        if code and code in wanted:
+            score += 100
         if score <= 0:
             continue
         ranked.append((score, hit))
@@ -351,15 +456,55 @@ def select_clauses(rows: list, query: str, specialty: str, limit: int = MAX_CLAU
     return out
 
 
+def _rows_for_terms(query, column, tokens: list[str], per_term: int = 80) -> list:
+    found = []
+    seen: set[str] = set()
+    for term in search_terms(tokens):
+        for row in query.filter(column.contains(term)).limit(per_term).all():
+            ident = str(getattr(row, "id", None) or id(row))
+            if ident in seen:
+                continue
+            seen.add(ident)
+            found.append(row)
+    return found
+
+
 def search_clauses(db: Session, query: str, specialty: str, limit: int = MAX_CLAUSES) -> list[dict]:
+    """先按标准号取平台库和企业库，再用多个词排序，不再只拿最长的一个词看前 80 条。"""
     tokens = _tokens(query)
-    if not tokens:
+    codes = []
+    for match in re.findall(r"(?:GB/T|GB|SL/T|SL|JGJ|JTG|CJJ)\s*\d+(?:\.\d+)?(?:-\d{4})?", query or "", flags=re.I):
+        codes.append(re.sub(r"\s+", "", match).upper().replace("—", "-"))
+    if not tokens and not codes:
         return []
-    token = max(tokens, key=len)
-    q = db.query(StandardClause).filter(StandardClause.text.contains(token))
-    if specialty and specialty != "通用":
-        q = q.filter(StandardClause.specialty.in_([specialty, "通用"]))
-    rows = q.limit(80).all()
+    rows: list = []
+    try:
+        from ..db import platform_session
+        from ..platform_models import StdClause
+
+        pdb = platform_session()
+        try:
+            q = pdb.query(StdClause)
+            if specialty and specialty != "通用":
+                q = q.filter(StdClause.specialty.in_([specialty, "通用"]))
+            if codes:
+                rows.extend(q.filter(StdClause.code.in_(codes)).limit(200).all())
+            else:
+                rows.extend(_rows_for_terms(q, StdClause.text, tokens))
+        finally:
+            pdb.close()
+    except Exception:
+        logger.exception("platform clause search failed")
+    try:
+        q = db.query(StandardClause)
+        if specialty and specialty != "通用":
+            q = q.filter(StandardClause.specialty.in_([specialty, "通用"]))
+        if codes:
+            rows.extend(q.filter(StandardClause.code.in_(codes)).limit(200).all())
+        else:
+            rows.extend(_rows_for_terms(q, StandardClause.text, tokens))
+    except Exception:
+        logger.exception("tenant clause search failed")
     return select_clauses(rows, query, specialty, limit)
 
 
@@ -679,16 +824,21 @@ def apply_judgments(packed: list[dict], raw_items: list, bid: str) -> tuple[list
                 quote = f"{cited.get('code') or ''} {cited.get('clauseNo') or ''} {cited.get('excerpt') or ''}".strip()
             elif item.get("mustWrite"):
                 quote = str(item.get("mustWrite") or "")
-            severity = "降档" if item["verdict"] == "参数不一致" else "扣分"
+            severity = str(item.get("severityHint") or "")
+            if severity not in {"废标", "降档", "扣分", "建议"}:
+                severity = "降档" if item["verdict"] == "参数不一致" else "扣分"
+            if item.get("checkType") == "建议":
+                severity = "建议"
             findings.append(
                 {
                     "engine": "standard_review",
                     "level": "L3",
                     "severity": severity,
-                    "location": f"{item.get('chapter') or '技术标'} / 规范对标",
+                    "location": f"{item.get('chapter') or item.get('evidence') or '技术标'} / 规范对标",
                     "excerpt": excerpt,
                     "rule": f"{item['name']}：{item['verdict']}",
                     "tenderQuote": quote[:400],
+                    "basis": str(item.get("evidence") or "")[:200],
                     "suggestion": item.get("suggestion") or item["reason"] or f"按检索到的规范条文核对「{item['name']}」。",
                     "confidence": 0.7,
                 }
@@ -747,7 +897,7 @@ def _parse_judge_items(raw: str) -> list:
     return found
 
 
-def _judge_batch(batch: list[dict], bid_text: str) -> list[dict]:
+def _judge_batch(batch: list[dict], bid_text: str, is_engineering: bool = True) -> list[dict]:
     rules = []
     for point in batch:
         knowledge = [
@@ -771,6 +921,8 @@ def _judge_batch(batch: list[dict], bid_text: str) -> list[dict]:
                 "axis": point.get("axis") or "",
                 "ruleScore": point.get("ruleScore") or "",
                 "grades": point.get("grades") or "优100、良90、中等80、一般70、差60",
+                "checkType": point.get("checkType") or "",
+                "evidence": point.get("evidence") or "",
                 "knowledge": [item for item in knowledge if item],
                 "clauses": [
                     {"clauseKey": clause["key"], "text": clause.get("excerpt") or ""}
@@ -781,7 +933,7 @@ def _judge_batch(batch: list[dict], bid_text: str) -> list[dict]:
     raw = chat_complete(
         model_id=get_default_model_id(),
         messages=[
-            {"role": "system", "content": _JUDGE_SYSTEM},
+            {"role": "system", "content": _judge_system_for(is_engineering)},
             {
                 "role": "user",
                 "content": json.dumps({"bid": bid_text or "", "rules": rules}, ensure_ascii=False),
@@ -789,39 +941,162 @@ def _judge_batch(batch: list[dict], bid_text: str) -> list[dict]:
         ],
         temperature=0.1,
         timeout=180,
-        max_tokens=7000,
+        max_tokens=min(16000, 3500 * max(len(batch), 1)),  # 每点预留 3500 token，批大了响应也要跟着长，但封顶避免拖慢单次请求
     )
     return _parse_judge_items(raw)
 
 
-def judge_points(packed: list[dict], bid: str) -> tuple[list[dict], list[dict]]:
+def judge_points(packed: list[dict], bid: str, is_engineering: bool = True) -> tuple[list[dict], list[dict]]:
     pending = [
         point
         for point in packed
         if point.get("clauses") or point.get("knowledge") or point.get("mustWrite") or point.get("parameters")
     ]
-    by_id: dict[str, list[dict]] = {}
+    jobs: list[tuple[str, list[dict]]] = []
     for chunk in bid_chunks(bid or ""):
         for offset in range(0, len(pending), BATCH):
-            batch = pending[offset : offset + BATCH]
-            try:
-                raw_items = _judge_batch(batch, chunk)
-            except (LlmError, json.JSONDecodeError, TypeError, ValueError):
-                logger.exception("standard review judge failed")
-                raw_items = []
-            got = {str(item.get("id") or "") for item in raw_items if isinstance(item, dict)}
-            for item in raw_items:
-                if isinstance(item, dict):
-                    by_id.setdefault(str(item.get("id") or ""), []).append(item)
-            for point in batch:
-                if point["id"] not in got:
-                    by_id.setdefault(point["id"], []).append(
-                        {"id": point["id"], "verdict": "已响应", "reason": "本次未能完成全文判断"}
-                    )
+            jobs.append((chunk, pending[offset : offset + BATCH]))
+
+    def work(chunk: str, batch: list[dict]) -> tuple[list[dict], list[dict]]:
+        try:
+            raw_items = _judge_batch(batch, chunk, is_engineering)
+        except (LlmError, json.JSONDecodeError, TypeError, ValueError):
+            logger.exception("standard review judge failed")
+            raw_items = []
+        return raw_items, batch
+
+    by_id: dict[str, list[dict]] = {}
+
+    def absorb(raw_items: list[dict], batch: list[dict]) -> None:
+        got = {str(item.get("id") or "") for item in raw_items if isinstance(item, dict)}
+        for item in raw_items:
+            if isinstance(item, dict):
+                by_id.setdefault(str(item.get("id") or ""), []).append(item)
+        for point in batch:
+            if point["id"] not in got:
+                by_id.setdefault(point["id"], []).append(
+                    {"id": point["id"], "verdict": "已响应", "reason": "本次未能完成全文判断"}
+                )
+
+    # 全文每一段都要判一遍，覆盖面不能少；但段与段互不依赖，可以并发跑，不用排队等上一段。
+    if len(jobs) <= 1:
+        for chunk, batch in jobs:
+            absorb(*work(chunk, batch))
+    else:
+        with ThreadPoolExecutor(max_workers=min(JUDGE_WORKERS, len(jobs))) as pool:
+            futures = [pool.submit(work, chunk, batch) for chunk, batch in jobs]
+            for future in as_completed(futures):
+                absorb(*future.result())
+
     merged = [merge_chunk_judgments(by_id.get(point["id"]) or []) for point in pending]
     for point, item in zip(pending, merged):
         item["id"] = point["id"]
     return apply_judgments(packed, merged, bid)
+
+
+_CATALOG_CODE = re.compile(r"^(?P<head>GB/T|GB|SL/T|SL)(?P<num>\d+(?:\.\d+)?)-(?P<year>(?:19|20)\d{2})$", re.I)
+
+
+def _norm_standard_code(code: str) -> str:
+    return re.sub(r"\s+", "", code or "").upper().replace("—", "-").replace("–", "-")
+
+
+def _standard_family(code: str) -> tuple[str, str] | None:
+    parsed = _CATALOG_CODE.match(_norm_standard_code(code))
+    if not parsed:
+        return None
+    head = parsed.group("head").upper()
+    if head in {"SL", "SL/T"}:
+        head = "SL"
+    return head, parsed.group("num")
+
+
+def newer_catalog_row(cited: str, rows: list):
+    """同一标准号有更新的现行版本时返回那一行。库里没有更新的不编造。"""
+    parsed = _CATALOG_CODE.match(_norm_standard_code(cited))
+    family = _standard_family(cited)
+    if not parsed or family is None:
+        return None
+    year = int(parsed.group("year"))
+    best = None
+    best_year = year
+    for row in rows or []:
+        code = row.get("code") if isinstance(row, dict) else getattr(row, "code", "")
+        status = row.get("status") if isinstance(row, dict) else getattr(row, "status", "")
+        other = _CATALOG_CODE.match(_norm_standard_code(str(code or "")))
+        if other is None or _standard_family(str(code or "")) != family:
+            continue
+        if str(status or "") == "废止":
+            continue
+        other_year = int(other.group("year"))
+        if other_year > best_year:
+            best = row
+            best_year = other_year
+    return best
+
+
+def cited_standard_findings(bid_text: str) -> list[dict]:
+    """标书引用了目录里已废止、被替代或年号旧于现行版本的标准号时记一条问题。库里没有的不编造。"""
+    codes = []
+    for match in re.findall(r"(?:GB/T|GB|SL/T|SL)\s*\d+(?:\.\d+)?-\d{4}", bid_text or "", flags=re.I):
+        code = _norm_standard_code(match)
+        if code not in codes:
+            codes.append(code)
+    if not codes:
+        return []
+    try:
+        from ..db import platform_session
+        from ..platform_models import StdCatalog
+
+        pdb = platform_session()
+        try:
+            rows = pdb.query(StdCatalog).all()
+        finally:
+            pdb.close()
+    except Exception:
+        logger.exception("cited standard lookup failed")
+        return []
+    by_code = {_norm_standard_code(row.code): row for row in rows}
+    findings = []
+    for code in codes:
+        row = by_code.get(code)
+        if row is not None and (row.status == "废止" or (row.replaced_by or "").strip()):
+            findings.append(
+                {
+                    "engine": "standard_review",
+                    "level": "L3",
+                    "severity": "扣分",
+                    "location": "技术标 / 引用规范",
+                    "excerpt": row.code,
+                    "rule": f"{row.code} 已被替代" if row.replaced_by else f"{row.code} 已废止",
+                    "tenderQuote": row.replaced_by or row.status,
+                    "basis": f"{row.code} {row.replaced_by or row.status}".strip(),
+                    "suggestion": f"请改用现行标准 {row.replaced_by or '目录中的替代标准'}。",
+                    "confidence": 0.8,
+                }
+            )
+            continue
+        newer = newer_catalog_row(code, rows)
+        if newer is None:
+            continue
+        newer_code = _norm_standard_code(newer.code if not isinstance(newer, dict) else newer.get("code"))
+        if not newer_code or newer_code == code:
+            continue
+        findings.append(
+            {
+                "engine": "standard_review",
+                "level": "L3",
+                "severity": "扣分",
+                "location": "技术标 / 引用规范",
+                "excerpt": code,
+                "rule": f"{code} 年号不符",
+                "tenderQuote": newer_code,
+                "basis": f"{code} 现行版本为 {newer_code}",
+                "suggestion": f"请改用现行标准 {newer_code}。",
+                "confidence": 0.75,
+            }
+        )
+    return findings
 
 
 def review(
@@ -834,7 +1109,10 @@ def review(
     scope: str = "full",
     tech_rules: list | None = None,
     drawing_rules: list | None = None,
+    project_rules: list | None = None,
+    category: str = "",
 ) -> dict:
+    is_engineering = is_engineering_category(category)
     specialty = project_specialty(dimensions)
     points = build_points(
         score_rules,
@@ -842,8 +1120,9 @@ def review(
         scope=scope,
         tech_rules=tech_rules,
         drawing_rules=drawing_rules,
+        project_rules=project_rules,
     )
-    reparse = scope != "business" and not tech_rules and not drawing_rules
+    reparse = scope != "business" and not tech_rules and not drawing_rules and not project_rules
     if not points:
         note = REPARSE_NOTE if reparse else "本项目没有抽出查核点"
         return {"specialty": specialty, "note": note, "points": [], "findings": []}
@@ -887,7 +1166,7 @@ def review(
     )
     findings: list[dict] = []
     if judgeable:
-        judged, findings = judge_points(packed, body)
+        judged, findings = judge_points(packed, body, is_engineering)
         judged_by_id = {item["id"]: item for item in judged}
         merged = []
         for point in packed:
@@ -899,6 +1178,7 @@ def review(
         packed_out = merged
     else:
         packed_out = [{key: value for key, value in point.items() if key != "window"} for point in packed]
+    findings.extend(cited_standard_findings(body))
 
     if reparse:
         note = REPARSE_NOTE

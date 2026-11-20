@@ -1,5 +1,6 @@
-"""工程标招标文件包：正文 / 答疑补遗 / 工程量清单 / 其他材料 / 施工图纸。
+"""招标文件包：正文 / 答疑补遗 / 其他材料；工程类另含工程量清单与施工图纸。
 
+软件服务类不识别图纸和工程量清单表格。文件名里的「图纸」「清单」不改变标书类别。
 解析时按类型分别抽文后合成一把尺子；图纸不整卷灌进模型。
 缺类在页面上固定展示「未能上传该类型文件」。
 """
@@ -61,6 +62,7 @@ KIND_SLOTS: list[dict[str, str]] = [
 
 KIND_KEYS = {s["key"] for s in KIND_SLOTS}
 KIND_LABELS = {s["key"]: s["label"] for s in KIND_SLOTS}
+ENGINEERING_ONLY_KINDS = {KIND_BOQ, KIND_DRAWING}
 
 DOC_EXTS = {".docx", ".pdf"}
 XLS_EXTS = {".xlsx", ".xls"}
@@ -84,50 +86,69 @@ _PARSE_ORDER = [KIND_MAIN, KIND_BOQ, KIND_QUOTE, KIND_DRAWING, KIND_ADDENDUM]
 _NS_SS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
 
-def normalize_kind(kind: str | None, filename: str = "") -> str:
+def _is_engineering(category: str | None) -> bool:
+    from .parse_schema import is_engineering_category
+
+    return is_engineering_category(category)
+
+
+def kind_slots_for(category: str | None = None) -> list[dict]:
+    if _is_engineering(category):
+        return KIND_SLOTS
+    return [spec for spec in KIND_SLOTS if spec["key"] not in ENGINEERING_ONLY_KINDS]
+
+
+def coerce_kind(kind: str, category: str | None = None) -> str:
+    if kind in ENGINEERING_ONLY_KINDS and not _is_engineering(category):
+        return KIND_QUOTE
+    return kind
+
+
+def normalize_kind(kind: str | None, filename: str = "", category: str | None = None) -> str:
     raw = (kind or "").strip().lower()
     if raw in KIND_KEYS:
-        return raw
-    return guess_kind(filename)
+        return coerce_kind(raw, category)
+    return guess_kind(filename, category)
 
 
-def guess_kind(filename: str) -> str:
+def guess_kind(filename: str, category: str | None = None) -> str:
     name = (filename or "").lower()
     if any(k in name for k in ("答疑", "补遗", "澄清", "addendum", "clarif")):
         return KIND_ADDENDUM
     if any(k in name for k in ("报价", "投标报价", "quote", "price")):
         return KIND_QUOTE
     if any(k in name for k in ("图纸", "图册", "施工图", "drawing", "dwg")):
-        return KIND_DRAWING
+        return coerce_kind(KIND_DRAWING, category)
     if any(k in name for k in ("清单", "工程量", "boq", "控制价", "工程量清单")):
-        return KIND_BOQ
+        return coerce_kind(KIND_BOQ, category)
     ext = os.path.splitext(filename or "")[1].lower()
     if ext in IMAGE_EXTS:
-        return KIND_DRAWING
+        return coerce_kind(KIND_DRAWING, category)
     if ext in XLS_EXTS:
-        return KIND_BOQ
+        return coerce_kind(KIND_BOQ, category)
     return KIND_MAIN
 
 
-def effective_kind(stored: str | None, filename: str) -> str:
+def effective_kind(stored: str | None, filename: str, category: str | None = None) -> str:
     """列表/解析分组：显式非正文类型优先；历史默认 main 时按文件名再猜一次。"""
     raw = (stored or "").strip().lower()
     if raw in KIND_KEYS and raw != KIND_MAIN:
-        return raw
-    guessed = guess_kind(filename)
+        return coerce_kind(raw, category)
+    guessed = guess_kind(filename, category)
     if raw == KIND_MAIN and guessed != KIND_MAIN:
         return guessed
-    return raw if raw in KIND_KEYS else guessed
+    resolved = raw if raw in KIND_KEYS else guessed
+    return coerce_kind(resolved, category)
 
 
-def package_slots(docs: Iterable[Any]) -> list[dict]:
+def package_slots(docs: Iterable[Any], category: str | None = None) -> list[dict]:
     by_kind: dict[str, list[dict]] = {k: [] for k in KIND_KEYS}
     for doc in docs:
         filename = getattr(doc, "filename", None) or (doc.get("filename") if isinstance(doc, dict) else "")
         stored = getattr(doc, "kind", None) if not isinstance(doc, dict) else doc.get("kind")
         doc_id = getattr(doc, "id", None) if not isinstance(doc, dict) else doc.get("id")
         size = getattr(doc, "size_bytes", None) if not isinstance(doc, dict) else doc.get("sizeBytes") or doc.get("size_bytes")
-        kind = effective_kind(stored, filename or "")
+        kind = effective_kind(stored, filename or "", category)
         by_kind.setdefault(kind, []).append(
             {
                 "id": doc_id,
@@ -137,7 +158,7 @@ def package_slots(docs: Iterable[Any]) -> list[dict]:
             }
         )
     slots: list[dict] = []
-    for spec in KIND_SLOTS:
+    for spec in kind_slots_for(category):
         files = by_kind.get(spec["key"]) or []
         uploaded = bool(files)
         slots.append(
@@ -170,6 +191,27 @@ KIND_JUMP = {
     KIND_QUOTE: "quantity",
     KIND_DRAWING: "quantity",
 }
+
+
+def engineering_package_warnings(parts: list[dict], drawing_intel_failed: bool = False, drawing_pack: dict | None = None) -> list[str]:
+    """工程类招标包缺件提示：没有工程量清单时技术标的工程量逻辑核对会落空，图纸抽不出时图面规则缺失。
+
+    只提示、不让解析失败。软件服务类不调用。
+    """
+    warnings: list[str] = []
+    boq_parts = [p for p in parts if p.get("kind") == KIND_BOQ]
+    drawing_parts = [p for p in parts if p.get("kind") == KIND_DRAWING]
+    if not boq_parts:
+        warnings.append("招标包里没有工程量清单，技术标预审的工程量逻辑核对会无法比对，建议补传清单（Excel 或 PDF）")
+    elif not any(p.get("boqItems") for p in boq_parts):
+        names = "、".join(p.get("filename") or "未命名" for p in boq_parts)
+        warnings.append(f"工程量清单（{names}）没有识别出清单条目，请确认是可编辑的 Excel 或带文字层的 PDF")
+    if not drawing_parts:
+        warnings.append("招标包里没有施工图纸，图面相关的评审规则不会生成")
+    elif drawing_intel_failed or not ((drawing_pack or {}).get("rules")):
+        note = str((drawing_pack or {}).get("note") or "").strip()
+        warnings.append("图纸已上传但没有抽出评审规则" + (f"：{note}" if note else "，可能是扫描件或格式不支持"))
+    return warnings
 
 
 def attach_extracts(slots: list[dict], parts: list[dict], max_chars: int = 6000) -> list[dict]:
@@ -647,24 +689,29 @@ def extract_image_text(path: str) -> tuple[str, str]:
     return (text or "").strip(), status
 
 
-def extract_file_text(path: str, *, kind: str = KIND_MAIN, filename: str = "") -> str:
-    return str(extract_file_bundle(path, kind=kind, filename=filename).get("text") or "")
+def extract_file_text(path: str, *, kind: str = KIND_MAIN, filename: str = "", category: str | None = None) -> str:
+    return str(extract_file_bundle(path, kind=kind, filename=filename, category=category).get("text") or "")
 
 
-def extract_file_bundle(path: str, *, kind: str = KIND_MAIN, filename: str = "") -> dict:
-    """抽文并带统计。压缩包解包；.doc/.xls 尝试转换。"""
+def extract_file_bundle(path: str, *, kind: str = KIND_MAIN, filename: str = "", category: str | None = None) -> dict:
+    """抽文并带统计。压缩包解包；.doc/.xls 尝试转换。产品标不抽出工程量清单行。"""
     stats: dict = {"ocrPages": 0, "unpackedFiles": 0, "pages": 0, "error": ""}
-    text, extra = _extract_file_inner(path, kind=kind, filename=filename, stats=stats)
+    text, extra = _extract_file_inner(path, kind=kind, filename=filename, stats=stats, category=category)
     cap = _TEXT_CAPS.get(kind, 80_000)
+    boq_items = extra.get("boqItems") or []
+    if not _is_engineering(category):
+        boq_items = []
     return {
         "text": (text or "")[:cap],
         "stats": stats,
-        "boqItems": extra.get("boqItems") or [],
+        "boqItems": boq_items,
         "error": stats.get("error") or "",
     }
 
 
-def _extract_file_inner(path: str, *, kind: str, filename: str, stats: dict) -> tuple[str, dict]:
+def _extract_file_inner(
+    path: str, *, kind: str, filename: str, stats: dict, category: str | None = None
+) -> tuple[str, dict]:
     extra: dict = {"boqItems": []}
     ext = os.path.splitext((filename or path) or "")[1].lower()
     cap = _TEXT_CAPS.get(kind, 80_000)
@@ -674,7 +721,9 @@ def _extract_file_inner(path: str, *, kind: str, filename: str, stats: dict) -> 
 
             with as_xlsx(path) as xlsx_path:
                 text = extract_xlsx_text(xlsx_path, max_chars=cap)
-                extra["boqItems"] = extract_boq_items(xlsx_path, filename=(filename or "sheet.xlsx"))
+                extra["boqItems"] = (
+                    extract_boq_items(xlsx_path, filename=(filename or "sheet.xlsx")) if kind == KIND_BOQ else []
+                )
                 return text, extra
         except Exception as exc:  # noqa: BLE001
             stats["error"] = f"旧版 .xls 转换失败（{exc}）。请另存为 .xlsx 后重新上传。"
@@ -687,7 +736,7 @@ def _extract_file_inner(path: str, *, kind: str, filename: str, stats: dict) -> 
     if ext in TEXT_EXTS:
         return extract_plain_text(path, ext=ext, max_chars=cap), extra
     if ext in ARCHIVE_EXTS:
-        return _extract_archive(path, kind=kind, filename=filename, stats=stats)
+        return _extract_archive(path, kind=kind, filename=filename, stats=stats, category=category)
     if ext == ".ppt":
         stats["error"] = f"已上传「{filename or os.path.basename(path)}」，暂不支持旧版 .ppt，请另存为 .pptx。"
         return "", extra
@@ -723,7 +772,9 @@ def _extract_file_inner(path: str, *, kind: str, filename: str, stats: dict) -> 
     return "", extra
 
 
-def _extract_archive(path: str, *, kind: str, filename: str, stats: dict) -> tuple[str, dict]:
+def _extract_archive(
+    path: str, *, kind: str, filename: str, stats: dict, category: str | None = None
+) -> tuple[str, dict]:
     extra: dict = {"boqItems": []}
     ext = os.path.splitext((filename or path) or "")[1].lower()
     out_dir = ""
@@ -740,10 +791,11 @@ def _extract_archive(path: str, *, kind: str, filename: str, stats: dict) -> tup
         chunks: list[str] = []
         boq: list[dict] = []
         for member_path, member_name in members:
-            inner_kind = guess_kind(member_name) if guess_kind(member_name) != KIND_MAIN else kind
+            guessed = guess_kind(member_name, category)
+            inner_kind = guessed if guessed != KIND_MAIN else kind
             inner_stats: dict = {"ocrPages": 0, "unpackedFiles": 0, "pages": 0, "error": ""}
             text, inner_extra = _extract_file_inner(
-                member_path, kind=inner_kind, filename=member_name, stats=inner_stats
+                member_path, kind=inner_kind, filename=member_name, stats=inner_stats, category=category
             )
             stats["ocrPages"] += int(inner_stats.get("ocrPages") or 0)
             stats["pages"] += int(inner_stats.get("pages") or 0)
@@ -920,15 +972,19 @@ def extra_fills_from_package(
     project_type: str = "",
     category: str = "",
 ) -> dict:
-    """工程量清单按 Excel 列抽出；图纸文件名写入固定字段；工程类另抽专用合同条款。"""
+    """工程量清单按 Excel 列抽出；图纸文件名写入固定字段；工程标另抽专用合同条款。产品标不写清单/图纸。"""
+    from .parse_schema import is_engineering_category
+
+    engineering = is_engineering_category(category)
     items: list[dict[str, str]] = []
-    for part in parts:
-        if part.get("kind") != KIND_BOQ:
-            continue
-        for row in part.get("boqItems") or []:
-            if isinstance(row, dict):
-                items.append(row)
-    qb = _boq_fields_from_items(items)
+    if engineering:
+        for part in parts:
+            if part.get("kind") != KIND_BOQ:
+                continue
+            for row in part.get("boqItems") or []:
+                if isinstance(row, dict):
+                    items.append(row)
+    qb = _boq_fields_from_items(items) if engineering else {}
 
     other_text = "\n\n".join(
         f"【{p.get('filename') or '未命名'}】\n{(p.get('text') or '').strip()}"
@@ -940,19 +996,19 @@ def extra_fills_from_package(
     )
     other_fills = extract_other_eval_fills(other_text) if other_text else {}
 
-    drawing_names = notes.get(KIND_DRAWING) or []
+    drawing_names = notes.get(KIND_DRAWING) or [] if engineering else []
     qd: dict[str, str] = {}
     if drawing_names:
         qd["图纸文件"] = "；".join(drawing_names)
 
     fills: dict = {}
-    if any(qb.values()):
+    if engineering and any(qb.values()):
         fills["qty-boq"] = {"qb-1": qb}
     if other_fills:
         fills["misc-other"] = other_fills
-    if qd:
+    if engineering and qd:
         fills["qty-drawing"] = {"qd-1": qd}
-    if category == "工程类":
+    if engineering:
         corpus = compose_contract_corpus(parts)
         specialty = guess_engineering_specialty(project_name, project_type, corpus)
         label = _SPECIALTY_LABELS.get(specialty, "综合/未明确")
@@ -1001,6 +1057,8 @@ _BOQ_NAME_ALIASES = ("项目名称", "工程项目名称")
 _BOQ_UNIT_ALIASES = ("计量单位", "单位")
 _BOQ_QTY_ALIASES = ("工程数量", "工程量")
 _BOQ_REMARK_ALIASES = ("备注",)
+_BOQ_CODE_ALIASES = ("项目编码", "编码", "序号")
+_BOQ_FEATURE_ALIASES = ("项目特征", "项目特征描述")
 _BOQ_NOISE_EXACT = {
     "序号",
     "项目名称",
@@ -1032,7 +1090,7 @@ def extract_boq_items(path: str, filename: str = "") -> list[dict[str, str]]:
     if ext != ".xlsx":
         return []
     items: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str, str]] = set()
+    seen: set[tuple[str, str, str, str, str]] = set()
     for _sheet, rows in _iter_xlsx_grids(path):
         colmap: dict[str, int] | None = None
         for row_i in sorted(rows):
@@ -1048,12 +1106,14 @@ def extract_boq_items(path: str, filename: str = "") -> list[dict[str, str]]:
                 "unit": _one_line(cells.get(colmap["unit"], "")),
                 "qty": _one_line(cells.get(colmap["qty"], "")),
                 "remark": _one_line(cells.get(colmap.get("remark", -1), "")),
+                "code": _one_line(cells.get(colmap.get("code", -1), "")),
+                "feature": _one_line(cells.get(colmap.get("feature", -1), "")),
             }
             if _is_boq_noise_name(item["name"]):
                 continue
             if not item["name"]:
                 continue
-            key = (item["name"], item["unit"], item["qty"], item["remark"])
+            key = (item["name"], item["unit"], item["qty"], item["remark"], item["code"])
             if key in seen:
                 continue
             seen.add(key)
@@ -1071,6 +1131,12 @@ def _boq_header_map(cells: dict[int, str]) -> dict[str, int] | None:
     remark_col = _pick_header_col(cells, _BOQ_REMARK_ALIASES)
     if remark_col is not None:
         mapping["remark"] = remark_col
+    code_col = _pick_header_col(cells, _BOQ_CODE_ALIASES)
+    if code_col is not None:
+        mapping["code"] = code_col
+    feature_col = _pick_header_col(cells, _BOQ_FEATURE_ALIASES)
+    if feature_col is not None:
+        mapping["feature"] = feature_col
     return mapping
 
 
