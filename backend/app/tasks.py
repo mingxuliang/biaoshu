@@ -972,16 +972,24 @@ def run_outline_generate_task(job_id: str) -> None:
         draft.chapter_contents_json = contents
         flag_modified(draft, "chapter_contents_json")
         refs: dict = {}
-        if draft.selected_product_library_id:
+        if draft.selected_product_library_id and doc_kind != "business":
+            match_stats: dict = {}
             try:
                 from .engines.product_match import apply_outline_product_match
 
                 draft.knowledge_refs_json = {}
-                apply_outline_product_match(db, draft, keep_manual=False)
+                apply_outline_product_match(db, draft, keep_manual=False, stats=match_stats)
                 refs = dict(draft.knowledge_refs_json or {})
-            except Exception:  # noqa: BLE001 —— 产品匹配失败不阻断目录
+            except Exception as exc:  # noqa: BLE001 —— 产品匹配失败不阻断目录，但要让用户看到
                 logger.exception("outline product match failed")
                 refs = {}
+                match_stats["failed"] = True
+                match_stats["error"] = str(exc)[:200]
+            if match_stats:
+                match_stats["unmatched"] = list(match_stats.get("unmatched") or [])[:80]
+                coverage_report["productMatch"] = match_stats
+        elif draft.selected_product_library_id:
+            refs = {}
         draft.knowledge_refs_json = refs
         flag_modified(draft, "knowledge_refs_json")
         db.commit()
@@ -1295,10 +1303,22 @@ def _generate_one_chapter(
 
     query = f"{node.get('title', '')} {node.get('idea', '')}".strip()
     knowledge_snippets = _knowledge_snippets_for_chapter(db, draft, chapter_id, query)
+    # 目录阶段匹配失败的章节没有匹配记录：这里单章补匹配一次，仍失败就当作没匹配过，不写「能力缺口」
+    if (
+        kind == "tech"
+        and not has_kids
+        and draft.selected_product_library_id
+        and chapter_id not in (draft.knowledge_refs_json or {})
+    ):
+        from .engines.product_match import match_single_chapter
+
+        match_single_chapter(db, draft_id, chapter_id)
     library_name, product_rows = _product_features_for_chapter(db, draft, chapter_id, query)
     qual_rows = _qualifications_for_chapter(db, draft, chapter_id, query)
     product_payload = None
-    if product_rows or draft.selected_product_library_id:
+    if product_rows or (
+        draft.selected_product_library_id and chapter_id in (draft.knowledge_refs_json or {})
+    ):
         picked: set[str] = set()
         for ref in _refs_of(_chapter_refs(draft, chapter_id), "product"):
             picked.update(x for x in (ref.get("chapters") or []) if x)
@@ -1323,6 +1343,7 @@ def _generate_one_chapter(
                     "params": feat.params or "",
                     "intro": feat.intro or "",
                     "bidCopy": feat.bid_copy or "",
+                    "status": feat.status or "待审核",
                     "images": _feat_images(feat),
                 }
             )
@@ -1391,6 +1412,30 @@ def _generate_one_chapter(
     source_label = "自行撰写"
     evidence_ids: list[str] = []
     placed_new: dict[str, dict] = {}
+    # 软件服务标技术章：匹配到产品功能的需求小节，正文直接用功能库原文，原图按位置插入，
+    # 响应情况由系统写；部分满足只让模型补缺口；库判为无则回到下面的智能体写法。
+    direct = None
+    if (
+        kind == "tech"
+        and not has_kids
+        and product_rows
+        and (draft.doc_kind or "tech") != "business"
+        and node.get("part") in (None, "", "tech")
+    ):
+        try:
+            direct = _standard_chapter(
+                db, draft, node, outline, chapter_id, product_rows, knowledge_snippets, write
+            )
+        except Exception:  # noqa: BLE001 —— 直出失败回到智能体写法，不让这一章空着
+            logger.exception("product direct chapter failed chapter=%s", chapter_id)
+            direct = None
+    if direct is not None:
+        content, source_label, evidence_ids, placed_new = direct
+        # 直出时原图已按位置换好；部分满足补缺口那段若带了图占位，一并清掉
+        content = _PLACEHOLDER_RE.sub("", content)
+        binding.persist_chapter(chapter_id, content, status="已完成", ai_round=True)
+        _record_chapter_answer(db, draft_id, node, content, source_label, evidence_ids, placed_new)
+        return "tech"
     # 产品功能和知识库只作为写作材料放进提示词，不再用标品拼装结果替换整章。
     content = write()
     kind = e_writer.chapter_kind(

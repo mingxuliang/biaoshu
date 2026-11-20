@@ -24,6 +24,9 @@ _MATCH_SYSTEM = """你是投标技术方案匹配专家。任务：把「技术�
 """
 
 _DISABLED_STATUS = {"已停用"}
+CATALOG_SNIPPET_CHARS = 90  # 清单里每个功能给模型看的摘要字数
+REQUIREMENT_CHARS = 400  # 每个待匹配章节给模型看的需求字数
+CATALOG_CHUNK_LINES = 120  # 功能清单超过这个行数就按一级功能分块，不再整库重发
 
 
 def _usable(status: str | None) -> bool:
@@ -56,7 +59,7 @@ def catalog_library_features(db: Session, library_id: str) -> tuple[str, set[str
         key = _norm_name(fname)
         if key and key not in name_to_id:
             name_to_id[key] = fid
-        snippet = re.sub(r"\s+", " ", intro).strip()[:36]
+        snippet = re.sub(r"\s+", " ", intro).strip()[:CATALOG_SNIPPET_CHARS]
         lines.append(f"{fid}\t{fname}\t{level}" + (f"\t{snippet}" if snippet else ""))
 
     for feat in roots:
@@ -74,12 +77,16 @@ def tech_chapters_for_match(outline: list[dict], chapter_ids: list[str] | None =
     from .e_writer import chapter_kind, is_original_form_title
 
     wanted = set(chapter_ids or [])
+    # 整份目录匹配时只管叶子章：批量撰写只写叶子，父节点（如 4.1 小节）没有正文可挂功能
+    parents = {str(n.get("parentId")) for n in outline if isinstance(n, dict) and n.get("parentId")}
     out: list[dict] = []
     for n in outline:
         if not isinstance(n, dict):
             continue
         cid = str(n.get("id") or "")
         if wanted and cid not in wanted:
+            continue
+        if not wanted and cid in parents:
             continue
         title = str(n.get("title") or "")
         kind = chapter_kind(
@@ -88,7 +95,7 @@ def tech_chapters_for_match(outline: list[dict], chapter_ids: list[str] | None =
         if kind != "tech" or is_original_form_title(title):
             continue
         req = (str(n.get("requirement") or "") or str(n.get("idea") or "")).strip()
-        req = re.sub(r"\s+", " ", req)[:180]
+        req = re.sub(r"\s+", " ", req)[:REQUIREMENT_CHARS]
         out.append(
             {
                 "chapterId": cid,
@@ -147,8 +154,12 @@ def match_chapters_to_features(
     valid_ids: set[str],
     model_id: str | None,
     name_to_id: dict[str, str] | None = None,
+    stats: dict | None = None,
 ) -> dict[str, list[str]]:
-    """chapterId -> featureIds。模型失败时抛错。"""
+    """chapterId -> featureIds。全部批次都失败时抛错。
+
+    功能清单超过 CATALOG_CHUNK_LINES 行时按一级功能分块，每块各问一遍再合并，不整库重发。
+    stats 若传入，会写入 failedChapterIds：所属批次调用失败、没有得到结果的章节。"""
     if not chapters or not catalog.strip() or not valid_ids:
         return {}
     names = name_to_id or {}
@@ -156,8 +167,11 @@ def match_chapters_to_features(
     by_num = {str(c.get("num") or "").strip(): str(c["chapterId"]) for c in chapters if c.get("num")}
     by_title = {_norm_name(str(c.get("title") or "")): str(c["chapterId"]) for c in chapters if c.get("title")}
     out: dict[str, list[str]] = {}
+    answered: set[str] = set()
+    failed: set[str] = set()
     batch_size = 20
     rows = list(chapters)
+    chunks = _catalog_chunks(catalog)
     llm_ok = False
     for i in range(0, len(rows), batch_size):
         batch = rows[i : i + batch_size]
@@ -165,53 +179,79 @@ def match_chapters_to_features(
             f"{c['chapterId']}\t{c.get('num') or ''}\t{c.get('title') or ''}\t{c.get('requirement') or ''}"
             for c in batch
         )
-        user = (
-            "产品功能清单（id\\t名称\\t层级或上级\\t摘要）：\n"
-            f"{catalog}\n\n"
-            "待匹配的技术标章节（chapterId 必须原样写回；编号\\t标题\\t需求摘要）：\n"
-            f"{chap_txt}\n"
-        )
-        try:
-            text = chat_complete(
-                model_id=model_id,
-                messages=[
-                    {"role": "system", "content": _MATCH_SYSTEM},
-                    {"role": "user", "content": user},
-                ],
-                temperature=0.1,
-                timeout=180,
-                max_tokens=4096,
+        batch_ids = {str(c.get("chapterId") or "") for c in batch}
+        for chunk in chunks:
+            user = (
+                "产品功能清单（id\\t名称\\t层级或上级\\t摘要）：\n"
+                f"{chunk}\n\n"
+                "待匹配的技术标章节（chapterId 必须原样写回；编号\\t标题\\t需求摘要）：\n"
+                f"{chap_txt}\n"
             )
-            llm_ok = True
-        except LlmError:
-            logger.exception("llm product-outline match failed")
-            continue
-        parsed = _parse_items(text)
-        if not parsed:
-            logger.warning("product-outline match returned unparseable JSON: %s", (text or "")[:400])
-        for item in parsed:
-            cid = _resolve_chapter_id(
-                str(item.get("chapterId") or item.get("id") or ""),
-                by_id,
-                by_num,
-                by_title,
-            )
-            if not cid:
+            try:
+                text = chat_complete(
+                    model_id=model_id,
+                    messages=[
+                        {"role": "system", "content": _MATCH_SYSTEM},
+                        {"role": "user", "content": user},
+                    ],
+                    temperature=0.1,
+                    timeout=180,
+                    max_tokens=4096,
+                )
+                llm_ok = True
+            except LlmError:
+                logger.exception("llm product-outline match failed")
+                failed.update(batch_ids)
                 continue
-            raw_ids = item.get("featureIds") or item.get("features") or item.get("feature_ids") or []
-            if not isinstance(raw_ids, list):
+            parsed = _parse_items(text)
+            if not parsed:
+                logger.warning("product-outline match returned unparseable JSON: %s", (text or "")[:400])
+                failed.update(batch_ids)
                 continue
-            ids: list[str] = []
-            seen: set[str] = set()
-            for fid in raw_ids:
-                sid = _resolve_feature_id(fid, valid_ids, names)
-                if sid and sid not in seen:
-                    seen.add(sid)
-                    ids.append(sid)
-            out[cid] = ids
+            for item in parsed:
+                cid = _resolve_chapter_id(
+                    str(item.get("chapterId") or item.get("id") or ""),
+                    by_id,
+                    by_num,
+                    by_title,
+                )
+                if not cid:
+                    continue
+                raw_ids = item.get("featureIds") or item.get("features") or item.get("feature_ids") or []
+                if not isinstance(raw_ids, list):
+                    continue
+                answered.add(cid)
+                ids = out.setdefault(cid, [])
+                for fid in raw_ids:
+                    sid = _resolve_feature_id(fid, valid_ids, names)
+                    if sid and sid not in ids:
+                        ids.append(sid)
     if not llm_ok:
         raise LlmError("产品功能匹配失败：大模型不可用")
+    if stats is not None:
+        stats["failedChapterIds"] = sorted(failed - answered)
     return out
+
+
+def _catalog_chunks(catalog: str) -> list[str]:
+    """按一级功能切块：同一个一级功能和它的下级始终在同一块里。"""
+    lines = [ln for ln in (catalog or "").split("\n") if ln.strip()]
+    if len(lines) <= CATALOG_CHUNK_LINES:
+        return ["\n".join(lines)]
+    groups: list[list[str]] = []
+    for ln in lines:
+        parts = ln.split("\t")
+        is_root = len(parts) >= 3 and parts[2] == "一级"
+        if is_root or not groups:
+            groups.append([ln])
+        else:
+            groups[-1].append(ln)
+    chunks: list[list[str]] = [[]]
+    for group in groups:
+        if chunks[-1] and len(chunks[-1]) + len(group) > CATALOG_CHUNK_LINES:
+            chunks.append([])
+        chunks[-1].extend(group)
+    return ["\n".join(c) for c in chunks if c]
 
 
 def merge_product_refs(
@@ -257,8 +297,12 @@ def apply_outline_product_match(
     *,
     chapter_ids: list[str] | None = None,
     keep_manual: bool = True,
+    stats: dict | None = None,
 ) -> int:
-    """匹配并写回 draft.knowledge_refs_json。返回绑定了功能点的章节数。"""
+    """匹配并写回 draft.knowledge_refs_json。返回绑定了功能点的章节数。
+
+    stats 若传入会写入 productMatch 覆盖信息：total、hit、unmatched（未命中小节标题）、
+    failedChapterIds（调用失败的章节，不会被记成「已匹配、没有功能」）、pendingFeatures（用到的待审核功能数）。"""
     library_id = draft.selected_product_library_id
     if not library_id:
         return 0
@@ -269,19 +313,40 @@ def apply_outline_product_match(
         raise RuntimeError("所选产品功能库没有可匹配的功能点（已停用除外），请先在产品功能库抽取功能")
     if not chapters:
         raise RuntimeError("当前目录没有可匹配的技术标章节")
+    inner: dict = {}
     matches = match_chapters_to_features(
-        chapters, catalog, valid_ids, draft.model_id, name_to_id=name_to_id
+        chapters, catalog, valid_ids, draft.model_id, name_to_id=name_to_id, stats=inner
     )
-    if not matches and not chapter_ids:
+    failed_ids = set(inner.get("failedChapterIds") or [])
+    if not matches and not chapter_ids and not failed_ids:
         return 0
-    if chapter_ids:
-        for cid in chapter_ids:
+    wanted = list(chapter_ids) if chapter_ids else [
+        str(ch.get("chapterId") or "") for ch in chapters if ch.get("chapterId")
+    ]
+    for cid in wanted:
+        if cid not in failed_ids:
             matches.setdefault(cid, [])
-    else:
-        for ch in chapters:
-            cid = str(ch.get("chapterId") or "")
-            if cid:
-                matches.setdefault(cid, [])
+    if stats is not None:
+        titles = {str(ch.get("chapterId") or ""): str(ch.get("title") or "") for ch in chapters}
+        used = {fid for ids in matches.values() for fid in ids}
+        pending = (
+            db.query(ProductFeature)
+            .filter(ProductFeature.id.in_(used), ProductFeature.status == "待审核")
+            .count()
+            if used
+            else 0
+        )
+        stats.update(
+            {
+                "libraryId": library_id,
+                "libraryName": lib_name,
+                "total": len(wanted),
+                "hit": sum(1 for cid in wanted if matches.get(cid)),
+                "unmatched": [titles.get(cid, cid) for cid in wanted if cid not in failed_ids and not matches.get(cid)],
+                "failedChapterIds": sorted(failed_ids),
+                "pendingFeatures": pending,
+            }
+        )
     refs = merge_product_refs(
         draft.knowledge_refs_json or {},
         matches,
@@ -300,3 +365,47 @@ def apply_outline_product_match(
         hit,
     )
     return hit
+
+
+def match_single_chapter(db: Session, draft_id: str, chapter_id: str) -> bool:
+    """生成某章时发现它从没匹配过（目录阶段匹配失败），单独补匹配一次并写回。
+
+    匹配本身不持锁；写回时锁草稿行再合并，批量并发生成时互不覆盖。失败只记日志，返回 False。"""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    draft = db.get(WriterDraft, draft_id)
+    if not draft or not draft.selected_product_library_id:
+        return False
+    library_id = draft.selected_product_library_id
+    try:
+        chapters = tech_chapters_for_match(list(draft.outline_json or []), [chapter_id])
+        catalog, valid_ids, name_to_id, lib_name = catalog_library_features(db, library_id)
+        if not chapters or not valid_ids:
+            return False
+        inner: dict = {}
+        matches = match_chapters_to_features(
+            chapters, catalog, valid_ids, draft.model_id, name_to_id=name_to_id, stats=inner
+        )
+        if chapter_id in (inner.get("failedChapterIds") or []):
+            return False
+        matches.setdefault(chapter_id, [])
+        row = (
+            db.query(WriterDraft)
+            .filter(WriterDraft.id == draft_id)
+            .with_for_update()
+            .populate_existing()
+            .first()
+        )
+        if row is None:
+            return False
+        row.knowledge_refs_json = merge_product_refs(
+            row.knowledge_refs_json or {}, {chapter_id: matches[chapter_id]}, library_id, lib_name, keep_manual=True
+        )
+        flag_modified(row, "knowledge_refs_json")
+        db.commit()
+        db.refresh(draft)
+        return True
+    except Exception:  # noqa: BLE001 —— 单章补匹配失败不阻断写章
+        logger.exception("single chapter product match failed chapter=%s", chapter_id)
+        db.rollback()
+        return False

@@ -983,6 +983,15 @@ export interface OutlineCoverage {
   placementNotes?: string[];
   formMapped?: string[];
   noKnowledgeSource?: boolean;
+  productMatch?: {
+    total?: number;
+    hit?: number;
+    unmatched?: string[];
+    failedChapterIds?: string[];
+    pendingFeatures?: number;
+    failed?: boolean;
+    error?: string;
+  };
   fallbackOutline?: boolean;
   ledger?: { total: number; cited: number; mandatory: number; uncited: string[] };
   engineering?: boolean;

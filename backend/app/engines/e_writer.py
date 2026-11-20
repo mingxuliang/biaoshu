@@ -2970,13 +2970,18 @@ def _build_chapter_context(
     if product_library_name or product_features is not None:
         lines.append("")
         if product_features:
+            unreviewed = sum(1 for f in product_features if (f.get("status") or "已入库") == "待审核")
+            label = "本公司产品能力" if unreviewed else "本公司已审核产品能力"
             lines.append(
-                f"本公司已审核产品能力（来自产品库「{product_library_name or '未命名'}」，"
+                f"{label}（来自产品库「{product_library_name or '未命名'}」，"
                 f"共 {len(product_features)} 项，必须通读全部参数与应标原文，禁止编造未列出的能力）："
             )
+            if unreviewed:
+                lines.append(f"其中 {unreviewed} 项标注「待审核」，内容来自过往技术标抽取、尚未人工审核，只按原文表述，不要加码。")
             for i, feat in enumerate(product_features, start=1):
                 lines.append("")
-                lines.append(f"{i}. 【{feat.get('name', '')}】模块：{feat.get('module') or '未分模块'}")
+                review = "（待审核）" if (feat.get("status") or "已入库") == "待审核" else ""
+                lines.append(f"{i}. 【{feat.get('name', '')}】{review}模块：{feat.get('module') or '未分模块'}")
                 params = (feat.get("params") or "").strip()
                 lines.append(f"参数：{params or '无'}")
                 copy = (feat.get("bidCopy") or feat.get("intro") or "").strip()

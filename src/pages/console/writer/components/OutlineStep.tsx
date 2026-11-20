@@ -225,6 +225,16 @@ export default function OutlineStep({
       if (coverage?.fallbackOutline) {
         notes.push("智能体生成目录时出现异常，本次目录按招标书标题树生成，建议检查后重新生成");
       }
+      const pm = coverage?.productMatch;
+      if (pm?.failed) {
+        notes.push("产品功能匹配没有跑成，写到对应章节时会再单独匹配一次，也可点「自动匹配产品功能库」重试");
+      } else if (pm?.total) {
+        notes.push(
+          `产品功能匹配 ${pm.hit ?? 0}/${pm.total} 章命中` +
+            (pm.unmatched?.length ? `，${pm.unmatched.length} 章库里没有对应功能` : "") +
+            (pm.pendingFeatures ? `，用到 ${pm.pendingFeatures} 个待审核功能` : ""),
+        );
+      }
       if (coverage?.noKnowledgeSource) {
         notes.push("本草稿没有选择产品库或知识库，技术章全部由模型自行撰写；软件服务标建议先选择产品库");
       }
