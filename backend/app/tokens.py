@@ -65,3 +65,28 @@ def bearer(authorization: str | None) -> str | None:
     if not authorization or not authorization.lower().startswith("bearer "):
         return None
     return authorization.split(" ", 1)[1].strip() or None
+
+
+def renewed_access_token(authorization: str | None) -> str | None:
+    """企业令牌进入寿命后半段时换发一张，过期、无效或刚签发的返回空。
+
+    后半段按当前配置有效期的一半算，并且不少于 12 小时（默认 24 小时的一半）。
+    有效期配得很短的令牌因此也会续上。只续企业令牌，平台后台令牌不在这里换。"""
+    raw = bearer(authorization)
+    if not raw:
+        return None
+    settings = get_settings()
+    try:
+        claims = jwt.decode(raw, settings.secret_key, algorithms=[ALGORITHM], audience=AUD_TENANT)
+    except jwt.PyJWTError:
+        return None
+    if not claims.get("sub") or not valid_tenant_id(claims.get("tid")):
+        return None
+    exp = float(claims.get("exp") or 0)
+    remaining = exp - time.time()
+    if remaining <= 0:
+        return None
+    window = max(int(settings.access_token_expire_minutes or 0), 60 * 24) * 60 / 2
+    if remaining >= window:
+        return None
+    return create_tenant_token(str(claims["sub"]), str(claims["tid"]), int(claims.get("ver") or 0))
